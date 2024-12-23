@@ -8,11 +8,16 @@ union U {
   long long *ll;
 } __attribute__((transparent_union));
 
+struct S {
+  int *p;
+};
+
 void escapingFunc0(BlockTy);
 void noescapeFunc0(id, __attribute__((noescape)) BlockTy);
 void noescapeFunc1(__attribute__((noescape)) int *);
 void noescapeFunc2(__attribute__((noescape)) id);
 void noescapeFunc3(__attribute__((noescape)) union U);
+void noescapeFunc4(__attribute__((noescape)) struct S s);
 
 // Block descriptors of non-escaping blocks don't need pointers to copy/dispose
 // helper functions.
