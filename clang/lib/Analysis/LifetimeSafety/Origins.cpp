@@ -29,14 +29,14 @@ class MissingOriginCollector
     : public RecursiveASTVisitor<MissingOriginCollector> {
 public:
   MissingOriginCollector(
-      const llvm::DenseMap<const clang::Expr *, OriginList *> &ExprToOriginList,
+      const llvm::DenseMap<const clang::Expr *, OriginNode *> &ExprToOriginNode,
       const OriginManager &OM, LifetimeSafetyStats &LSStats)
-      : ExprToOriginList(ExprToOriginList), OM(OM), LSStats(LSStats) {}
+      : ExprToOriginNode(ExprToOriginNode), OM(OM), LSStats(LSStats) {}
   bool VisitExpr(Expr *E) {
     if (!OM.hasOrigins(E))
       return true;
     // Check if we have an origin for this expression.
-    if (!ExprToOriginList.contains(E)) {
+    if (!ExprToOriginNode.contains(E)) {
       // No origin found: count this as missing origin.
       LSStats.ExprTypeToMissingOriginCount[E->getType().getTypePtr()]++;
       LSStats.ExprStmtClassToMissingOriginCount[std::string(
@@ -46,7 +46,7 @@ public:
   }
 
 private:
-  const llvm::DenseMap<const clang::Expr *, OriginList *> &ExprToOriginList;
+  const llvm::DenseMap<const clang::Expr *, OriginNode *> &ExprToOriginNode;
   const OriginManager &OM;
   LifetimeSafetyStats &LSStats;
 };
@@ -181,67 +181,74 @@ void OriginManager::initializeThisOrigins(const Decl *D) {
   // 'this' does not refer to the lambda object itself.
   if (const CXXRecordDecl *P = MD->getParent(); P && P->isLambda())
     return;
-  ThisOrigins = buildListForType(MD->getThisType(), MD);
+  ThisOrigins = buildNodeForType(MD->getThisType(), MD);
 }
 
-OriginList *OriginManager::createNode(const ValueDecl *D, QualType QT) {
+OriginNode *OriginManager::createNode(const ValueDecl *D, QualType QT) {
   OriginID NewID = getNextOriginID();
   AllOrigins.emplace_back(NewID, D, QT.getTypePtrOrNull());
-  return new (ListAllocator.Allocate<OriginList>()) OriginList(NewID);
+  return new (Allocator.Allocate<OriginNode>()) OriginNode(NewID);
 }
 
-OriginList *OriginManager::createNode(const Expr *E, QualType QT) {
+OriginNode *OriginManager::createNode(const Expr *E, QualType QT) {
   OriginID NewID = getNextOriginID();
   AllOrigins.emplace_back(NewID, E, QT.getTypePtrOrNull());
-  return new (ListAllocator.Allocate<OriginList>()) OriginList(NewID);
+  return new (Allocator.Allocate<OriginNode>()) OriginNode(NewID);
 }
 
-OriginList *OriginManager::createSingleOriginList(OriginID OID) {
-  return new (ListAllocator.Allocate<OriginList>()) OriginList(OID);
+OriginNode *OriginManager::createSingleOriginNode(OriginID OID) {
+  return new (Allocator.Allocate<OriginNode>()) OriginNode(OID);
+}
+
+void OriginManager::attachPointeeChild(OriginNode *Parent,
+                                       OriginNode *Pointee) {
+  assert(Pointee && "pointee subtree must be non-null");
+  Parent->setChildren(
+      {new (Allocator.Allocate<OriginNode *>()) OriginNode *(Pointee), 1});
 }
 
 template <typename T>
-OriginList *OriginManager::buildListForType(QualType QT, const T *Node) {
-  assert(hasOrigins(QT) && "buildListForType called for non-pointer type");
+OriginNode *OriginManager::buildNodeForType(QualType QT, const T *Node) {
+  assert(hasOrigins(QT) && "buildNodeForType called for non-pointer type");
   // An array shares a single origin across all of its elements; model it as if
-  // it were one element. `arr[i]` accesses (built in getOrCreateList) reuse
+  // it were one element. `arr[i]` accesses (built in getOrCreateNode) reuse
   // this same origin, so a borrow stored into any element is visible through
   // every element.
   if (QT->isArrayType())
-    return buildListForType(QT->getAsArrayTypeUnsafe()->getElementType(), Node);
-  OriginList *Head = createNode(Node, QT);
+    return buildNodeForType(QT->getAsArrayTypeUnsafe()->getElementType(), Node);
+  OriginNode *Head = createNode(Node, QT);
 
   if (QT->isPointerOrReferenceType()) {
     QualType PointeeTy = QT->getPointeeType();
     // We recurse if the pointee type is pointer-like, to build the next
     // level in the origin tree. E.g., for T*& / View&.
     if (hasOrigins(PointeeTy))
-      Head->setInnerOriginList(buildListForType(PointeeTy, Node));
+      attachPointeeChild(Head, buildNodeForType(PointeeTy, Node));
   }
   return Head;
 }
 
-OriginList *OriginManager::getOrCreateList(const ValueDecl *D) {
+OriginNode *OriginManager::getOrCreateNode(const ValueDecl *D) {
   if (!hasOrigins(D->getType()))
     return nullptr;
-  auto It = DeclToList.find(D);
-  if (It != DeclToList.end())
+  auto It = DeclToNode.find(D);
+  if (It != DeclToNode.end())
     return It->second;
-  return DeclToList[D] = buildListForType(D->getType(), D);
+  return DeclToNode[D] = buildNodeForType(D->getType(), D);
 }
 
-OriginList *OriginManager::getOrCreateList(const Expr *E) {
+OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   if (auto *ParenIgnored = E->IgnoreParens(); ParenIgnored != E)
-    return getOrCreateList(ParenIgnored);
+    return getOrCreateNode(ParenIgnored);
   // We do not see CFG stmts for ExprWithCleanups. Simply peel them.
   if (const ExprWithCleanups *EWC = dyn_cast<ExprWithCleanups>(E))
-    return getOrCreateList(EWC->getSubExpr());
+    return getOrCreateNode(EWC->getSubExpr());
 
   if (!hasOrigins(E))
     return nullptr;
 
-  auto It = ExprToList.find(E);
-  if (It != ExprToList.end())
+  auto It = ExprToNode.find(E);
+  if (It != ExprToNode.end())
     return It->second;
 
   QualType Type = E->getType();
@@ -259,7 +266,7 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
   if (auto *DRE = dyn_cast<DeclRefExpr>(E))
     if (auto *BD = dyn_cast<BindingDecl>(DRE->getDecl()))
       if (const Expr *Binding = BD->getBinding())
-        return ExprToList[E] = getOrCreateList(Binding);
+        return ExprToNode[E] = getOrCreateNode(Binding);
 
   // Special handling for expressions referring to a decl to share origins with
   // the underlying decl.
@@ -271,7 +278,7 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
         Field && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts()))
       ReferencedDecl = Field;
   if (ReferencedDecl) {
-    OriginList *Head = nullptr;
+    OriginNode *Head = nullptr;
     // For non-reference declarations (e.g., `int* p`), the expression is an
     // lvalue (addressable) that can be borrowed, so we create an outer origin
     // for the lvalue itself, with the pointee being the declaration's list.
@@ -281,15 +288,16 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
       Head = createNode(E, QualType{});
       // This ensures origin sharing: multiple expressions to the same
       // declaration share the same underlying origins.
-      Head->setInnerOriginList(getOrCreateList(ReferencedDecl));
+      if (OriginNode *ON = getOrCreateNode(ReferencedDecl))
+        attachPointeeChild(Head, ON);
     } else {
       // For reference-typed declarations (e.g., `int& r = p`) which have no
       // storage, the DeclRefExpr directly reuses the declaration's list since
       // references don't add an extra level of indirection at the expression
       // level.
-      Head = getOrCreateList(ReferencedDecl);
+      Head = getOrCreateNode(ReferencedDecl);
     }
-    return ExprToList[E] = Head;
+    return ExprToNode[E] = Head;
   }
 
   // An array subscript `arr[i]` accesses an element. All elements share the
@@ -302,8 +310,8 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
   if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
     const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
     if (Base->getType()->isArrayType())
-      if (OriginList *BaseList = getOrCreateList(Base))
-        return ExprToList[E] = BaseList;
+      if (OriginNode *BaseNode = getOrCreateNode(Base))
+        return ExprToNode[E] = BaseNode;
   }
 
   // If E is an lvalue , it refers to storage. We model this storage as the
@@ -311,7 +319,7 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
   // addressable.
   if (E->isGLValue() && !Type->isReferenceType())
     Type = AST.getLValueReferenceType(Type);
-  return ExprToList[E] = buildListForType(Type, E);
+  return ExprToNode[E] = buildNodeForType(Type, E);
 }
 
 void OriginManager::dump(OriginID OID, llvm::raw_ostream &OS) const {
@@ -340,7 +348,7 @@ const Origin &OriginManager::getOrigin(OriginID ID) const {
 
 void OriginManager::collectMissingOrigins(Stmt &FunctionBody,
                                           LifetimeSafetyStats &LSStats) {
-  MissingOriginCollector Collector(this->ExprToList, *this, LSStats);
+  MissingOriginCollector Collector(this->ExprToNode, *this, LSStats);
   Collector.TraverseStmt(const_cast<Stmt *>(&FunctionBody));
 }
 

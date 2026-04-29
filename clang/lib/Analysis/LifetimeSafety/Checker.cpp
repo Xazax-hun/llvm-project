@@ -456,10 +456,10 @@ public:
     // is itself an implicit node.
     if (UseExpr->IgnoreImplicit() != UseExpr)
       return;
-    const OriginList *OL = UF->getUsedOrigins();
+    const OriginNode *OL = UF->getUsedOrigins();
     if (!OL)
       return;
-    if (!LoanPropagation.getLoans(OL->getOuterOriginID(), UF).isEmpty())
+    if (!LoanPropagation.getLoans(OL->getOriginID(), UF).isEmpty())
       return;
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;
@@ -541,7 +541,7 @@ public:
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
         continue;
       // Multi-level indirection is reported separately; don't double-flag.
-      if (OriginList *L = FactMgr.getOriginMgr().getOrCreateList(PVD);
+      if (OriginNode *L = FactMgr.getOriginMgr().getOrCreateNode(PVD);
           L && L->getLength() > 1)
         continue;
       if (PVD->hasAttr<LifetimeBoundAttr>() || PVD->hasAttr<NoEscapeAttr>() ||
@@ -592,7 +592,7 @@ public:
       collectRangeForRangeVars(Body, RangeVars);
     llvm::DenseSet<const ValueDecl *> Seen;
     llvm::SmallVector<const ValueDecl *> MultiLevel;
-    auto Consider = [&](const ValueDecl *VD, OriginList *L) {
+    auto Consider = [&](const ValueDecl *VD, OriginNode *L) {
       if (!L)
         return;
       // main's 'argv'/'envp' are 'char**' (a character pointer-chain) by
@@ -614,7 +614,7 @@ public:
     // Parameters (including ones never used in the body).
     if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
       for (const ParmVarDecl *P : Fn->parameters())
-        Consider(P, OM.getOrCreateList(P));
+        Consider(P, OM.getOrCreateNode(P));
     // Local variables and any other tracked declarations.
     for (const auto &[VD, L] : OM.getDeclOriginLists())
       Consider(VD, L);

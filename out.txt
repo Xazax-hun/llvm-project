@@ -1,0 +1,3010 @@
+diff --git a/clang/include/clang/AST/Attr.h b/clang/include/clang/AST/Attr.h
+index 0f9fc01391c3..3feda1e5bf77 100644
+--- a/clang/include/clang/AST/Attr.h
++++ b/clang/include/clang/AST/Attr.h
+@@ -433,6 +433,13 @@ inline ParameterABI ParameterABIAttr::getABI() const {
+     llvm_unreachable("bad parameter ABI attribute kind");
+   }
+ }
++
++/// Determine if type T is a valid subject for a nonnull and similar
++/// attributes. Dependent types are considered valid so they can be checked
++/// during instantiation time. By default, we look through references (the
++/// behavior used by nonnull), but if the second parameter is true, then we
++/// treat a reference type as valid.
++bool isValidPointerAttrType(QualType T, bool RefOkay = false);
+ }  // end namespace clang
+ 
+ #endif
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Facts.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Facts.h
+index 88b509e1b94d..3ebc1ba7993d 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Facts.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Facts.h
+@@ -22,6 +22,7 @@
+ #include "clang/Analysis/CFG.h"
+ #include "llvm/ADT/STLFunctionalExtras.h"
+ #include "llvm/ADT/SmallVector.h"
++#include "llvm/ADT/DenseMap.h"
+ #include "llvm/Support/Debug.h"
+ #include <cstdint>
+ #include <optional>
+@@ -57,6 +58,9 @@ public:
+     InvalidateOrigin,
+     /// All loans of an origin are cleared.
+     KillOrigin,
++    /// A construct the analysis cannot fully model. Drives the "safe
++    /// programming model" soundness warnings and carries no dataflow state.
++    UntrackedConstruct,
+   };
+ 
+ private:
+@@ -264,18 +268,30 @@ public:
+ class InvalidateOriginFact : public Fact {
+   OriginID OID;
+   const Expr *InvalidationExpr;
++  /// True when the invalidation is only *assumed* (a non-const operation on an
++  /// owner, or passing an owner to a non-const pointer/reference parameter)
++  /// rather than a known container-mutation method. Drives the lower-confidence
++  /// "assumed invalidation" soundness diagnostic.
++  bool Assumed;
++  /// True when the invalidation is a deallocation (`delete`, `free`,
++  /// `std::destroy_at`, a destructor). Drives the "naked deallocation" check.
++  bool Deallocation;
+ 
+ public:
+   static bool classof(const Fact *F) {
+     return F->getKind() == Kind::InvalidateOrigin;
+   }
+ 
+-  InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr)
++  InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr,
++                       bool Assumed = false, bool Deallocation = false)
+       : Fact(Kind::InvalidateOrigin), OID(OID),
+-        InvalidationExpr(InvalidationExpr) {}
++        InvalidationExpr(InvalidationExpr), Assumed(Assumed),
++        Deallocation(Deallocation) {}
+ 
+   OriginID getInvalidatedOrigin() const { return OID; }
+   const Expr *getInvalidationExpr() const { return InvalidationExpr; }
++  bool isAssumed() const { return Assumed; }
++  bool isDeallocation() const { return Deallocation; }
+   void dump(llvm::raw_ostream &OS, const LoanManager &,
+             const OriginManager &OM) const override;
+ };
+@@ -336,6 +352,76 @@ public:
+             const OriginManager &OM) const override;
+ };
+ 
++/// The kind of construct that the analysis could not fully model. Each value
++/// maps to a "safe programming model" soundness warning emitted by the
++/// checker.
++enum class UntrackedConstructReason : uint8_t {
++  /// A call whose callee could not be resolved to a function, e.g. a call
++  /// through a function or member-function pointer. Such callees cannot carry
++  /// lifetime annotations, so the call is not modeled.
++  IndirectCall,
++  /// An argument bound to a pointer/reference parameter that carries none of
++  /// the lifetime annotations ('lifetimebound', 'noescape', 'lifetime_capture_by'),
++  /// so the analysis cannot tell whether the borrow escapes the call.
++  UnannotatedIndirection,
++  /// An ownership-transferring move of an owner (e.g. 'std::move(owner)' or
++  /// 'std::unique_ptr::release'), which the analysis does not model, silencing
++  /// lifetime checks for the moved-from object.
++  MoveSilencing,
++  /// An expression or declaration of a user-defined type whose ownership is
++  /// unknown (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
++  /// [[gsl::Pointer]]), e.g. a call returning such a type or a local of one.
++  UnknownOwnership,
++  /// A `throw` or `try`/`catch`. Exception control flow (unwinding, running
++  /// destructors and resuming in a handler) is not modeled, so lifetime errors
++  /// on exception paths may be missed.
++  Exception,
++  /// A value of a [[gsl::Owner]] container whose element type is an indirection
++  /// (e.g. std::vector<int*>). Per-element borrows are not tracked.
++  OwnerOfIndirection,
++};
++
++/// Records a construct that the analysis cannot fully model, attached to the
++/// CFG block where it appears. The checker turns these into soundness
++/// diagnostics. This fact carries no Origin/Loan state and is ignored by the
++/// dataflow analyses.
++class UntrackedConstructFact : public Fact {
++  UntrackedConstructReason Reason;
++  /// The expression the diagnostic should point at (for location and range).
++  /// Null when the construct is a declaration (see ConstructDecl).
++  const Expr *ConstructExpr;
++  /// The declaration the diagnostic should point at, when the construct is a
++  /// declaration rather than an expression. Null otherwise.
++  const ValueDecl *ConstructDecl;
++  /// The location the diagnostic should point at, when the construct is a
++  /// statement that is neither an expression nor a declaration (e.g. a `try`).
++  /// Invalid otherwise.
++  SourceLocation ConstructLoc;
++
++public:
++  static bool classof(const Fact *F) {
++    return F->getKind() == Kind::UntrackedConstruct;
++  }
++
++  UntrackedConstructFact(UntrackedConstructReason Reason, const Expr *E)
++      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(E),
++        ConstructDecl(nullptr) {}
++  UntrackedConstructFact(UntrackedConstructReason Reason, const ValueDecl *D)
++      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
++        ConstructDecl(D) {}
++  UntrackedConstructFact(UntrackedConstructReason Reason, SourceLocation Loc)
++      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
++        ConstructDecl(nullptr), ConstructLoc(Loc) {}
++
++  UntrackedConstructReason getReason() const { return Reason; }
++  const Expr *getConstructExpr() const { return ConstructExpr; }
++  const ValueDecl *getConstructDecl() const { return ConstructDecl; }
++  SourceLocation getConstructLoc() const { return ConstructLoc; }
++
++  void dump(llvm::raw_ostream &OS, const LoanManager &,
++            const OriginManager &) const override;
++};
++
+ class FactManager {
+ public:
+   FactManager(const AnalysisDeclContext &AC, const CFG &Cfg) : OriginMgr(AC) {
+@@ -382,6 +468,12 @@ public:
+   OriginManager &getOriginMgr() { return OriginMgr; }
+   const OriginManager &getOriginMgr() const { return OriginMgr; }
+ 
++  /// Memoizes `isUnknownOwnershipType` results (keyed by canonical type) for
++  /// the duration of the analysis.
++  llvm::DenseMap<const Type *, bool> &getUnknownOwnershipCache() {
++    return UnknownOwnershipCache;
++  }
++
+ private:
+   FactID NextFactID{0};
+   LoanManager LoanMgr;
+@@ -389,6 +481,7 @@ private:
+   /// Facts for each CFG block, indexed by block ID.
+   llvm::SmallVector<llvm::SmallVector<const Fact *>> BlockToFacts;
+   llvm::BumpPtrAllocator FactAllocator;
++  llvm::DenseMap<const Type *, bool> UnknownOwnershipCache;
+ };
+ } // namespace clang::lifetimes::internal
+ 
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h
+index 8f0670728bae..b4ce7bfb2700 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h
+@@ -55,6 +55,7 @@ public:
+   void VisitArraySubscriptExpr(const ArraySubscriptExpr *ASE);
+   void VisitCXXNewExpr(const CXXNewExpr *NE);
+   void VisitCXXDeleteExpr(const CXXDeleteExpr *DE);
++  void VisitCXXThrowExpr(const CXXThrowExpr *TE);
+ 
+ private:
+   OriginList *getOriginsList(const ValueDecl &D);
+@@ -84,6 +85,21 @@ private:
+ 
+   void handleFullExprCleanup(const CFGFullExprCleanup &FullExprCleanup);
+ 
++  /// Generates origin flows for a structured binding's holding expressions
++  /// (e.g. `e[i]` / `e.field`), which are not visited by the CFG walk, so that
++  /// references to the bindings -- which alias them -- are tracked. The holding
++  /// variable is borrowable storage only for by-value bindings (a copy); for
++  /// by-reference bindings it aliases the original.
++  void handleStructuredBinding(const DecompositionDecl *DD);
++  void visitBindingHoldingExpr(const Stmt *S);
++
++  /// Scans the function body for `try`/`catch` statements and emits an
++  /// Exception UntrackedConstructFact for each. A `try` whose body only calls
++  /// potentially-throwing functions has no explicit `throw` and produces no
++  /// CFG exception edges, so it is not reached by the CFG walk; detect it on
++  /// the AST instead. (`throw` expressions are caught by VisitCXXThrowExpr.)
++  void handleTryStatements();
++
+   void handleExitBlock();
+ 
+   /// Mark all fields of the implicit object as used for an instance method
+@@ -105,6 +121,18 @@ private:
+   void handleLifetimeCaptureBy(const FunctionDecl *FD,
+                                ArrayRef<const Expr *> Args);
+ 
++  // Soundness ("safe programming model"): flags call arguments bound to
++  // origin-carrying parameters that carry no lifetime annotation and are not
++  // modeled via GSL recognition.
++  void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
++                                        ArrayRef<const Expr *> Args);
++
++  // Soundness: flags ownership-transferring moves of an owner (std::move of
++  // a gsl::Owner, or std::unique_ptr::release), which the analysis does not
++  // model.
++  void handleMoveSilencing(const Expr *Call, const FunctionDecl *FD,
++                           ArrayRef<const Expr *> Args);
++
+   /// Checks if a call-like expression creates a borrow by passing a value to a
+   /// reference parameter, creating an IssueFact if it does.
+   /// \param IsGslConstruction True if this is a GSL construction where all
+@@ -118,6 +146,12 @@ private:
+   void handleInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
+                               ArrayRef<const Expr *> Args);
+ 
++  // Soundness: conservatively assume that a non-const member call on an
++  // owner, or passing an owner to a non-const pointer/reference parameter,
++  // invalidates borrows into that owner.
++  void handleAssumedInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
++                                     ArrayRef<const Expr *> Args);
++
+   // Detect explicit destructor calls/`std::destroy_at`
+   void handleDestructiveCall(const Expr *Call, const FunctionDecl *FD,
+                              ArrayRef<const Expr *> Args);
+@@ -146,6 +180,14 @@ private:
+   bool escapesViaReturn(OriginID OID) const;
+ 
+   llvm::SmallVector<Fact *> issuePlaceholderLoans();
++
++  /// Seeds every pointer-bearing member reachable from \p Parent (the value
++  /// list of the enclosing sub-object; the implicit object's `this` list at the
++  /// top level), recursing into by-value sub-objects, with a non-expiring
++  /// "uninitialized" loan so that reads of an unwritten member of the implicit
++  /// object are not mistaken for a lost borrow.
++  void seedMemberLoans(const CXXRecordDecl *RD, const OriginList *Parent,
++                       llvm::SmallVectorImpl<Fact *> &Facts);
+   FactManager &FactMgr;
+   AnalysisDeclContext &AC;
+   llvm::SmallVector<Fact *> CurrentBlockFacts;
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h
+index 47fcd5dbfd56..d8a21ca3a980 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h
+@@ -12,6 +12,7 @@
+ 
+ #include "clang/AST/Attr.h"
+ #include "clang/AST/DeclCXX.h"
++#include "llvm/ADT/DenseMap.h"
+ 
+ namespace clang ::lifetimes {
+ 
+@@ -84,6 +85,30 @@ bool isGslPointerType(QualType QT);
+ bool isGslOwnerType(QualType QT);
+ bool isGslOwnerType(const CXXRecordDecl *RD);
+ 
++// Returns true if QT is a [[gsl::Owner]] class template specialization with a
++// type template argument that is an indirection (pointer, reference, or
++// gsl::Pointer), e.g. std::vector<int*> or std::array<std::string_view, N>.
++// Such a container's elements hold borrows the analysis cannot track per
++// element, so the safe programming model rejects it. The check recurses into
++// owner template arguments (e.g. std::vector<std::vector<int*>>).
++bool isGslOwnerOfIndirection(QualType QT);
++
++// Returns true if the given gsl::Pointer type can mutate the (non-const) owner
++// it points to, i.e. it (or a base class) exposes operator*/operator[]
++// returning a reference to a non-const gsl::Owner, or operator-> returning a
++// pointer to a non-const gsl::Owner. Passing such a pointer to a function is
++// assumed to invalidate borrows into the pointed-to owner.
++bool pointsToMutableOwner(QualType GslPointerType);
++
++// Returns true if QT is a user-defined record type that can hold a borrow (has
++// a pointer/reference/gsl::Pointer member, transitively) but is annotated
++// neither [[gsl::Owner]] nor [[gsl::Pointer]], so the analysis cannot tell
++// whether it owns or merely refers to that storage. An incomplete record type
++// is conservatively treated as having unknown ownership. \p Cache memoizes
++// results by canonical type.
++bool isUnknownOwnershipType(QualType QT,
++                            llvm::DenseMap<const Type *, bool> &Cache);
++
+ // Returns true if the given method is std::unique_ptr::release().
+ // This is treated as a move in lifetime analysis to avoid false-positives
+ // when ownership is manually transferred.
+@@ -98,6 +123,24 @@ bool isUniquePtrRelease(const CXXMethodDecl &MD);
+ // https://en.cppreference.com/w/cpp/container#Iterator_invalidation
+ bool isInvalidationMethod(const CXXMethodDecl &MD);
+ 
++// Returns true if the given method is an STL container insertion method
++// (e.g. push_back, insert, emplace). Such methods take the element by const
++// reference or rvalue reference and copy/move it into the container, so the
++// reference parameter is effectively noescape.
++bool isStlContainerInsertionMethod(const CXXMethodDecl &MD);
++
++// Returns true if the function is a std::basic_string concatenation operator:
++// the member `operator+=` (append-assign) or a free `operator+` returning a
++// basic_string. Both deep-copy their operands' characters into a string, so an
++// operand reference (or character pointer) does not escape.
++bool isStlStringConcatenationOperator(const FunctionDecl &FD);
++
++// Returns true if the record is a standard container template (vector, map,
++// basic_string, ...). A constructor of such a type copies/moves in the values
++// it is given, so a by-reference parameter to a non-borrow-holding type does
++// not escape.
++bool isStlContainerType(const CXXRecordDecl *RD);
++
+ // Returns true if the function destroys its first argument
+ // (e.g., destructors via implicit 'this', std::destroy_at).
+ bool destructsFirstArg(const FunctionDecl &FD);
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeSafety.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeSafety.h
+index 398cce139585..19d1935701e8 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeSafety.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/LifetimeSafety.h
+@@ -46,6 +46,13 @@ enum class WarningScope {
+   IntraTU  // For warnings on functions local to a Translation Unit.
+ };
+ 
++/// Why the analysis skipped a function entirely. The values match the
++/// `%select` order of `warn_lifetime_safety_bailout`.
++enum class BailoutReason : unsigned {
++  CFGTooLarge = 0,   // The CFG exceeded the configured block limit.
++  CFGUnavailable = 1 // The CFG could not be built for the function.
++};
++
+ /// Abstract interface for operations requiring Sema access.
+ ///
+ /// This class exists to break a circular dependency: the LifetimeSafety
+@@ -149,6 +156,98 @@ public:
+   // Adds inferred lifetime bound attribute for implicit this to its
+   // TypeSourceInfo.
+   virtual void addLifetimeBoundToImplicitThis(const CXXMethodDecl *MD) {}
++
++  // Soundness ("safe programming model") diagnostics. These fire wherever the
++  // analysis cannot fully model a construct; enabling them as errors over a
++  // region guarantees no lifetime mistake slips through unmodeled.
++
++  // Reports a read of a pointer-like value that the analysis tracks but for
++  // which no borrow information remains, indicating a loan was lost to an
++  // unmodeled construct during loan propagation.
++  virtual void reportLostLoan(const Expr *UseExpr) {}
++
++  // Reports that the analysis skipped a function entirely (e.g. its CFG exceeds
++  // the configured block limit, or the CFG could not be built), so lifetime
++  // mistakes in it may go undetected.
++  virtual void reportAnalysisBailout(const Decl *FD, BailoutReason Reason) {}
++
++  // Reports a call whose callee could not be resolved to a function (e.g. a
++  // call through a function or member-function pointer), which the analysis
++  // cannot model.
++  virtual void reportIndirectCall(const Expr *CallExpr) {}
++
++  // Reports an argument bound to a pointer/reference parameter that carries no
++  // lifetime annotation, so the analysis cannot tell whether the borrow escapes.
++  virtual void reportUnannotatedIndirection(const Expr *ArgExpr) {}
++
++  // Reports a pointer/reference parameter of the analyzed function that carries
++  // no lifetime annotation, leaving its lifetime contract unspecified.
++  virtual void reportUnannotatedParam(const ParmVarDecl *PVD) {}
++
++  // Reports an instance member function (including a conversion operator) whose
++  // return type is an indirection (pointer, reference, or gsl::Pointer) but
++  // whose implicit object is not [[clang::lifetimebound]] and which is not
++  // [[clang::lifetime_immortal]], leaving the returned borrow's lifetime
++  // unspecified for callers.
++  virtual void reportUnannotatedThisReturn(const CXXMethodDecl *MD) {}
++
++  // Reports a borrow of the implicit object ('this', \p IsField false) or one of
++  // its fields (\p IsField true) escaping to global or static storage \p Global
++  // from a method. The global outlives the call, but the object's lifetime is
++  // caller-determined, so the stored borrow may dangle.
++  virtual void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,
++                                         const VarDecl *Global) {}
++
++  // Reports a parameter annotated [[clang::lifetimebound]] or
++  // [[clang::lifetime_capture_by]] (to an entity other than `global`) whose
++  // borrow escapes to global or static storage \p Global. Those annotations
++  // describe a return/capture relationship, not a global capture, so the
++  // escape is uncovered and the caller is unaware the global aliases the
++  // argument.
++  virtual void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
++                                                   const VarDecl *Global) {}
++
++  // Reports a parameter annotated [[clang::lifetime_capture_by(global)]]. The
++  // safe programming model rejects it: the analysis cannot track a borrow
++  // captured into global/static storage, so such a capture may dangle
++  // undetected.
++  virtual void reportGlobalCapture(const ParmVarDecl *PVD) {}
++
++  // Reports a declaration whose type uses more than one level of indirection
++  // (e.g. 'int **'), which the analysis cannot fully model.
++  virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
++
++  // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
++  // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
++  virtual void reportMoveSilencing(const Expr *MoveExpr) {}
++
++  // Reports a borrow that may be invalidated by an operation the analysis
++  // conservatively assumes mutates the owner (a non-const member call, or
++  // passing the owner to a non-const pointer/reference parameter).
++  virtual void reportAssumedInvalidation(const Expr *IssueExpr,
++                                         const Expr *OperationExpr) {}
++  virtual void reportAssumedInvalidation(const ParmVarDecl *PVD,
++                                         const Expr *OperationExpr) {}
++
++  // Reports a 'delete'/'free' of a pointer whose allocation the analysis did not
++  // see, so it cannot verify the deallocation is a live, unaliased allocation.
++  virtual void reportNakedDeallocation(const Expr *DeallocExpr) {}
++
++  // Reports a declaration of a user-defined type that can hold a borrow but is
++  // annotated neither [[gsl::Owner]] nor [[gsl::Pointer]].
++  virtual void reportUnknownOwnership(const ValueDecl *VD) {}
++  // Reports an expression (e.g. a call result) of such a type.
++  virtual void reportUnknownOwnership(const Expr *E) {}
++
++  // Reports a `throw` or `try`/`catch`. Exception control flow (stack
++  // unwinding, running destructors and resuming in a handler) is not modeled,
++  // so a borrow that dangles only along an exception path can be missed.
++  virtual void reportException(SourceLocation Loc) {}
++
++  // Reports a value of a [[gsl::Owner]] container whose element type is an
++  // indirection (e.g. std::vector<int*>); per-element borrows are not tracked.
++  virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
++  virtual void reportOwnerOfIndirection(const Expr *E) {}
+ };
+ 
+ /// The main entry point for the analysis.
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Loans.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Loans.h
+index cfaae4d57468..9123ba5fa557 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Loans.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Loans.h
+@@ -36,9 +36,12 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, LoanID ID) {
+ ///   - ParmVarDecl: a function parameter (placeholder)
+ ///   - CXXMethodDecl: the implicit 'this' object (placeholder)
+ ///   - CXXNewExpr: a heap allocation made by `new`
++///   - Immortal: storage that lives for the whole program (the return value of
++///     a `[[clang::lifetime_immortal]]` function)
+ ///
+-/// Placeholder paths never expire within the function scope, as they represent
+-/// storage from the caller's scope.
++/// Placeholder and Immortal paths never expire within the function scope, as
++/// they represent storage from the caller's scope or storage that outlives the
++/// program's execution.
+ ///
+ /// TODO: Model access paths of other types, e.g. field, array subscript, heap
+ /// allocation not through `new`, and globals.
+@@ -50,6 +53,12 @@ public:
+     PlaceholderParam,
+     PlaceholderThis,
+     NewAllocation,
++    Immortal,
++    /// The initial, uninitialized contents of an array of pointer-like
++    /// elements. Seeded into the array's shared element-origin at declaration
++    /// so the origin is never empty (a borrow stored into an element merges in
++    /// alongside it). Like the placeholders, it never expires.
++    Uninitialized,
+   };
+ 
+ private:
+@@ -67,6 +76,21 @@ public:
+   static AccessPath Placeholder(const CXXMethodDecl *MD) {
+     return AccessPath(Kind::PlaceholderThis, MD);
+   }
++  /// Storage that lives for the whole program, identified by the
++  /// `[[clang::lifetime_immortal]]` function whose return value created it.
++  static AccessPath Immortal(const FunctionDecl *FD) {
++    return AccessPath(Kind::Immortal, FD);
++  }
++  /// A heap allocation produced by an allocating function (e.g. one with
++  /// `__attribute__((malloc))`), identified by the call expression.
++  static AccessPath HeapAllocation(const clang::Expr *AllocExpr) {
++    return AccessPath(Kind::NewAllocation, AllocExpr);
++  }
++  /// The uninitialized initial contents of an array of pointer-like elements,
++  /// identified by the array declaration. Never expires.
++  static AccessPath Uninitialized(const clang::ValueDecl *D) {
++    return AccessPath(Kind::Uninitialized, D);
++  }
+   AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
+   AccessPath &operator=(const AccessPath &) = delete;
+ 
+@@ -95,7 +119,21 @@ public:
+   }
+   const CXXNewExpr *getAsNewAllocation() const {
+     return K == Kind::NewAllocation
+-               ? cast<const CXXNewExpr>(cast<const clang::Expr *>(Root))
++               ? dyn_cast_if_present<CXXNewExpr>(
++                     Root.dyn_cast<const clang::Expr *>())
++               : nullptr;
++  }
++  /// A heap allocation is `new`/`new[]` or a call to an allocating function
++  /// (e.g. one with `__attribute__((malloc))`); the root is the allocating
++  /// expression.
++  bool isHeapAllocation() const { return K == Kind::NewAllocation; }
++  const clang::Expr *getAsHeapAllocation() const {
++    return K == Kind::NewAllocation ? Root.dyn_cast<const clang::Expr *>()
++                                    : nullptr;
++  }
++  const FunctionDecl *getAsImmortal() const {
++    return K == Kind::Immortal
++               ? cast<const FunctionDecl>(cast<const clang::Decl *>(Root))
+                : nullptr;
+   }
+ 
+@@ -108,6 +146,9 @@ public:
+ private:
+   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
+   AccessPath(Kind K, const CXXMethodDecl *MD) : K(K), Root(MD) {}
++  AccessPath(Kind K, const FunctionDecl *FD) : K(K), Root(FD) {}
++  AccessPath(Kind K, const clang::ValueDecl *VD) : K(K), Root(VD) {}
++  AccessPath(Kind K, const clang::Expr *E) : K(K), Root(E) {}
+ };
+ 
+ /// Represents lending a storage location.
+diff --git a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Origins.h b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Origins.h
+index c2db59c57906..d4e460bc8e5b 100644
+--- a/clang/include/clang/Analysis/Analyses/LifetimeSafety/Origins.h
++++ b/clang/include/clang/Analysis/Analyses/LifetimeSafety/Origins.h
+@@ -147,11 +147,19 @@ public:
+   /// Wraps an existing OriginID in a new single-element OriginList, so a fact
+   /// can refer to a single level of an existing OriginList.
+   OriginList *createSingleOriginList(OriginID OID);
+-
+   /// Returns the OriginList for the implicit 'this' parameter if the current
+   /// declaration is an instance method.
+   std::optional<OriginList *> getThisOrigins() const { return ThisOrigins; }
+ 
++  /// Returns the value OriginList for a field \p F accessed on the sub-object
++  /// identified by \p Parent (the value list of the base; use the result of
++  /// getThisOrigins() for a direct member of the implicit object). Keyed by the
++  /// (Parent, F) pair so distinct access paths ending in the same field
++  /// declaration -- e.g. `this->a.p` vs `this->b.p` -- get distinct origins.
++  /// For a by-value sub-object field (no origins of its own) this returns a
++  /// stable identity node so nested fields can hang off it.
++  OriginList *getMemberValueList(const OriginList *Parent, const FieldDecl *F);
++
+   const Origin &getOrigin(OriginID ID) const;
+ 
+   llvm::ArrayRef<Origin> getOrigins() const { return AllOrigins; }
+@@ -166,6 +174,13 @@ public:
+   /// Collects statistics about expressions that lack associated origins.
+   void collectMissingOrigins(Stmt &FunctionBody, LifetimeSafetyStats &LSStats);
+ 
++  /// Returns the origin lists created for declarations (parameters and locals).
++  /// Used by soundness checks (e.g. detecting multi-level indirection).
++  const llvm::DenseMap<const clang::ValueDecl *, OriginList *> &
++  getDeclOriginLists() const {
++    return DeclToList;
++  }
++
+ private:
+   OriginID getNextOriginID() { return NextOriginID++; }
+ 
+@@ -175,6 +190,11 @@ private:
+   template <typename T>
+   OriginList *buildListForType(QualType QT, const T *Node);
+ 
++  /// Resolves a `this`-rooted member-access expression (`this->a.b.c`) to the
++  /// value list of its leaf field, keyed by access path (see
++  /// getMemberValueList). Only valid when isThisRootedMemberChain(ME) holds.
++  OriginList *getMemberChainValueList(const MemberExpr *ME);
++
+   void initializeThisOrigins(const Decl *D);
+ 
+   /// Pre-scans the function body (and constructor init lists) to discover
+@@ -191,6 +211,11 @@ private:
+   llvm::BumpPtrAllocator ListAllocator;
+   llvm::DenseMap<const clang::ValueDecl *, OriginList *> DeclToList;
+   llvm::DenseMap<const clang::Expr *, OriginList *> ExprToList;
++  /// Field value lists keyed by access path: (parent sub-object identity,
++  /// field). Distinguishes `this->a.p` from `this->b.p`.
++  llvm::DenseMap<std::pair<const OriginList *, const clang::FieldDecl *>,
++                 OriginList *>
++      MemberValueLists;
+   std::optional<OriginList *> ThisOrigins;
+   /// Types that are not inherently pointer-like but require origin tracking
+   /// because of lifetime annotations (currently [[clang::lifetimebound]]) on
+diff --git a/clang/include/clang/Basic/Attr.td b/clang/include/clang/Basic/Attr.td
+index 32f72e8da960..174e91109ad3 100644
+--- a/clang/include/clang/Basic/Attr.td
++++ b/clang/include/clang/Basic/Attr.td
+@@ -2162,6 +2162,13 @@ public:
+ }];
+ }
+ 
++def LifetimeImmortal : InheritableAttr {
++  let Spellings = [Clang<"lifetime_immortal", 0>];
++  let Subjects = SubjectList<[Function], ErrorDiag>;
++  let Documentation = [LifetimeImmortalDocs];
++  let SimpleHandler = 1;
++}
++
+ def TrivialABI : InheritableAttr {
+   // This attribute does not have a C [[]] spelling because it requires the
+   // CPlusPlus language option.
+diff --git a/clang/include/clang/Basic/AttrDocs.td b/clang/include/clang/Basic/AttrDocs.td
+index 6eae86b7f7f1..d7ead4a3004a 100644
+--- a/clang/include/clang/Basic/AttrDocs.td
++++ b/clang/include/clang/Basic/AttrDocs.td
+@@ -4572,6 +4572,33 @@ It is only supported when using the Microsoft C++ ABI.
+   }];
+ }
+ 
++def LifetimeImmortalDocs : Documentation {
++  let Category = DocCatFunction;
++  let Content = [{
++The ``lifetime_immortal`` attribute marks a function whose returned pointer or
++view refers to storage that lives for the entire duration of the program (for
++example, a pointer into a global table, an interned string, or a singleton).
++
++The lifetime safety analysis models the return value as borrowing storage that
++never expires. As a result, the returned pointer is always considered valid:
++it never triggers use-after-scope, use-after-return, or dangling diagnostics,
++and -- because it carries a tracked (immortal) borrow -- it does not trigger the
++``-Wlifetime-safety-lost-loan`` soundness warning. This lets such functions
++participate in the "safe programming model" without the analysis losing track
++of their results.
++
++.. code-block:: c++
++
++    [[clang::lifetime_immortal]] int *get_immortal();
++
++    const int *p = get_immortal();
++    // `p` is treated as pointing to storage that never expires.
++
++The attribute applies to the function's return value; it has no effect on
++functions that do not return a pointer-like type.
++  }];
++}
++
+ def LifetimeBoundDocs : Documentation {
+   let Category = DocCatFunction;
+   let Content = [{
+diff --git a/clang/include/clang/Basic/DiagnosticGroups.td b/clang/include/clang/Basic/DiagnosticGroups.td
+index 8031f99419bd..a3f96d5a4f87 100644
+--- a/clang/include/clang/Basic/DiagnosticGroups.td
++++ b/clang/include/clang/Basic/DiagnosticGroups.td
+@@ -695,10 +695,188 @@ like verifying [[clang::noescape]] and [[clang::lifetimebound]].
+   }];
+ }
+ 
++// Soundness warnings: surfaced wherever the analysis cannot fully model a
++// construct. Enabling these (typically as errors over a region) makes the
++// best-effort analysis sound for a "safe programming model" where a clean
++// compile guarantees no lifetime mistake slipped through unmodeled.
++def LifetimeSafetyLostLoan : DiagGroup<"lifetime-safety-lost-loan"> {
++  code Documentation = [{
++Detects pointer-like values that the analysis tracks but for which no borrow
++information remains after analysis, indicating a borrow was lost because some
++language construct was not modeled.
++  }];
++}
++
++def LifetimeSafetyBailout : DiagGroup<"lifetime-safety-bailout"> {
++  code Documentation = [{
++Warns when the lifetime safety analysis skips a function entirely (for example
++because its control-flow graph is too large), so that lifetime mistakes in that
++function would otherwise go undetected.
++  }];
++}
++
++def LifetimeSafetyIndirectCall : DiagGroup<"lifetime-safety-indirect-call"> {
++  code Documentation = [{
++Warns on calls whose callee cannot be resolved to a function (for example, a
++call through a function or member-function pointer). Such callees cannot carry
++lifetime annotations, so the analysis cannot model the call.
++  }];
++}
++
++def LifetimeSafetyUnannotatedIndirection
++    : DiagGroup<"lifetime-safety-unannotated-indirection"> {
++  code Documentation = [{
++Warns when an argument is bound to a pointer or reference parameter that carries
++none of the lifetime annotations ('lifetimebound', 'noescape',
++'lifetime_capture_by'), so the analysis cannot tell whether the borrow escapes
++the call.
++  }];
++}
++
++def LifetimeSafetyMultilevelIndirection
++    : DiagGroup<"lifetime-safety-multilevel-indirection"> {
++  code Documentation = [{
++Warns on declarations that use more than one level of indirection (e.g.
++'int **'), which the lifetime safety analysis cannot fully model. The "safe
++programming model" supports only a single level of indirection.
++  }];
++}
++
++def LifetimeSafetyMoveSilencing : DiagGroup<"lifetime-safety-move-silencing"> {
++  code Documentation = [{
++Warns when an owner is moved (e.g. via 'std::move' or
++'std::unique_ptr::release'), an ownership transfer the analysis does not model,
++which silences lifetime safety checks for the moved-from object.
++  }];
++}
++
++def LifetimeSafetyAssumedInvalidation
++    : DiagGroup<"lifetime-safety-assumed-invalidation"> {
++  code Documentation = [{
++Warns when a borrow into an owner may be invalidated by an operation the
++analysis conservatively assumes mutates the owner: a non-const member call, or
++passing the owner to a non-const pointer/reference parameter.
++  }];
++}
++
++def LifetimeSafetyNakedDelete : DiagGroup<"lifetime-safety-naked-delete"> {
++  code Documentation = [{
++Warns on a 'delete' or 'free' of a pointer whose allocation the analysis did not
++see, so it cannot verify the deallocation refers to a live, unaliased heap
++allocation. Deallocations inside a destructor are exempt.
++  }];
++}
++
++def LifetimeSafetyUnknownOwnership
++    : DiagGroup<"lifetime-safety-unknown-ownership"> {
++  code Documentation = [{
++Warns on a value of a user-defined type that can hold a borrow but is annotated
++neither [[gsl::Owner]] nor [[gsl::Pointer]], so the analysis cannot tell whether
++it owns or merely refers to the storage and cannot track its borrows.
++  }];
++}
++
++def LifetimeSafetyException : DiagGroup<"lifetime-safety-exception"> {
++  code Documentation = [{
++Warns on a 'throw' or a 'try'/'catch'. Exception control flow (stack unwinding,
++running destructors and resuming in a handler) is not modeled by the analysis,
++so a borrow that dangles only along an exception path may be missed.
++  }];
++}
++
++def LifetimeSafetyOwnerOfIndirection
++    : DiagGroup<"lifetime-safety-owner-of-indirection"> {
++  code Documentation = [{
++Warns on a value of a [[gsl::Owner]] container whose element type is an
++indirection (a pointer, reference, or [[gsl::Pointer]]), e.g. std::vector<int*>.
++The analysis does not track borrows held by individual container elements, so
++such a container is rejected under the safe programming model.
++  }];
++}
++
++def LifetimeSafetyConstSubversion
++    : DiagGroup<"lifetime-safety-const-subversion"> {
++  code Documentation = [{
++Warns on a 'mutable' data member or a 'const_cast'. The analysis assumes a
++const member function does not invalidate borrows into the object; a 'mutable'
++field or a 'const_cast' can subvert that assumption, so both are rejected under
++the safe programming model.
++  }];
++}
++
++def LifetimeSafetyGlobalCapture
++    : DiagGroup<"lifetime-safety-global-capture"> {
++  code Documentation = [{
++Warns on a parameter annotated [[clang::lifetime_capture_by(global)]]. The
++annotation documents that the argument may be captured by global or static
++storage, but the analysis cannot track such a capture (it does not know where
++the borrow is stored or how long the global lives), so a borrow captured this
++way can dangle undetected. The construct is therefore rejected under the safe
++programming model.
++  }];
++}
++
++def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
++                                        [// The strict bug-finding warnings
++                                         // (use-after-scope/free,
++                                         // return-stack-address, dangling
++                                         // field/global, and the experimental
++                                         // moved/invalidation variants). The
++                                         // safe programming model is only sound
++                                         // if the bugs the analysis *can* prove
++                                         // are reported alongside the
++                                         // modeling-gap warnings below.
++                                         LifetimeSafetyStrict,
++                                         LifetimeSafetyLostLoan,
++                                         LifetimeSafetyBailout,
++                                         LifetimeSafetyIndirectCall,
++                                         LifetimeSafetyUnannotatedIndirection,
++                                         LifetimeSafetyMultilevelIndirection,
++                                         LifetimeSafetyMoveSilencing,
++                                         LifetimeSafetyAssumedInvalidation,
++                                         LifetimeSafetyNakedDelete,
++                                         LifetimeSafetyUnknownOwnership,
++                                         LifetimeSafetyException,
++                                         LifetimeSafetyOwnerOfIndirection,
++                                         LifetimeSafetyConstSubversion,
++                                         LifetimeSafetyGlobalCapture,
++                                         // An annotation that cannot be verified
++                                         // (a [[noescape]] parameter that
++                                         // escapes, or a [[lifetimebound]] whose
++                                         // binding cannot be confirmed) is a
++                                         // soundness hole: callers trust a
++                                         // contract the body does not honor.
++                                         LifetimeSafetyNoescape,
++                                         LifetimeSafetyLifetimeboundViolation,
++                                         // An override that drops a 'noescape'
++                                         // its overridden method advertises is a
++                                         // soundness hole: callers dispatching
++                                         // through the base class assume the
++                                         // parameter does not escape.
++                                         MissingNoEscape]> {
++  code Documentation = [{
++The completeness group for the "safe programming model": enabling it (typically
++as errors over a region of code) makes the analysis never silently fail to catch
++a lifetime mistake. It bundles three kinds of warning:
++
++* the strict bug-detection warnings (``-Wlifetime-safety-strict``, which itself
++  includes ``-Wlifetime-safety-permissive``) -- the actual use-after-free,
++  use-after-scope, return-stack-address, dangling-field/global, and
++  invalidation findings;
++* the modeling-gap warnings emitted wherever the analysis cannot fully model a
++  construct (unsupported indirection, unmodeled or indirect calls, analysis
++  bailouts, unknown ownership, etc.); and
++* the annotation-validation warnings (``-Wlifetime-safety-noescape`` and
++  ``-Wlifetime-safety-lifetimebound-violation``), since an annotation the body
++  does not honor is a hole that callers trust.
++  }];
++}
++
+ def LifetimeSafetyAll : DiagGroup<"lifetime-safety-all",
+                                   [LifetimeSafety,
+                                   LifetimeSafetySuggestions,
+-                                  LifetimeSafetyValidations]> {
++                                  LifetimeSafetyValidations,
++                                  LifetimeSafetySoundness]> {
+   code Documentation = [{
+ Turns on all the warnings in the lifetime-safety umbrella.
+   }];
+diff --git a/clang/include/clang/Basic/DiagnosticIDs.h b/clang/include/clang/Basic/DiagnosticIDs.h
+index 47f63933e1e2..72fc3afce042 100644
+--- a/clang/include/clang/Basic/DiagnosticIDs.h
++++ b/clang/include/clang/Basic/DiagnosticIDs.h
+@@ -43,7 +43,7 @@ enum {
+   DIAG_SIZE_AST = 300,
+   DIAG_SIZE_COMMENT = 100,
+   DIAG_SIZE_CROSSTU = 100,
+-  DIAG_SIZE_SEMA = 5000,
++  DIAG_SIZE_SEMA = 5500,
+   DIAG_SIZE_ANALYSIS = 100,
+   DIAG_SIZE_REFACTORING = 1000,
+   DIAG_SIZE_INSTALLAPI = 100,
+diff --git a/clang/include/clang/Basic/DiagnosticSemaKinds.td b/clang/include/clang/Basic/DiagnosticSemaKinds.td
+index 077aace32126..a5ea8cf2a9c2 100644
+--- a/clang/include/clang/Basic/DiagnosticSemaKinds.td
++++ b/clang/include/clang/Basic/DiagnosticSemaKinds.td
+@@ -2334,6 +2334,22 @@ def warn_overriding_method_missing_noescape : Warning<
+   "__attribute__((noescape))">, InGroup<MissingNoEscape>;
+ def note_overridden_marked_noescape : Note<
+   "parameter of overridden method is annotated with __attribute__((noescape))">;
++def warn_lifetime_safety_override_param_adds_lifetimebound : Warning<
++  "overriding parameter %0 adds '[[clang::lifetimebound]]' not present on the "
++  "overridden method; a call through the base class would not enforce that the "
++  "returned borrow's lifetime is bound to it">,
++  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
++def warn_lifetime_safety_override_this_adds_lifetimebound : Warning<
++  "this overriding member function binds its return value to the object "
++  "('[[clang::lifetimebound]]'), but the overridden method does not; a call "
++  "through the base class would not enforce it">,
++  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
++def warn_lifetime_safety_override_of_immortal : Warning<
++  "this override of a 'lifetime_immortal' method does not guarantee its return "
++  "never dangles; a call through the base class assumes it does, so the override "
++  "must also be 'lifetime_immortal' (binding the return to the object with "
++  "'[[clang::lifetimebound]]' is a weaker guarantee and is not sufficient)">,
++  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+ def note_cat_conform_to_noescape_prot : Note<
+   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
+ 
+@@ -3510,6 +3526,9 @@ def warn_attribute_return_pointers_refs_only : Warning<
+ def warn_attribute_pointer_or_reference_only : Warning<
+   "%0 attribute only applies to a pointer or reference (%1 is invalid)">,
+   InGroup<IgnoredAttributes>;
++def warn_attribute_pointer_or_reference_or_record_only : Warning<
++  "%0 attribute only applies to a pointer, reference, class, struct, or union (%1 is invalid)">,
++  InGroup<IgnoredAttributes>;
+ def err_attribute_no_member_pointers : Error<
+   "%0 attribute cannot be used with pointers to members">;
+ def err_attribute_invalid_implicit_this_argument : Error<
+@@ -11079,6 +11098,119 @@ def warn_lifetime_safety_noescape_escapes
+       InGroup<LifetimeSafetyNoescape>,
+       DefaultIgnore;
+ 
++// Soundness diagnostics: emitted wherever the analysis cannot fully model a
++// construct, so that enabling them (typically as errors) yields a sound "safe
++// programming model".
++def warn_lifetime_safety_lost_loan
++    : Warning<"lifetime safety cannot track %0 here; no borrow information flows "
++              "into it, so a borrow was likely lost to an unmodeled construct">,
++      InGroup<LifetimeSafetyLostLoan>,
++      DefaultIgnore;
++def warn_lifetime_safety_bailout
++    : Warning<"lifetime safety analysis skipped this function because its "
++              "control-flow graph %select{is too large|could not be built}0; "
++              "lifetime mistakes here may not be detected">,
++      InGroup<LifetimeSafetyBailout>,
++      DefaultIgnore;
++def warn_lifetime_safety_indirect_call
++    : Warning<"call through a function pointer or otherwise unresolved callee "
++              "is not modeled by lifetime safety analysis">,
++      InGroup<LifetimeSafetyIndirectCall>,
++      DefaultIgnore;
++def warn_lifetime_safety_unannotated_indirection
++    : Warning<"argument is bound to a parameter that can hold a borrow but is "
++              "not annotated for lifetime safety; annotate the parameter with "
++              "'lifetimebound', 'noescape', or 'lifetime_capture_by'">,
++      InGroup<LifetimeSafetyUnannotatedIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_unannotated_param
++    : Warning<"parameter that can hold a borrow is not annotated for lifetime "
++              "safety; annotate it with 'lifetimebound', 'noescape', or "
++              "'lifetime_capture_by'">,
++      InGroup<LifetimeSafetyUnannotatedIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_unannotated_this_return
++    : Warning<"member function returning %0 is not annotated for lifetime "
++              "safety; the returned borrow's lifetime is unspecified, so mark "
++              "the implicit object 'lifetimebound' or the function "
++              "'lifetime_immortal'">,
++      InGroup<LifetimeSafetyUnannotatedIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_this_escapes_to_global
++    : Warning<"a borrow of the enclosing object or one of its members escapes to "
++              "global or static storage %0, whose lifetime is unrelated to the "
++              "caller's object; it may dangle">,
++      InGroup<LifetimeSafetyUnannotatedIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_annotated_param_escapes_to_global
++    : Warning<"parameter escapes to global or static storage %0, which its "
++              "lifetime annotation does not describe; the safe programming "
++              "model does not allow storing the borrow there">,
++      InGroup<LifetimeSafetyUnannotatedIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_global_capture
++    : Warning<"'lifetime_capture_by(global)' is not supported by the safe "
++              "programming model; the analysis cannot track borrows captured "
++              "into global or static storage, so such a capture may dangle "
++              "undetected">,
++      InGroup<LifetimeSafetyGlobalCapture>,
++      DefaultIgnore;
++def warn_lifetime_safety_multilevel_indirection
++    : Warning<"%0 uses more than one level of indirection, which lifetime "
++              "safety analysis cannot fully model; the safe programming model "
++              "supports only a single level of indirection">,
++      InGroup<LifetimeSafetyMultilevelIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_move_silencing
++    : Warning<"moving an owner is not modeled by lifetime safety analysis, so "
++              "lifetime checks for the moved-from object are silenced">,
++      InGroup<LifetimeSafetyMoveSilencing>,
++      DefaultIgnore;
++def warn_lifetime_safety_assumed_invalidation
++    : Warning<"%select{object whose reference is captured|parameter}0 may be "
++              "invalidated by an operation that lifetime safety analysis "
++              "assumes mutates the owner">,
++      InGroup<LifetimeSafetyAssumedInvalidation>,
++      DefaultIgnore;
++def note_lifetime_safety_assumed_invalidated_here
++    : Note<"assumed to be invalidated by this operation">;
++def warn_lifetime_safety_naked_delete
++    : Warning<"%select{deleting|freeing}0 a pointer whose allocation was not "
++              "seen by lifetime safety analysis; it cannot be verified to be a "
++              "live, unaliased heap allocation">,
++      InGroup<LifetimeSafetyNakedDelete>,
++      DefaultIgnore;
++def warn_lifetime_safety_unknown_ownership
++    : Warning<"type %0 can hold a borrow but is annotated neither "
++              "[[gsl::Owner]] nor [[gsl::Pointer]], so lifetime safety cannot "
++              "track its ownership">,
++      InGroup<LifetimeSafetyUnknownOwnership>,
++      DefaultIgnore;
++def warn_lifetime_safety_exception
++    : Warning<"exception control flow is not modeled by lifetime safety "
++              "analysis; a borrow that dangles only along an exception path "
++              "may be missed">,
++      InGroup<LifetimeSafetyException>,
++      DefaultIgnore;
++def warn_lifetime_safety_owner_of_indirection
++    : Warning<"type %0 is a container whose element type is a pointer or "
++              "reference; lifetime safety cannot track borrows held by its "
++              "elements">,
++      InGroup<LifetimeSafetyOwnerOfIndirection>,
++      DefaultIgnore;
++def warn_lifetime_safety_mutable_field
++    : Warning<"'mutable' field %0 can be modified by a const member function; "
++              "lifetime safety assumes const member functions do not invalidate "
++              "borrows into the object">,
++      InGroup<LifetimeSafetyConstSubversion>,
++      DefaultIgnore;
++def warn_lifetime_safety_const_cast
++    : Warning<"'const_cast' can subvert the const-correctness that lifetime "
++              "safety relies on to assume const member functions do not "
++              "invalidate borrows into the object">,
++      InGroup<LifetimeSafetyConstSubversion>,
++      DefaultIgnore;
++
+ // For non-floating point, expressions of the form x == x or x != x
+ // should result in a warning, since these always evaluate to a constant.
+ // Array comparisons have similar warnings
+diff --git a/clang/include/clang/Basic/Features.def b/clang/include/clang/Basic/Features.def
+index 2f7741ff74f9..7fc2456c65ae 100644
+--- a/clang/include/clang/Basic/Features.def
++++ b/clang/include/clang/Basic/Features.def
+@@ -129,6 +129,7 @@ FEATURE(attribute_unavailable_with_message, true)
+ FEATURE(attribute_unused_on_fields, true)
+ FEATURE(attribute_diagnose_if_objc, true)
+ FEATURE(ext_vector_type_boolean, true)
++FEATURE(attribute_noescape_nonpointer, true)
+ FEATURE(blocks, LangOpts.Blocks)
+ FEATURE(c_thread_safety_attributes, true)
+ FEATURE(cxx_exceptions, LangOpts.CXXExceptions)
+diff --git a/clang/include/clang/Sema/Sema.h b/clang/include/clang/Sema/Sema.h
+index b8d760e7e097..b52bf858a72d 100644
+--- a/clang/include/clang/Sema/Sema.h
++++ b/clang/include/clang/Sema/Sema.h
+@@ -4969,13 +4969,6 @@ public:
+                                       StringRef &Str,
+                                       SourceLocation *ArgLocation = nullptr);
+ 
+-  /// Determine if type T is a valid subject for a nonnull and similar
+-  /// attributes. Dependent types are considered valid so they can be checked
+-  /// during instantiation time. By default, we look through references (the
+-  /// behavior used by nonnull), but if the second parameter is true, then we
+-  /// treat a reference type as valid.
+-  bool isValidPointerAttrType(QualType T, bool RefOkay = false);
+-
+   /// AddAssumeAlignedAttr - Adds an assume_aligned attribute to a particular
+   /// declaration.
+   void AddAssumeAlignedAttr(Decl *D, const AttributeCommonInfo &CI, Expr *E,
+diff --git a/clang/lib/AST/AttrImpl.cpp b/clang/lib/AST/AttrImpl.cpp
+index 3a379891016f..96286a5dba92 100644
+--- a/clang/lib/AST/AttrImpl.cpp
++++ b/clang/lib/AST/AttrImpl.cpp
+@@ -376,4 +376,30 @@ bool areAlignedAttrsEqual(const AlignedAttr &A1, const AlignedAttr &A2,
+ }
+ } // namespace
+ 
++bool clang::isValidPointerAttrType(QualType T, bool RefOkay) {
++  if (T->isDependentType())
++    return true;
++  if (RefOkay) {
++    if (T->isReferenceType())
++      return true;
++  } else {
++    T = T.getNonReferenceType();
++  }
++
++  // The nonnull attribute, and other similar attributes, can be applied to a
++  // transparent union that contains a pointer type.
++  if (const RecordType *UT = T->getAsUnionType()) {
++    RecordDecl *UD = UT->getDecl()->getDefinitionOrSelf();
++    if (UD->hasAttr<TransparentUnionAttr>()) {
++      for (const auto *I : UD->fields()) {
++        QualType QT = I->getType();
++        if (QT->isAnyPointerType() || QT->isBlockPointerType())
++          return true;
++      }
++    }
++  }
++
++  return T->isAnyPointerType() || T->isBlockPointerType();
++}
++
+ #include "clang/AST/AttrImpl.inc"
+diff --git a/clang/lib/Analysis/LifetimeSafety/Checker.cpp b/clang/lib/Analysis/LifetimeSafety/Checker.cpp
+index 2a71b5eb9a93..b239b8411a75 100644
+--- a/clang/lib/Analysis/LifetimeSafety/Checker.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/Checker.cpp
+@@ -14,6 +14,7 @@
+ #include "clang/Analysis/Analyses/LifetimeSafety/Checker.h"
+ #include "clang/AST/Decl.h"
+ #include "clang/AST/Expr.h"
++#include "clang/AST/StmtCXX.h"
+ #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
+ #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
+ #include "clang/Analysis/Analyses/LifetimeSafety/LiveOrigins.h"
+@@ -42,6 +43,33 @@ static bool causingFactDominatesExpiry(LivenessKind K) {
+ 
+ namespace {
+ 
++/// Returns true if peeling all pointer (and array) levels of \p T yields a
++/// character type -- i.e. T is `char**`, `char*[]`, etc. Used to exempt main's
++/// `argv`/`envp` parameters, whose multi-level type is mandated by the
++/// language.
++static bool isCharacterPointerChain(QualType T, const ASTContext &Ctx) {
++  T = Ctx.getBaseElementType(T);
++  if (!T->isPointerType())
++    return false;
++  while (T->isPointerType())
++    T = T->getPointeeType();
++  return T->isAnyCharacterType();
++}
++
++/// Collects the compiler-introduced range variables ('auto&& __range = ...') of
++/// every range-based for statement reachable from \p S.
++static void collectRangeForRangeVars(const Stmt *S,
++                                     llvm::DenseSet<const VarDecl *> &Out) {
++  if (!S)
++    return;
++  if (const auto *FRS = dyn_cast<CXXForRangeStmt>(S))
++    if (const DeclStmt *DS = FRS->getRangeStmt())
++      if (const auto *VD = dyn_cast_or_null<VarDecl>(DS->getSingleDecl()))
++        Out.insert(VD);
++  for (const Stmt *Child : S->children())
++    collectRangeForRangeVars(Child, Out);
++}
++
+ /// Struct to store the complete context for a potential lifetime violation.
+ struct PendingWarning {
+   SourceLocation ExpiryLoc; // Where the loan expired.
+@@ -60,7 +88,43 @@ private:
+   llvm::DenseMap<LoanID, PendingWarning> FinalWarningsMap;
+   llvm::DenseMap<AnnotationTarget, EscapingTarget> AnnotationWarningsMap;
+   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
++  /// Borrows of the implicit object (`this`) or one of its fields that escape
++  /// to global/static storage from a method. The global is caller-independent
++  /// and outlives the call, but the borrowed object's lifetime is the caller's,
++  /// so such an escape may dangle. Keyed by the global to de-duplicate; the
++  /// value records whether the borrow was of `this` (false) or a field (true)
++  /// and a source location to anchor the diagnostic.
++  struct ThisEscapeToGlobal {
++    bool IsField;
++    SourceLocation Loc;
++  };
++  llvm::DenseMap<const VarDecl *, ThisEscapeToGlobal> ThisEscapesToGlobalMap;
++  /// Parameters annotated [[clang::lifetimebound]] or [[clang::lifetime_capture_by]]
++  /// (to something other than `global`) whose borrow nonetheless escapes to
++  /// global/static storage. Those annotations describe a return/capture
++  /// relationship, not a global capture, so the caller is unaware the global
++  /// now aliases the argument. Keyed by parameter to de-duplicate.
++  llvm::DenseMap<const ParmVarDecl *, const VarDecl *>
++      AnnotatedParamEscapesToGlobalMap;
+   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
++  /// Source locations already reported as lost-loan, to avoid duplicate
++  /// soundness warnings when several uses (e.g. a DeclRefExpr and its
++  /// lvalue-to-rvalue cast) share a location.
++  llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
++  /// Expressions already reported as an untracked construct, to avoid duplicate
++  /// soundness warnings when a construct is visited more than once.
++  llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
++  /// Declarations already reported as an untracked construct.
++  llvm::DenseSet<const ValueDecl *> ReportedUntrackedDecls;
++  /// Source locations already reported as an untracked construct, for facts
++  /// anchored to a statement rather than an expression or declaration.
++  llvm::DenseSet<SourceLocation> ReportedUntrackedLocs;
++  /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
++  /// duplicate warnings when several live origins hold the same borrow.
++  llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
++  /// Assumed-invalidation candidates collected during the fact walk, emitted
++  /// after the precise warnings are finalized.
++  llvm::SmallVector<std::pair<LoanID, const Expr *>> PendingAssumedInval;
+   const LoanPropagationAnalysis &LoanPropagation;
+   const MovedLoansAnalysis &MovedLoans;
+   const LiveOriginsAnalysis &LiveOrigins;
+@@ -95,13 +159,29 @@ public:
+       for (const Fact *F : FactMgr.getFacts(B))
+         if (const auto *EF = F->getAs<ExpireFact>())
+           checkExpiry(EF);
+-        else if (const auto *IOF = F->getAs<InvalidateOriginFact>())
+-          checkInvalidation(IOF);
++        else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
++          if (IOF->isAssumed())
++            checkAssumedInvalidation(IOF);
++          else {
++            checkInvalidation(IOF);
++            if (IOF->isDeallocation())
++              checkNakedDeallocation(IOF);
++          }
++        }
+         else if (const auto *OEF = F->getAs<OriginEscapesFact>())
+           checkAnnotations(OEF);
++        else if (const auto *UF = F->getAs<UseFact>())
++          checkLostLoan(UF);
++        else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
++          recordUntrackedConstruct(UCF);
+     issuePendingWarnings();
++    issueAssumedInvalidations();
++    checkUnannotatedParams();
++    checkGlobalCaptureAnnotations();
++    checkMultiLevelIndirection();
+     suggestAnnotations();
+     reportNoescapeViolations();
++    reportThisEscapesToGlobal();
+     reportLifetimeboundViolations();
+     reportMisplacedLifetimebound();
+     //  Annotation inference is currently guarded by a frontend flag. In the
+@@ -111,6 +191,16 @@ public:
+       inferAnnotations();
+   }
+ 
++  /// Returns true if \p PVD is annotated [[clang::lifetime_capture_by(global)]],
++  /// which documents that the parameter may be captured by global storage.
++  static bool capturesGlobal(const ParmVarDecl *PVD) {
++    if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
++      for (int Idx : A->params())
++        if (Idx == LifetimeCaptureByAttr::Global)
++          return true;
++    return false;
++  }
++
+   /// Checks if an escaping origin holds a placeholder loan, indicating a
+   /// missing [[clang::lifetimebound]] annotation or a violation of
+   /// [[clang::noescape]].
+@@ -160,6 +250,37 @@ public:
+     for (LoanID LID : EscapedLoans) {
+       const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
+       const AccessPath &AP = L->getAccessPath();
++      // Safe-model rule: a borrow of the implicit object (`this`) or one of its
++      // fields must not escape to global/static storage. Intra-procedurally the
++      // object is caller-scope (a placeholder that never expires), so such a
++      // store is otherwise silently accepted even though the global outlives the
++      // caller's object. Flag it here.
++      if (const auto *GlobalEsc = dyn_cast<GlobalEscapeFact>(OEF)) {
++        bool IsThis = AP.getAsPlaceholderThis() != nullptr;
++        const auto *VD = AP.getAsValueDecl();
++        bool IsField = VD && isa<FieldDecl>(VD);
++        if (IsThis || IsField) {
++          SourceLocation Loc = L->getIssuingExpr()
++                                   ? L->getIssuingExpr()->getExprLoc()
++                                   : FD->getLocation();
++          ThisEscapesToGlobalMap.try_emplace(GlobalEsc->getGlobal(),
++                                             ThisEscapeToGlobal{IsField, Loc});
++        }
++        // A parameter annotated [[clang::lifetimebound]] or
++        // [[clang::lifetime_capture_by]] (to something other than `global`)
++        // describes a return/capture relationship, not a global capture; its
++        // escape to a global is therefore uncovered by the annotation. An
++        // unannotated parameter is already reported by checkUnannotatedParams,
++        // and a [[clang::noescape]] one by reportNoescapeViolations, so they are
++        // excluded here.
++        if (const auto *PVD = AP.getAsPlaceholderParam();
++            PVD && !PVD->hasAttr<NoEscapeAttr>() &&
++            (PVD->hasAttr<LifetimeBoundAttr>() ||
++             PVD->hasAttr<LifetimeCaptureByAttr>()) &&
++            !capturesGlobal(PVD))
++          AnnotatedParamEscapesToGlobalMap.try_emplace(PVD,
++                                                       GlobalEsc->getGlobal());
++      }
+       if (const auto *PVD = AP.getAsPlaceholderParam())
+         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
+       else if (const auto *MD = AP.getAsPlaceholderThis())
+@@ -239,6 +360,270 @@ public:
+     }
+   }
+ 
++  /// Soundness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
++  /// loan flowing into the deallocated pointer is not a heap allocation -- the
++  /// analysis cannot then prove the deallocation refers to a live, unaliased
++  /// heap allocation. This is intentionally strict: every loan must be a heap
++  /// allocation. Deallocations inside a destructor are exempt (freeing owned
++  /// members there is the normal ownership pattern).
++  void checkNakedDeallocation(const InvalidateOriginFact *IOF) {
++    if (!SemaHelper || isa_and_present<CXXDestructorDecl>(FD))
++      return;
++    // Strict: a deallocation is safe only if every borrow flowing into it is a
++    // tracked heap allocation. A non-heap loan (e.g. a stack borrow) cannot be
++    // freed; an *empty* loan set means the allocation was never seen -- e.g.
++    // deleting through a member or parameter pointer -- which is equally
++    // unverifiable (the pointer may be aliased or not heap-owned).
++    LoanSet Loans = LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF);
++    bool Safe = !Loans.isEmpty();
++    for (LoanID LID : Loans)
++      if (!FactMgr.getLoanMgr()
++               .getLoan(LID)
++               ->getAccessPath()
++               .isHeapAllocation()) {
++        Safe = false;
++        break;
++      }
++    if (!Safe)
++      SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
++  }
++
++  /// Soundness check for "assumed" invalidations (a non-const operation on an
++  /// owner, or passing an owner to a non-const pointer/reference parameter).
++  /// Mirrors checkInvalidation's borrow-matching but collects candidates to be
++  /// emitted after the precise warnings are finalized, so that a borrow already
++  /// reported as a known invalidation is not also flagged here.
++  void checkAssumedInvalidation(const InvalidateOriginFact *IOF) {
++    if (!SemaHelper)
++      return;
++    LoanSet DirectlyInvalidatedLoans =
++        LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF);
++    if (DirectlyInvalidatedLoans.isEmpty())
++      return;
++    auto IsInvalidated = [&](const Loan *L) {
++      for (LoanID InvalidID : DirectlyInvalidatedLoans)
++        if (FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath() ==
++            L->getAccessPath())
++          return true;
++      return false;
++    };
++    for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
++      for (LoanID LiveLoanID : LoanPropagation.getLoans(OID, IOF)) {
++        const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
++        if (!IsInvalidated(L))
++          continue;
++        // Record each invalidated borrow at most once per operation.
++        if (!ReportedAssumedInval
++                 .insert({LiveLoanID.Value, IOF->getInvalidationExpr()})
++                 .second)
++          continue;
++        PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationExpr()});
++      }
++    }
++  }
++
++  /// Emits the collected assumed-invalidation warnings, skipping any borrow
++  /// that was already reported as a known (precise) invalidation.
++  void issueAssumedInvalidations() {
++    if (!SemaHelper)
++      return;
++    for (auto &[LID, OperationExpr] : PendingAssumedInval) {
++      // If this borrow is already reported as a known invalidation, the
++      // lower-confidence assumed warning would be redundant.
++      auto It = FinalWarningsMap.find(LID);
++      if (It != FinalWarningsMap.end() && It->second.InvalidatedByExpr)
++        continue;
++      const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
++      if (const Expr *IssueExpr = L->getIssuingExpr())
++        SemaHelper->reportAssumedInvalidation(IssueExpr, OperationExpr);
++      else if (const ParmVarDecl *PVD =
++                   L->getAccessPath().getAsPlaceholderParam())
++        SemaHelper->reportAssumedInvalidation(PVD, OperationExpr);
++    }
++  }
++
++  /// indicates a borrow was lost because some construct was not modeled during
++  /// loan propagation (or the pointer is null/uninitialized, which is equally
++  /// untracked). Reports it so that, with the warning enabled as an error, the
++  /// analysis never silently fails to account for a borrow.
++  void checkLostLoan(const UseFact *UF) {
++    if (!SemaHelper || UF->isWritten())
++      return;
++    const Expr *UseExpr = UF->getUseExpr();
++    // Skip implicit nodes (e.g. an lvalue-to-rvalue cast) that duplicate an
++    // explicit use at the same location and carry no useful diagnostic subject.
++    // IgnoreImplicit() returns a different node exactly when the use expression
++    // is itself an implicit node.
++    if (UseExpr->IgnoreImplicit() != UseExpr)
++      return;
++    const OriginList *OL = UF->getUsedOrigins();
++    if (!OL)
++      return;
++    if (!LoanPropagation.getLoans(OL->getOuterOriginID(), UF).isEmpty())
++      return;
++    if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
++      return;
++    SemaHelper->reportLostLoan(UseExpr);
++  }
++
++  /// Translates a fact recording an unmodeled construct into the corresponding
++  /// soundness diagnostic, de-duplicating per construct expression.
++  void recordUntrackedConstruct(const UntrackedConstructFact *UCF) {
++    if (!SemaHelper)
++      return;
++    const Expr *E = UCF->getConstructExpr();
++    if (E && !ReportedUntrackedExprs.insert(E).second)
++      return;
++    const ValueDecl *D = UCF->getConstructDecl();
++    if (D && !ReportedUntrackedDecls.insert(D).second)
++      return;
++    switch (UCF->getReason()) {
++    case UntrackedConstructReason::IndirectCall:
++      SemaHelper->reportIndirectCall(E);
++      break;
++    case UntrackedConstructReason::UnannotatedIndirection:
++      SemaHelper->reportUnannotatedIndirection(E);
++      break;
++    case UntrackedConstructReason::MoveSilencing:
++      SemaHelper->reportMoveSilencing(E);
++      break;
++    case UntrackedConstructReason::UnknownOwnership:
++      if (D)
++        SemaHelper->reportUnknownOwnership(D);
++      else
++        SemaHelper->reportUnknownOwnership(E);
++      break;
++    case UntrackedConstructReason::OwnerOfIndirection:
++      if (D)
++        SemaHelper->reportOwnerOfIndirection(D);
++      else
++        SemaHelper->reportOwnerOfIndirection(E);
++      break;
++    case UntrackedConstructReason::Exception:
++      if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
++        SemaHelper->reportException(UCF->getConstructLoc());
++      break;
++    }
++  }
++
++  /// Soundness check for the function's own signature: every parameter of
++  /// origin-carrying type (raw pointer/reference, gsl::Pointer, etc.) -- and the
++  /// implicit object of a member function whose result borrows it -- must carry
++  /// a lifetime annotation under the "safe programming model", otherwise its
++  /// lifetime contract is unspecified.
++  void checkUnannotatedParams() {
++    if (!SemaHelper)
++      return;
++    const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD);
++    if (!Fn)
++      return;
++    for (const ParmVarDecl *PVD : Fn->parameters()) {
++      // Soundness: a parameter of a user-defined type whose ownership is
++      // unknown (reported separately from the annotation requirement).
++      if (isUnknownOwnershipType(PVD->getType(),
++                                 FactMgr.getUnknownOwnershipCache())) {
++        if (ReportedUntrackedDecls.insert(PVD).second)
++          SemaHelper->reportUnknownOwnership(PVD);
++        continue;
++      }
++      // Soundness: a parameter of a gsl::Owner container whose elements are
++      // indirections (e.g. std::vector<int*>); per-element borrows are not
++      // tracked. This holds regardless of any annotation, so check before the
++      // annotation requirement and see through a reference parameter.
++      if (isGslOwnerOfIndirection(PVD->getType().getNonReferenceType())) {
++        if (ReportedUntrackedDecls.insert(PVD).second)
++          SemaHelper->reportOwnerOfIndirection(PVD);
++        continue;
++      }
++      if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
++        continue;
++      // Multi-level indirection is reported separately; don't double-flag.
++      if (OriginList *L = FactMgr.getOriginMgr().getOrCreateList(PVD);
++          L && L->getLength() > 1)
++        continue;
++      if (PVD->hasAttr<LifetimeBoundAttr>() || PVD->hasAttr<NoEscapeAttr>() ||
++          PVD->hasAttr<LifetimeCaptureByAttr>())
++        continue;
++      SemaHelper->reportUnannotatedParam(PVD);
++    }
++
++    // The implicit object is also a parameter: an instance member function
++    // (including a conversion operator) whose return type is an indirection
++    // (pointer, reference, or gsl::Pointer) must declare where that borrow comes
++    // from -- otherwise a (frequently implicit, e.g. `int* p = obj;`) call site
++    // cannot track it. Require [[clang::lifetimebound]] on the implicit object
++    // (or on a parameter the borrow may come from instead) or
++    // [[clang::lifetime_immortal]] on the function. Standard-library accessors
++    // are modeled via GSL recognition and are exempt.
++    const auto *MD = dyn_cast<CXXMethodDecl>(Fn);
++    if (!MD || !MD->isInstance() || isInStlNamespace(MD->getParent()))
++      return;
++    QualType RetTy = MD->getReturnType();
++    if (!isPointerLikeType(RetTy) && !RetTy->isReferenceType())
++      return;
++    if (implicitObjectParamIsLifetimeBound(MD) ||
++        MD->hasAttr<LifetimeImmortalAttr>())
++      return;
++    for (const ParmVarDecl *PVD : MD->parameters())
++      if (PVD->hasAttr<LifetimeBoundAttr>())
++        return;
++    SemaHelper->reportUnannotatedThisReturn(MD);
++  }
++
++  /// Soundness check: under the "safe programming model" only a single level
++  /// of indirection is supported. A declaration whose origin list has more than
++  /// one level (e.g. 'int **', 'int *&') cannot be fully modeled, so flag it.
++  void checkMultiLevelIndirection() {
++    if (!SemaHelper)
++      return;
++    OriginManager &OM = FactMgr.getOriginMgr();
++    // Compiler-introduced range-for range variables ('auto&& __range = ...')
++    // are references that merely alias the range expression. The reference does
++    // not add a real level of indirection, so it must not count toward the
++    // one-level limit -- otherwise iterating a view (e.g. 'for (x : span)')
++    // would be rejected as multi-level even though the view itself is a single
++    // level. A genuinely untrackable range is still caught elsewhere (a
++    // dangling view via use-after-scope / lost-loan on its borrow).
++    llvm::DenseSet<const VarDecl *> RangeVars;
++    if (const Stmt *Body = FD ? FD->getBody() : nullptr)
++      collectRangeForRangeVars(Body, RangeVars);
++    llvm::DenseSet<const ValueDecl *> Seen;
++    llvm::SmallVector<const ValueDecl *> MultiLevel;
++    auto Consider = [&](const ValueDecl *VD, OriginList *L) {
++      if (!L)
++        return;
++      // main's 'argv'/'envp' are 'char**' (a character pointer-chain) by
++      // language mandate; exempt them from the single-indirection rule.
++      // (Checked here so it applies whether the parameter is reached as a
++      // parameter or via the tracked-decl map below.)
++      if (const auto *P = dyn_cast<ParmVarDecl>(VD))
++        if (const auto *Fn = dyn_cast<FunctionDecl>(P->getDeclContext());
++            Fn && Fn->isMain() && isCharacterPointerChain(P->getType(), AST))
++          return;
++      unsigned Depth = L->getLength();
++      if (const auto *VarD = dyn_cast<VarDecl>(VD);
++          VarD && RangeVars.contains(VarD) &&
++          VarD->getType()->isReferenceType() && Depth > 0)
++        --Depth; // peel the alias reference of the range variable
++      if (Depth > 1 && Seen.insert(VD).second)
++        MultiLevel.push_back(VD);
++    };
++    // Parameters (including ones never used in the body).
++    if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
++      for (const ParmVarDecl *P : Fn->parameters())
++        Consider(P, OM.getOrCreateList(P));
++    // Local variables and any other tracked declarations.
++    for (const auto &[VD, L] : OM.getDeclOriginLists())
++      Consider(VD, L);
++    // Emit in source order for deterministic diagnostics.
++    llvm::sort(MultiLevel, [](const ValueDecl *A, const ValueDecl *B) {
++      return A->getLocation().getRawEncoding() <
++             B->getLocation().getRawEncoding();
++    });
++    for (const ValueDecl *VD : MultiLevel)
++      SemaHelper->reportMultiLevelIndirection(VD);
++  }
++
+   void issuePendingWarnings() {
+     if (!SemaHelper)
+       return;
+@@ -418,6 +803,28 @@ public:
+     }
+   }
+ 
++  void reportThisEscapesToGlobal() {
++    if (!SemaHelper)
++      return;
++    for (auto [Global, Info] : ThisEscapesToGlobalMap)
++      SemaHelper->reportThisEscapesToGlobal(Info.Loc, Info.IsField, Global);
++    for (auto [PVD, Global] : AnnotatedParamEscapesToGlobalMap)
++      SemaHelper->reportAnnotatedParamEscapesToGlobal(PVD, Global);
++  }
++
++  // Bans [[clang::lifetime_capture_by(global)]]: the analysis cannot track a
++  // borrow captured into global/static storage, so the construct is rejected.
++  void checkGlobalCaptureAnnotations() {
++    if (!SemaHelper)
++      return;
++    const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD);
++    if (!Fn)
++      return;
++    for (const ParmVarDecl *PVD : Fn->parameters())
++      if (capturesGlobal(PVD))
++        SemaHelper->reportGlobalCapture(PVD);
++  }
++
+   void reportLifetimeboundViolations() {
+     if (!isa<FunctionDecl>(FD))
+       return;
+diff --git a/clang/lib/Analysis/LifetimeSafety/Dataflow.h b/clang/lib/Analysis/LifetimeSafety/Dataflow.h
+index fc3049c8bec8..1e55f4141384 100644
+--- a/clang/lib/Analysis/LifetimeSafety/Dataflow.h
++++ b/clang/lib/Analysis/LifetimeSafety/Dataflow.h
+@@ -182,6 +182,8 @@ private:
+       return D->transfer(In, *F->getAs<InvalidateOriginFact>());
+     case Fact::Kind::KillOrigin:
+       return D->transfer(In, *F->getAs<KillOriginFact>());
++    case Fact::Kind::UntrackedConstruct:
++      return D->transfer(In, *F->getAs<UntrackedConstructFact>());
+     }
+     llvm_unreachable("Unknown fact kind");
+   }
+@@ -196,6 +198,7 @@ public:
+   Lattice transfer(Lattice In, const TestPointFact &) { return In; }
+   Lattice transfer(Lattice In, const InvalidateOriginFact &) { return In; }
+   Lattice transfer(Lattice In, const KillOriginFact &) { return In; }
++  Lattice transfer(Lattice In, const UntrackedConstructFact &) { return In; }
+ };
+ } // namespace clang::lifetimes::internal
+ #endif // LLVM_CLANG_ANALYSIS_ANALYSES_LIFETIMESAFETY_DATAFLOW_H
+diff --git a/clang/lib/Analysis/LifetimeSafety/Facts.cpp b/clang/lib/Analysis/LifetimeSafety/Facts.cpp
+index 3d7fbcdacc83..3ea8faabd938 100644
+--- a/clang/lib/Analysis/LifetimeSafety/Facts.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/Facts.cpp
+@@ -110,6 +110,32 @@ void KillOriginFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+   OS << ")\n";
+ }
+ 
++void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
++                                  const OriginManager &) const {
++  OS << "UntrackedConstruct (";
++  switch (getReason()) {
++  case UntrackedConstructReason::IndirectCall:
++    OS << "IndirectCall";
++    break;
++  case UntrackedConstructReason::UnannotatedIndirection:
++    OS << "UnannotatedIndirection";
++    break;
++  case UntrackedConstructReason::MoveSilencing:
++    OS << "MoveSilencing";
++    break;
++  case UntrackedConstructReason::UnknownOwnership:
++    OS << "UnknownOwnership";
++    break;
++  case UntrackedConstructReason::Exception:
++    OS << "Exception";
++    break;
++  case UntrackedConstructReason::OwnerOfIndirection:
++    OS << "OwnerOfIndirection";
++    break;
++  }
++  OS << ")\n";
++}
++
+ llvm::StringMap<ProgramPoint> FactManager::getTestPoints() const {
+   llvm::StringMap<ProgramPoint> AnnotationToPointMap;
+   for (const auto &BlockFacts : BlockToFacts) {
+diff --git a/clang/lib/Analysis/LifetimeSafety/FactsGenerator.cpp b/clang/lib/Analysis/LifetimeSafety/FactsGenerator.cpp
+index 633f9ae57930..c3833c4d110c 100644
+--- a/clang/lib/Analysis/LifetimeSafety/FactsGenerator.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/FactsGenerator.cpp
+@@ -112,9 +112,11 @@ void FactsGenerator::run() {
+     CurrentBlockFacts.clear();
+     EscapesInCurrentBlock.clear();
+     CurrentBlock = Block;
+-    if (Block == &Cfg.getEntry())
++    if (Block == &Cfg.getEntry()) {
+       CurrentBlockFacts.append(PlaceholderLoanFacts.begin(),
+                                PlaceholderLoanFacts.end());
++      handleTryStatements();
++    }
+     for (unsigned I = 0; I < Block->size(); ++I) {
+       const CFGElement &Element = Block->Elements[I];
+       if (std::optional<CFGStmt> CS = Element.getAs<CFGStmt>())
+@@ -153,16 +155,62 @@ static OriginList *getRValueOrigins(const Expr *E, OriginList *List) {
+ }
+ 
+ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
+-  for (const Decl *D : DS->decls())
+-    if (const auto *VD = dyn_cast<VarDecl>(D))
+-      if (const Expr *InitExpr = VD->getInit()) {
+-        OriginList *VDList = getOriginsList(*VD);
+-        if (!VDList)
+-          continue;
++  for (const Decl *D : DS->decls()) {
++    const auto *VD = dyn_cast<VarDecl>(D);
++    if (!VD)
++      continue;
++    // Soundness: a local of a user-defined type whose ownership is unknown.
++    if (isUnknownOwnershipType(VD->getType(),
++                               FactMgr.getUnknownOwnershipCache()))
++      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++          UntrackedConstructReason::UnknownOwnership, VD));
++    // Soundness: a local gsl::Owner container whose elements are indirections
++    // (e.g. std::vector<int*>); per-element borrows are not tracked.
++    else if (isGslOwnerOfIndirection(VD->getType()))
++      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++          UntrackedConstructReason::OwnerOfIndirection, VD));
++    // An array of pointer-like elements shares one element-origin across all
++    // elements. Seed it with a non-expiring "uninitialized" loan so the origin
++    // is never empty: a borrow stored into an element later merges in beside
++    // it, and an access before any store does not look like a lost borrow.
++    if (VD->getType()->isArrayType() && hasOrigins(VD->getType()))
++      if (OriginList *VDList = getOriginsList(*VD)) {
++        const Loan *L = FactMgr.getLoanMgr().createLoan(
++            AccessPath::Uninitialized(VD), /*IssuingExpr=*/nullptr);
++        CurrentBlockFacts.push_back(
++            FactMgr.createFact<IssueFact>(L->getID(), VDList->getOuterOriginID()));
++      }
++    if (const Expr *InitExpr = VD->getInit()) {
++      if (OriginList *VDList = getOriginsList(*VD)) {
+         OriginList *InitList = getOriginsList(*InitExpr);
+         assert(InitList && "VarDecl had origins but InitExpr did not");
+         flow(VDList, InitList, /*Kill=*/true);
+       }
++    }
++    // A structured binding's holding expressions (`e[i]` / `e.field`) are not
++    // visited by the CFG walk; generate their flows so the bindings, which
++    // alias them, are tracked. This must run even when the holding variable
++    // itself has no origin list (e.g. a by-value `int[2]` copy): taking the
++    // address of a binding still borrows the copy's storage.
++    if (const auto *DD = dyn_cast<DecompositionDecl>(VD))
++      handleStructuredBinding(DD);
++  }
++}
++
++void FactsGenerator::handleStructuredBinding(const DecompositionDecl *DD) {
++  for (const BindingDecl *BD : DD->bindings())
++    if (const Expr *Holding = BD->getBinding())
++      visitBindingHoldingExpr(Holding);
++}
++
++void FactsGenerator::visitBindingHoldingExpr(const Stmt *S) {
++  if (!S)
++    return;
++  // Post-order: generate flows for sub-expressions (the holding variable
++  // reference, array-to-pointer decay, etc.) before the access itself.
++  for (const Stmt *Child : S->children())
++    visitBindingHoldingExpr(Child);
++  Visit(S);
+ }
+ 
+ void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
+@@ -256,6 +304,11 @@ void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {
+     Args.append(MCE->getArgs(), MCE->getArgs() + MCE->getNumArgs());
+ 
+     handleFunctionCall(MCE, Method, Args, /*IsGslConstruction=*/false);
++  } else {
++    // No resolved method (e.g. a call through a member-function pointer): the
++    // callee cannot carry lifetime annotations, so the call is not modeled.
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::IndirectCall, MCE));
+   }
+ }
+ 
+@@ -338,6 +391,15 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
+     if (Src && Dest && Dest->getLength() == Src->getLength())
+       flow(Dest, Src, /*Kill=*/true);
+     return;
++  case CK_IntegralToPointer:
++    // A pointer materialized from an integer (e.g. 'reinterpret_cast<int*>(n)'
++    // or a C-style '(int*)n') has no tracked provenance: any borrow laundered
++    // through the integer was dropped. Mark the result as a use so the empty
++    // origin is reported as a lost loan -- this covers the result being
++    // dereferenced/indexed directly as an rvalue, which would otherwise create
++    // no tracked pointer lvalue and slip through.
++    handleUse(CE);
++    return;
+   default:
+     return;
+   }
+@@ -390,6 +452,17 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
+     LHSList = getOriginsList(*ME_LHS);
+     assert(LHSList && "LHS is a MemberExpr and should have an origin list");
+   }
++  // Assignment to an array element (`arr[i] = &x`). All elements share the
++  // array's single element-origin, so we cannot tell which element is
++  // overwritten: merge the new loans in rather than killing the old ones (the
++  // origin conservatively holds the loans of every element ever stored).
++  bool MergeIntoSharedElement = false;
++  if (const auto *ASE_LHS = dyn_cast<ArraySubscriptExpr>(LHSExpr);
++      ASE_LHS &&
++      ASE_LHS->getBase()->IgnoreParenImpCasts()->getType()->isArrayType()) {
++    LHSList = getOriginsList(*ASE_LHS);
++    MergeIntoSharedElement = LHSList != nullptr;
++  }
+   if (!LHSList)
+     return;
+   OriginList *RHSList = getOriginsList(*RHSExpr);
+@@ -433,8 +506,9 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
+     return;
+   }
+   // Kill the old loans of the destination origin and flow the new loans
+-  // from the source origin.
+-  flow(LHSList->peelOuterOrigin(), RHSList, /*Kill=*/true);
++  // from the source origin. For a shared array element-origin we merge instead
++  // of killing (see above).
++  flow(LHSList->peelOuterOrigin(), RHSList, /*Kill=*/!MergeIntoSharedElement);
+   killAndFlowOrigin(*TargetExpr, *LHSExpr);
+ }
+ 
+@@ -692,8 +766,39 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
+ 
+ void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {
+   OriginList *List = getOriginsList(*DE->getArgument());
+-  CurrentBlockFacts.push_back(
+-      FactMgr.createFact<InvalidateOriginFact>(List->getOuterOriginID(), DE));
++  CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
++      List->getOuterOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true));
++}
++
++void FactsGenerator::VisitCXXThrowExpr(const CXXThrowExpr *TE) {
++  // Exception control flow (stack unwinding, running destructors and resuming
++  // in a handler) is not modeled, so a borrow that dangles only along an
++  // exception path can be missed. Surface the `throw` as an unsupported
++  // construct.
++  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++      UntrackedConstructReason::Exception, TE->getThrowLoc()));
++}
++
++void FactsGenerator::handleTryStatements() {
++  const Stmt *Body = AC.getBody();
++  if (!Body)
++    return;
++  // Shallow worklist over the body's statements. Do not descend into nested
++  // lambdas/blocks; their bodies are separate functions analyzed on their own.
++  llvm::SmallVector<const Stmt *, 32> Worklist{Body};
++  while (!Worklist.empty()) {
++    const Stmt *S = Worklist.pop_back_val();
++    if (!S || isa<LambdaExpr>(S))
++      continue;
++    if (const auto *TS = dyn_cast<CXXTryStmt>(S))
++      // A `try`/`catch` introduces exception-handling control flow that the
++      // analysis does not model (the handler resumes after the stack has
++      // unwound, with destructors having run). Surface it so a dangling borrow
++      // along a handler path is not silently missed.
++      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++          UntrackedConstructReason::Exception, TS->getTryLoc()));
++    Worklist.append(S->child_begin(), S->child_end());
++  }
+ }
+ 
+ bool FactsGenerator::escapesViaReturn(OriginID OID) const {
+@@ -748,35 +853,42 @@ void FactsGenerator::handleExitBlock() {
+ 
+ void FactsGenerator::handleGSLPointerConstruction(const CXXConstructExpr *CCE) {
+   assert(isGslPointerType(CCE->getType()));
+-  if (CCE->getNumArgs() != 1)
+-    return;
+-
+-  const Expr *Arg = CCE->getArg(0);
+-  if (isGslPointerType(Arg->getType())) {
+-    OriginList *ArgList = getOriginsList(*Arg);
+-    assert(ArgList && "GSL pointer argument should have an origin list");
+-    // GSL pointer is constructed from another gsl pointer.
+-    // Example:
+-    //  View(View v);
+-    //  View(const View &v);
+-    ArgList = getRValueOrigins(Arg, ArgList);
+-    flow(getOriginsList(*CCE), ArgList, /*Kill=*/true);
+-  } else if (Arg->getType()->isPointerType()) {
+-    // GSL pointer is constructed from a raw pointer. Flow only the outermost
+-    // raw pointer. Example:
+-    //  View(const char*);
+-    //  Span<int*>(const in**);
+-    OriginList *ArgList = getOriginsList(*Arg);
+-    CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+-        getOriginsList(*CCE)->getOuterOriginID(), ArgList->getOuterOriginID(),
+-        /*Kill=*/true));
+-  } else {
+-    // This could be a new borrow.
+-    // TODO: Add code example here.
+-    handleFunctionCall(CCE, CCE->getConstructor(),
+-                       {CCE->getArgs(), CCE->getNumArgs()},
+-                       /*IsGslConstruction=*/true);
++  if (CCE->getNumArgs() == 1) {
++    const Expr *Arg = CCE->getArg(0);
++    if (isGslPointerType(Arg->getType())) {
++      OriginList *ArgList = getOriginsList(*Arg);
++      assert(ArgList && "GSL pointer argument should have an origin list");
++      // GSL pointer is constructed from another gsl pointer.
++      // Example:
++      //  View(View v);
++      //  View(const View &v);
++      ArgList = getRValueOrigins(Arg, ArgList);
++      flow(getOriginsList(*CCE), ArgList, /*Kill=*/true);
++      return;
++    }
++    if (Arg->getType()->isPointerType()) {
++      // GSL pointer is constructed from a raw pointer. Flow only the outermost
++      // raw pointer. Example:
++      //  View(const char*);
++      //  Span<int*>(const in**);
++      OriginList *ArgList = getOriginsList(*Arg);
++      CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
++          getOriginsList(*CCE)->getOuterOriginID(), ArgList->getOuterOriginID(),
++          /*Kill=*/true));
++      return;
++    }
+   }
++  // Other constructions -- a multi-argument pointer/iterator form such as
++  // `span(ptr, size)` or `span(first, last)`, or a single container/range
++  // argument -- are handled by the general lifetimebound parameter->return
++  // propagation in handleFunctionCall: the data/iterator parameter of the
++  // standard views carries an (inferred) [[clang::lifetimebound]], so its borrow
++  // flows into the constructed view. The range/container constructor parameter
++  // is deliberately *not* lifetimebound, so `span(container)` is unaffected
++  // here (it remains an unannotated indirection).
++  handleFunctionCall(CCE, CCE->getConstructor(),
++                     {CCE->getArgs(), CCE->getNumArgs()},
++                     /*IsGslConstruction=*/true);
+ }
+ 
+ void FactsGenerator::handleMovedArgsInCall(const FunctionDecl *FD,
+@@ -835,6 +947,69 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
+         ThisList->getOuterOriginID(), Call));
+ }
+ 
++// Soundness: the analysis conservatively assumes that operations it cannot
++// prove leave an owner unchanged invalidate borrows into that owner. Two cases:
++//   1. a non-const member call on an owner (other than known container mutators,
++//      which are handled precisely, and borrow-returning accessors), and
++//   2. passing an owner to a non-const pointer/reference parameter.
++// These emit an *assumed* InvalidateOriginFact; the checker only warns when a
++// borrow into the owner is actually live across the operation.
++void FactsGenerator::handleAssumedInvalidatingCall(
++    const Expr *Call, const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
++  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
++  bool IsInstance =
++      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
++
++  // (1) Non-const member call on an owner receiver. Known container mutators
++  // are handled precisely elsewhere; borrow-returning accessors (recognized GSL
++  // accessors or methods that are lifetimebound on 'this') do not invalidate.
++  if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
++      !Args.empty() && isGslOwnerType(Args[0]->getType()) &&
++      !shouldTrackImplicitObjectArg(*Args[0], Method,
++                                    /*RunningUnderLifetimeSafety=*/true) &&
++      !implicitObjectParamIsLifetimeBound(Method)) {
++    if (OriginList *L = getOriginsList(*Args[0]))
++      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
++          L->getOuterOriginID(), Call, /*Assumed=*/true));
++  }
++
++  // (2) Passing an owner to a non-const pointer/reference parameter. The
++  // implicit object argument (I == 0 for instance methods) is intentionally
++  // skipped here -- it is handled by case (1) above.
++  for (unsigned I = 0; I < Args.size(); ++I) {
++    const ParmVarDecl *PVD = nullptr;
++    if (IsInstance) {
++      if (I == 0)
++        continue; // Implicit object argument, handled above.
++      if (I - 1 < Method->getNumParams())
++        PVD = Method->getParamDecl(I - 1);
++    } else if (I < FD->getNumParams()) {
++      PVD = FD->getParamDecl(I);
++    }
++    if (!PVD)
++      continue;
++    QualType PT = PVD->getType();
++    // The parameter is assumed to mutate the owner the argument refers to if it
++    // is a non-const pointer/reference to an owner, or a gsl::Pointer (e.g.
++    // std::span) that exposes mutable access to a non-const owner pointee.
++    bool MutatesOwner = false;
++    if (PT->isPointerType()) {
++      QualType Pointee = PT->getPointeeType();
++      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
++    } else if (isGslPointerType(PT.getNonReferenceType())) {
++      MutatesOwner = pointsToMutableOwner(PT.getNonReferenceType());
++    } else if (PT->isReferenceType()) {
++      QualType Pointee = PT->getPointeeType();
++      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
++    }
++    if (!MutatesOwner)
++      continue;
++    if (OriginList *L = getOriginsList(*Args[I]))
++      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
++          L->getOuterOriginID(), Call, /*Assumed=*/true));
++  }
++}
++
+ void FactsGenerator::handleDestructiveCall(const Expr *Call,
+                                            const FunctionDecl *FD,
+                                            ArrayRef<const Expr *> Args) {
+@@ -843,7 +1018,8 @@ void FactsGenerator::handleDestructiveCall(const Expr *Call,
+   OriginList *ArgList = getOriginsList(*Args[0]);
+   if (ArgList)
+     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+-        ArgList->getOuterOriginID(), Call));
++        ArgList->getOuterOriginID(), Call, /*Assumed=*/false,
++        /*Deallocation=*/true));
+ }
+ 
+ void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
+@@ -938,6 +1114,130 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
+   }
+ }
+ 
++// Comparison and relational operators (==, !=, <, >, <=, >=, <=>) compare their
++// operands and yield a bool/ordering; by convention they neither capture an
++// argument nor return a borrow into one, so passing an origin-carrying value
++// (e.g. an iterator or view) to them is safe and needs no annotation. This is
++// what makes a range-based for loop's `__begin != __end` test clean.
++static bool isComparisonOperator(const FunctionDecl *FD) {
++  switch (FD->getOverloadedOperator()) {
++  case OO_EqualEqual:
++  case OO_ExclaimEqual:
++  case OO_Less:
++  case OO_Greater:
++  case OO_LessEqual:
++  case OO_GreaterEqual:
++  case OO_Spaceship:
++    return true;
++  default:
++    return false;
++  }
++}
++
++// Soundness: flag arguments bound to origin-carrying parameters (raw
++// pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
++// are not modeled via GSL recognition. The analysis cannot tell whether such a
++// borrow escapes the call. Runs independently of the call's return type.
++void FactsGenerator::handleUnannotatedIndirectionArgs(
++    const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
++  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
++  bool IsInstance =
++      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
++  // Comparison/relational operators do not capture their operands.
++  if (isComparisonOperator(FD))
++    return;
++  // A copy/move constructor or copy/move assignment copies or moves its source
++  // rather than capturing the reference to it; any borrows the value itself
++  // carries are propagated by the origin model (see VisitCXXConstructExpr), so
++  // the source reference parameter is effectively noescape. This also avoids
++  // false positives on the implicit special members synthesized for passing a
++  // value-type argument by value, which cannot be annotated.
++  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD);
++      Ctor && Ctor->isCopyOrMoveConstructor())
++    return;
++  if (Method &&
++      (Method->isCopyAssignmentOperator() || Method->isMoveAssignmentOperator()))
++    return;
++  for (unsigned I = 0; I < Args.size(); ++I) {
++    // Map the argument index to its explicit parameter, skipping the implicit
++    // object argument of instance methods.
++    const ParmVarDecl *PVD = nullptr;
++    if (IsInstance) {
++      if (I == 0)
++        continue;
++      if (I - 1 < Method->getNumParams())
++        PVD = Method->getParamDecl(I - 1);
++    } else if (I < FD->getNumParams()) {
++      PVD = FD->getParamDecl(I);
++    }
++    if (!PVD || !hasOrigins(PVD->getType()))
++      continue;
++    if (PVD->hasAttr<clang::LifetimeBoundAttr>() ||
++        PVD->hasAttr<clang::NoEscapeAttr>() ||
++        PVD->hasAttr<clang::LifetimeCaptureByAttr>())
++      continue;
++    // Heuristic: a parameter that the callee copies/moves in (rather than
++    // capturing as a borrow) is effectively noescape. The value is copied in
++    // only when the level of storage it refers to cannot itself hold a borrow.
++    //
++    //  * STL container insertion methods (push_back, insert, emplace, ...) take
++    //    the element by const/rvalue *reference* and copy it in -- safe only
++    //    when the referent is not pointer-like (so 'vector<int*>::push_back(&x)'
++    //    is still surfaced, and 'emplace_back' building a view from a pointer
++    //    stays flagged).
++    //  * STL container constructors copy in the values they are given. Here a
++    //    *pointer* parameter is also a copy-in when its pointee cannot hold a
++    //    borrow -- this is what makes 'std::string s = "abc"' (the
++    //    'basic_string(const char *)' constructor) clean: the characters are
++    //    copied, the pointer does not escape.
++    //  * std::string concatenation operators ('s += x', 'a + b') deep-copy their
++    //    operands' characters; a string reference or a character pointer operand
++    //    does not escape. Unlike the others this also applies to the free
++    //    'operator+', which is not a method.
++    //
++    // It never applies to arbitrary user constructors, which may capture.
++    {
++      QualType ParamTy = PVD->getType();
++      bool IsContainerCtor = Method && isa<CXXConstructorDecl>(Method) &&
++                             isStlContainerType(Method->getParent());
++      bool IsCopyInByRef =
++          (Method && isStlContainerInsertionMethod(*Method)) ||
++          IsContainerCtor || isStlStringConcatenationOperator(*FD);
++      bool IsCopyInByPtr = IsContainerCtor || isStlStringConcatenationOperator(*FD);
++      if (ParamTy->isReferenceType() &&
++          !hasOrigins(ParamTy.getNonReferenceType()) && IsCopyInByRef)
++        continue;
++      if (ParamTy->isPointerType() && !hasOrigins(ParamTy->getPointeeType()) &&
++          IsCopyInByPtr)
++        continue;
++    }
++    // Skip arguments the analysis already models through GSL recognition.
++    if ((I == 0 && shouldTrackFirstArgument(FD)) ||
++        (I == 1 && shouldTrackSecondArgument(FD)))
++      continue;
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::UnannotatedIndirection, Args[I]));
++  }
++}
++
++// Soundness: an ownership-transferring move of an owner (std::move/forward of
++// a gsl::Owner, or std::unique_ptr::release) is not modeled, so it silences the
++// analysis for the moved-from object. Moving a pointer-like value is a harmless
++// copy and is not flagged.
++void FactsGenerator::handleMoveSilencing(const Expr *Call,
++                                         const FunctionDecl *FD,
++                                         ArrayRef<const Expr *> Args) {
++  if (isStdReferenceCast(FD) && !Args.empty() &&
++      isGslOwnerType(Args[0]->getType())) {
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::MoveSilencing, Call));
++    return;
++  }
++  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD); MD && isUniquePtrRelease(*MD))
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::MoveSilencing, Call));
++}
++
+ void FactsGenerator::handleFunctionCall(const Expr *Call,
+                                         const FunctionDecl *FD,
+                                         ArrayRef<const Expr *> Args,
+@@ -945,18 +1245,63 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
+   OriginList *CallList = getOriginsList(*Call);
+   // Ignore functions returning values with no origin.
+   FD = getDeclWithMergedLifetimeBoundAttrs(FD);
+-  if (!FD)
++  if (!FD) {
++    // The callee could not be resolved to a function (e.g. a call through a
++    // function or member-function pointer). Such callees cannot carry lifetime
++    // annotations, so the call is not modeled; surface it for soundness.
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::IndirectCall, Call));
+     return;
++  }
+   // All arguments to a function are a use of the corresponding expressions.
+   for (const Expr *Arg : Args)
+     handleUse(Arg);
++  // Soundness: a call returning a user-defined type of unknown ownership
++  // (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
++  // [[gsl::Pointer]]) produces a value the analysis cannot track. Constructor
++  // calls are skipped -- constructing such a value is reported at its
++  // declaration or surrounding context.
++  if (!isa<CXXConstructorDecl>(FD) &&
++      isUnknownOwnershipType(Call->getType(),
++                             FactMgr.getUnknownOwnershipCache()))
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::UnknownOwnership, Call));
++  // Likewise a call returning a gsl::Owner container of indirections
++  // (e.g. std::vector<int*>); per-element borrows are not tracked.
++  else if (!isa<CXXConstructorDecl>(FD) &&
++           isGslOwnerOfIndirection(Call->getType()))
++    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
++        UntrackedConstructReason::OwnerOfIndirection, Call));
+   handleInvalidatingCall(Call, FD, Args);
++  handleAssumedInvalidatingCall(Call, FD, Args);
+   handleDestructiveCall(Call, FD, Args);
+   handleMovedArgsInCall(FD, Args);
+   handleImplicitObjectFieldUses(Call, FD);
+   handleLifetimeCaptureBy(FD, Args);
++  handleUnannotatedIndirectionArgs(FD, Args);
++  handleMoveSilencing(Call, FD, Args);
+   if (!CallList)
+     return;
++  // A [[clang::lifetime_immortal]] function returns storage that lives for the
++  // whole program. Model it as a borrow of immortal storage that never expires,
++  // independent of the arguments.
++  if (FD->hasAttr<clang::LifetimeImmortalAttr>()) {
++    const Loan *L =
++        FactMgr.getLoanMgr().createLoan(AccessPath::Immortal(FD), Call);
++    CurrentBlockFacts.push_back(
++        FactMgr.createFact<IssueFact>(L->getID(), CallList->getOuterOriginID()));
++    return;
++  }
++  // A function with __attribute__((malloc)) returns a fresh heap allocation.
++  // Model it like `new` so the result is tracked and a later free/delete of it
++  // is not reported as a naked deallocation.
++  if (FD->hasAttr<clang::RestrictAttr>()) {
++    const Loan *L = FactMgr.getLoanMgr().createLoan(
++        AccessPath::HeapAllocation(Call), Call);
++    CurrentBlockFacts.push_back(
++        FactMgr.createFact<IssueFact>(L->getID(), CallList->getOuterOriginID()));
++    return;
++  }
+   if (isStdReferenceCast(FD)) {
+     assert(Args.size() == 1 &&
+            "std reference cast builtins take exactly one argument");
+@@ -1098,6 +1443,42 @@ void FactsGenerator::markUseAsWrite(const DeclRefExpr *DRE) {
+ 
+ // Creates an IssueFact for a new placeholder loan for each pointer or reference
+ // parameter at the function's entry.
++// Seeds every pointer-bearing field reachable from \p Parent (the value-list
++// identity of the enclosing sub-object) with a non-expiring "uninitialized"
++// loan, recursing into by-value sub-objects so that `this->a.b.c` is covered.
++// Each field's origin is keyed by its access path (see getMemberValueList), so
++// these match the origins produced for `this`-rooted member accesses and stay
++// distinct across paths sharing a leaf field.
++void FactsGenerator::seedMemberLoans(const CXXRecordDecl *RD,
++                                     const OriginList *Parent,
++                                     llvm::SmallVectorImpl<Fact *> &Facts) {
++  OriginManager &OM = FactMgr.getOriginMgr();
++  const auto SeedField = [&](const FieldDecl *Field) {
++    if (hasOrigins(Field->getType())) {
++      // A pointer-bearing leaf (pointer, gsl::Pointer, or array thereof).
++      OriginList *List = OM.getMemberValueList(Parent, Field);
++      const Loan *L = FactMgr.getLoanMgr().createLoan(
++          AccessPath::Uninitialized(Field), /*IssuingExpr=*/nullptr);
++      Facts.push_back(
++          FactMgr.createFact<IssueFact>(L->getID(), List->getOuterOriginID()));
++    } else if (const CXXRecordDecl *FieldRD =
++                   AC.getASTContext()
++                       .getBaseElementType(Field->getType())
++                       ->getAsCXXRecordDecl()) {
++      // A by-value record sub-object (incl. arrays of records): recurse, using
++      // its identity node as the parent of its own fields.
++      seedMemberLoans(FieldRD, OM.getMemberValueList(Parent, Field), Facts);
++    }
++  };
++  for (const FieldDecl *Field : RD->fields())
++    SeedField(Field);
++  RD->forallBases([&](const CXXRecordDecl *Base) {
++    for (const FieldDecl *Field : Base->fields())
++      SeedField(Field);
++    return true;
++  });
++}
++
+ llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
+   const auto *FD = dyn_cast<FunctionDecl>(AC.getDecl());
+   if (!FD)
+@@ -1111,6 +1492,15 @@ llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
+         /*IssuingExpr=*/nullptr);
+     PlaceholderLoanFacts.push_back(
+         FactMgr.createFact<IssueFact>(L->getID(), List->getOuterOriginID()));
++    // The implicit object's fields are caller-provided storage that may already
++    // hold borrows on entry. Seed each pointer-bearing member (recursively,
++    // `this->a.b.c`) with a non-expiring "uninitialized" loan so reads of an
++    // unwritten member, and the implicit field uses generated at member-call
++    // sites, do not look like a borrow was lost. Member-access origins are
++    // keyed by FieldDecl (see isThisRootedMemberChain), so these connect.
++    if (const auto *MD = cast<CXXMethodDecl>(FD);
++        const CXXRecordDecl *RD = MD->getParent()->getDefinition())
++      seedMemberLoans(RD, List, PlaceholderLoanFacts);
+   }
+   for (const ParmVarDecl *PVD : FD->parameters()) {
+     OriginList *List = getOriginsList(*PVD);
+diff --git a/clang/lib/Analysis/LifetimeSafety/LifetimeAnnotations.cpp b/clang/lib/Analysis/LifetimeSafety/LifetimeAnnotations.cpp
+index 6a52616c5d59..7b0e1185b118 100644
+--- a/clang/lib/Analysis/LifetimeSafety/LifetimeAnnotations.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/LifetimeAnnotations.cpp
+@@ -314,6 +314,120 @@ bool isGslOwnerType(const CXXRecordDecl *RD) {
+   return isRecordWithAttr<OwnerAttr>(RD);
+ }
+ 
++bool isGslOwnerOfIndirection(QualType QT) {
++  if (!isGslOwnerType(QT))
++    return false;
++  const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
++      QT->getAsCXXRecordDecl());
++  if (!CTSD)
++    return false;
++  for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray()) {
++    if (Arg.getKind() != TemplateArgument::Type)
++      continue;
++    QualType ArgT = Arg.getAsType();
++    // A type template argument that is itself an indirection (pointer,
++    // reference, or gsl::Pointer) means the container's elements hold borrows
++    // the analysis cannot track per element. Recurse so a container of
++    // containers-of-indirections (e.g. vector<vector<int*>>) is caught too.
++    if (isPointerLikeType(ArgT) || ArgT->isReferenceType() ||
++        isGslOwnerOfIndirection(ArgT))
++      return true;
++  }
++  return false;
++}
++
++bool isUnknownOwnershipType(QualType QT,
++                            llvm::DenseMap<const Type *, bool> &Cache) {
++  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
++  if (!RD)
++    return false;
++  // Annotated/recognized types have known semantics.
++  if (isGslOwnerType(QT) || isGslPointerType(QT) || isStdCallableWrapperType(RD))
++    return false;
++  if (RD->isLambda())
++    return false;
++
++  const Type *Key = QT.getCanonicalType().getTypePtr();
++  if (auto It = Cache.find(Key); It != Cache.end())
++    return It->second;
++  // Tentatively cache `false` to break any cyclic recursion.
++  Cache[Key] = false;
++
++  // An incomplete type cannot be inspected, so its ownership is conservatively
++  // unknown.
++  const CXXRecordDecl *Def = RD->getDefinition();
++  bool Result = !Def;
++  if (Def) {
++    // The type's ownership is "unknown" if it (or a base) has a member that can
++    // hold a borrow (pointer/reference/gsl::Pointer) or is itself a type of
++    // unknown ownership.
++    auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
++      for (const FieldDecl *F : R->fields()) {
++        QualType FT = F->getType();
++        if (isPointerLikeType(FT) || FT->isReferenceType() ||
++            isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
++          return true;
++      }
++      return false;
++    };
++    Result = RecordHoldsBorrow(Def);
++    if (!Result)
++      Def->forallBases([&](const CXXRecordDecl *Base) {
++        if (RecordHoldsBorrow(Base)) {
++          Result = true;
++          return false; // Stop traversing bases.
++        }
++        return true;
++      });
++  }
++  Cache[Key] = Result;
++  return Result;
++}
++
++bool pointsToMutableOwner(QualType GslPointerType) {
++  const CXXRecordDecl *RD = GslPointerType->getAsCXXRecordDecl();
++  if (!RD || !RD->hasDefinition())
++    return false;
++  // A gsl::Pointer can mutate its pointee if it exposes mutable access to a
++  // non-const owner: operator*/operator[] returning a non-const owner
++  // reference, or operator-> returning a non-const owner pointer.
++  auto ExposesMutableOwner = [](const CXXRecordDecl *R) {
++    for (const CXXMethodDecl *M : R->methods()) {
++      QualType Ret = M->getReturnType();
++      switch (M->getOverloadedOperator()) {
++      case OO_Star:
++      case OO_Subscript:
++        if (Ret->isLValueReferenceType() &&
++            !Ret->getPointeeType().isConstQualified() &&
++            isGslOwnerType(Ret->getPointeeType()))
++          return true;
++        break;
++      case OO_Arrow:
++        if (Ret->isPointerType() &&
++            !Ret->getPointeeType().isConstQualified() &&
++            isGslOwnerType(Ret->getPointeeType()))
++          return true;
++        break;
++      default:
++        break;
++      }
++    }
++    return false;
++  };
++  if (ExposesMutableOwner(RD))
++    return true;
++  // The access operators may be inherited from base classes.
++  bool Found = false;
++  RD->forallBases([&](const CXXRecordDecl *Base) {
++    if (ExposesMutableOwner(Base)) {
++      Found = true;
++      return false; // Stop traversing bases.
++    }
++    return true;
++  });
++  return Found;
++}
++
+ static StringRef getName(const CXXRecordDecl &RD) {
+   if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(&RD))
+     return CTSD->getSpecializedTemplate()->getName();
+@@ -447,6 +561,63 @@ bool isInvalidationMethod(const CXXMethodDecl &MD) {
+   return InvalidatingMethods->contains(MD.getName());
+ }
+ 
++bool isStlContainerInsertionMethod(const CXXMethodDecl &MD) {
++  const CXXRecordDecl *RD = MD.getParent();
++  if (!isInStlNamespace(RD) || !MD.getIdentifier())
++    return false;
++  // Insertion methods take the element by const reference or rvalue reference
++  // and copy/move it into the container; the reference parameter does not
++  // escape. This is a curated name-based heuristic across STL containers.
++  static const llvm::StringSet<> Insertion = {
++      "push_back",          "push_front",  "emplace_back",
++      "emplace_front",      "push",        "insert",
++      "emplace",            "insert_or_assign", "try_emplace",
++      "append",             "assign",      "insert_range",
++      "append_range",       "prepend_range", "push_range",
++      "replace",            "replace_with_range", "insert_after",
++      "emplace_after",      "merge",       "assign_range"};
++  return Insertion.contains(MD.getName());
++}
++
++// Returns true if \p RD is a std::basic_string specialization.
++static bool isStlBasicStringType(const CXXRecordDecl *RD) {
++  return RD && isInStlNamespace(RD) && getName(*RD) == "basic_string";
++}
++
++bool isStlStringConcatenationOperator(const FunctionDecl &FD) {
++  if (const auto *MD = dyn_cast<CXXMethodDecl>(&FD))
++    // Member `s += x`: appends a copy of x's characters; x does not escape.
++    return MD->getOverloadedOperator() == OO_PlusEqual &&
++           isStlBasicStringType(MD->getParent());
++  // Free `a + b`: builds a new string from copies of its operands. Recognized by
++  // a basic_string result in the STL namespace (covers the string/char*/char
++  // overloads); iterator `operator+` returns an iterator, not a string.
++  return FD.getOverloadedOperator() == OO_Plus && isInStlNamespace(&FD) &&
++         isStlBasicStringType(FD.getReturnType()->getAsCXXRecordDecl());
++}
++
++bool isStlContainerType(const CXXRecordDecl *RD) {
++  if (!RD || !isInStlNamespace(RD))
++    return false;
++  // Curated set of standard container templates. A constructor of one of these
++  // builds the container by copying/moving the elements it is given in, so a
++  // by-(const-)reference parameter whose referent cannot itself hold a borrow
++  // does not escape.
++  static const llvm::StringSet<> Containers = {
++      "vector",         "deque",
++      "list",           "forward_list",
++      "array",          "map",
++      "multimap",       "set",
++      "multiset",       "unordered_map",
++      "unordered_multimap", "unordered_set",
++      "unordered_multiset", "basic_string",
++      "stack",          "queue",
++      "priority_queue", "flat_map",
++      "flat_multimap",  "flat_set",
++      "flat_multiset"};
++  return Containers.contains(getName(*RD));
++}
++
+ bool destructsFirstArg(const FunctionDecl &FD) {
+   if (isa<CXXDestructorDecl>(FD))
+     return true;
+diff --git a/clang/lib/Analysis/LifetimeSafety/LifetimeSafety.cpp b/clang/lib/Analysis/LifetimeSafety/LifetimeSafety.cpp
+index 714f979fa5ee..db57a09096aa 100644
+--- a/clang/lib/Analysis/LifetimeSafety/LifetimeSafety.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/LifetimeSafety.cpp
+@@ -66,6 +66,11 @@ void LifetimeSafetyAnalysis::run() {
+         llvm::dbgs() << "LifetimeSafety: Skipping function " << FuncName
+                      << "due to large CFG: " << Cfg.getNumBlockIDs()
+                      << " blocks (threshold: " << LSOpts.MaxCFGBlocks << ")\n");
++    // Surface the bailout so that, under the "safe programming model", skipping
++    // a whole function is not a silent gap in coverage.
++    if (SemaHelper)
++      SemaHelper->reportAnalysisBailout(AC.getDecl(),
++                                        BailoutReason::CFGTooLarge);
+     return;
+   }
+ 
+diff --git a/clang/lib/Analysis/LifetimeSafety/Loans.cpp b/clang/lib/Analysis/LifetimeSafety/Loans.cpp
+index c0c8d0b283f8..92d429a4b6e8 100644
+--- a/clang/lib/Analysis/LifetimeSafety/Loans.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/Loans.cpp
+@@ -32,6 +32,17 @@ void AccessPath::dump(llvm::raw_ostream &OS) const {
+     if (const auto *E = getAsNewAllocation())
+       OS << "NewAllocation at " << E;
+     break;
++  case Kind::Immortal:
++    OS << "Immortal";
++    if (const auto *FD = getAsImmortal())
++      OS << " " << FD->getNameAsString();
++    break;
++  case Kind::Uninitialized:
++    OS << "Uninitialized";
++    if (const auto *D = dyn_cast_if_present<clang::ValueDecl>(
++            Root.dyn_cast<const clang::Decl *>()))
++      OS << " " << D->getNameAsString();
++    break;
+   }
+ }
+ 
+diff --git a/clang/lib/Analysis/LifetimeSafety/Origins.cpp b/clang/lib/Analysis/LifetimeSafety/Origins.cpp
+index 37bd8a3ccc6b..fc95d78e3e5c 100644
+--- a/clang/lib/Analysis/LifetimeSafety/Origins.cpp
++++ b/clang/lib/Analysis/LifetimeSafety/Origins.cpp
+@@ -100,9 +100,33 @@ private:
+ 
+ } // namespace
+ 
++/// Returns true if \p E is an access to a field of the current object reached
++/// purely through the object's own storage -- `this->a`, `this->a.b.c`, etc.
++/// Such a chain refers to a stable field whose origin can be keyed by its
++/// FieldDecl (and seeded at function entry). The recursion stops at a stored
++/// pointer dereference (`this->ptr->b`), which reaches other storage and is an
++/// ordinary indirection, not part of the object itself.
++static bool isThisRootedMemberChain(const Expr *E) {
++  E = E->IgnoreParenImpCasts();
++  if (const auto *ME = dyn_cast<MemberExpr>(E)) {
++    const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
++    if (isa<CXXThisExpr>(Base))
++      return true;
++    // Only continue through a by-value sub-object (`a.b`); a pointer-typed base
++    // means we are dereferencing a stored pointer to unrelated storage.
++    return !Base->getType()->isPointerType() && isThisRootedMemberChain(Base);
++  }
++  return false;
++}
++
+ bool OriginManager::hasOrigins(QualType QT) const {
+   if (QT->isPointerOrReferenceType() || isGslPointerType(QT))
+     return true;
++  // An array of pointer-like elements is tracked with a single origin shared
++  // across all elements (indices are not disambiguated). A borrow stored into
++  // any element is merged into that origin.
++  if (QT->isArrayType())
++    return hasOrigins(QT->getAsArrayTypeUnsafe()->getElementType());
+   if (LifetimeAnnotatedOriginTypes.contains(QT.getCanonicalType().getTypePtr()))
+     return true;
+   const auto *RD = QT->getAsCXXRecordDecl();
+@@ -154,6 +178,11 @@ bool OriginManager::hasOrigins(const Expr *E) const {
+ ///   Foo&& f = Foo{};   // temporary has storage, lifetime extended
+ /// Currently, this function returns false for all reference types.
+ bool doesDeclHaveStorage(const ValueDecl *D) {
++  // A structured binding aliases an element of its holding object; it has no
++  // borrowable storage of its own. The holding object provides the storage
++  // (its own, for a by-value copy; the referent's, for a by-reference binding).
++  if (isa<BindingDecl>(D))
++    return false;
+   return !D->getType()->isReferenceType();
+ }
+ 
+@@ -193,6 +222,12 @@ OriginList *OriginManager::createSingleOriginList(OriginID OID) {
+ template <typename T>
+ OriginList *OriginManager::buildListForType(QualType QT, const T *Node) {
+   assert(hasOrigins(QT) && "buildListForType called for non-pointer type");
++  // An array shares a single origin across all of its elements; model it as if
++  // it were one element. `arr[i]` accesses (built in getOrCreateList) reuse
++  // this same origin, so a borrow stored into any element is visible through
++  // every element.
++  if (QT->isArrayType())
++    return buildListForType(QT->getAsArrayTypeUnsafe()->getElementType(), Node);
+   OriginList *Head = createNode(Node, QT);
+ 
+   if (QT->isPointerOrReferenceType()) {
+@@ -205,9 +240,40 @@ OriginList *OriginManager::buildListForType(QualType QT, const T *Node) {
+   return Head;
+ }
+ 
++OriginList *OriginManager::getMemberValueList(const OriginList *Parent,
++                                              const FieldDecl *F) {
++  auto Key = std::make_pair(Parent, F);
++  auto It = MemberValueLists.find(Key);
++  if (It != MemberValueLists.end())
++    return It->second;
++  OriginList *List;
++  if (hasOrigins(F->getType()))
++    // A pointer-bearing field: build its value list (keyed on the FieldDecl so
++    // diagnostics can name the field).
++    List = buildListForType(F->getType(), F);
++  else
++    // A by-value sub-object: a stable identity node so its own fields can be
++    // keyed off it (`this->a.b`). It carries no loans itself.
++    List = createNode(F, F->getType());
++  return MemberValueLists[Key] = List;
++}
++
++OriginList *OriginManager::getMemberChainValueList(const MemberExpr *ME) {
++  const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
++  const OriginList *Parent = isa<CXXThisExpr>(Base)
++                                 ? (ThisOrigins ? *ThisOrigins : nullptr)
++                                 : getMemberChainValueList(cast<MemberExpr>(Base));
++  return getMemberValueList(Parent, cast<FieldDecl>(ME->getMemberDecl()));
++}
++
+ OriginList *OriginManager::getOrCreateList(const ValueDecl *D) {
+   if (!hasOrigins(D->getType()))
+     return nullptr;
++  // A field of the current object is keyed by its access path from `this`
++  // (parent identity + field) rather than by the FieldDecl alone, so that
++  // distinct paths ending in the same field stay distinct.
++  if (const auto *FD = dyn_cast<FieldDecl>(D); FD && ThisOrigins)
++    return getMemberValueList(*ThisOrigins, FD);
+   auto It = DeclToList.find(D);
+   if (It != DeclToList.end())
+     return It->second;
+@@ -234,15 +300,43 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
+   if (isa<CXXThisExpr>(E) && ThisOrigins)
+     return *ThisOrigins;
+ 
++  // A structured binding is an alias for an element of its holding object.
++  // Resolve a binding reference to its holding expression (e.g. `e[i]` /
++  // `e.field`); the flows for those expressions are generated in
++  // handleStructuredBinding. A borrow of the binding (e.g. `&a`) then borrows
++  // the holding object's storage -- the copy for a by-value binding (which
++  // expires), or the referent for a by-reference binding.
++  if (auto *DRE = dyn_cast<DeclRefExpr>(E))
++    if (auto *BD = dyn_cast<BindingDecl>(DRE->getDecl()))
++      if (const Expr *Binding = BD->getBinding())
++        return ExprToList[E] = getOrCreateList(Binding);
++
++  // A field access rooted at `this` (`this->a.b.c`): resolve to the value list
++  // keyed by the access path, wrapped with a per-occurrence storage origin so
++  // taking the field's address is modeled. This must come before the generic
++  // DeclRefExpr handling below.
++  if (auto *ME = dyn_cast<MemberExpr>(E))
++    if (auto *Field = dyn_cast<FieldDecl>(ME->getMemberDecl());
++        Field && isThisRootedMemberChain(ME)) {
++      OriginList *ValueList = getMemberChainValueList(ME);
++      OriginList *Head = ValueList;
++      // A pointer-bearing field gets a per-occurrence storage origin wrapping
++      // its value list, so `&field` is modeled (matching a plain pointer
++      // lvalue). A by-value sub-object's identity node is itself the
++      // single-level representation, so it is returned directly -- adding a
++      // wrapper would change its length and break flows into it.
++      if (doesDeclHaveStorage(Field) && hasOrigins(Field->getType())) {
++        Head = createNode(E, QualType{});
++        Head->setInnerOriginList(ValueList);
++      }
++      return ExprToList[E] = Head;
++    }
++
+   // Special handling for expressions referring to a decl to share origins with
+   // the underlying decl.
+   const ValueDecl *ReferencedDecl = nullptr;
+   if (auto *DRE = dyn_cast<DeclRefExpr>(E))
+     ReferencedDecl = DRE->getDecl();
+-  else if (auto *ME = dyn_cast<MemberExpr>(E))
+-    if (auto *Field = dyn_cast<FieldDecl>(ME->getMemberDecl());
+-        Field && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts()))
+-      ReferencedDecl = Field;
+   if (ReferencedDecl) {
+     OriginList *Head = nullptr;
+     // For non-reference declarations (e.g., `int* p`), the expression is an
+@@ -265,6 +359,20 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
+     return ExprToList[E] = Head;
+   }
+ 
++  // An array subscript `arr[i]` accesses an element. All elements share the
++  // array's single element-origin (indices are not disambiguated), and the
++  // array's own lvalue list already has the `[storage] -> [element-value]`
++  // shape an element access needs, so reuse it directly. A borrow stored into
++  // one element is then visible through every element access. This applies only
++  // to genuine array subscripts; a subscript of a *pointer* (e.g. an `int a[]`
++  // parameter, which is really `int *`) is an ordinary indirection.
++  if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
++    const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
++    if (Base->getType()->isArrayType())
++      if (OriginList *BaseList = getOrCreateList(Base))
++        return ExprToList[E] = BaseList;
++  }
++
+   // If E is an lvalue , it refers to storage. We model this storage as the
+   // first level of origin list, as if it were a reference, because l-values are
+   // addressable.
+diff --git a/clang/lib/CodeGen/CGCall.cpp b/clang/lib/CodeGen/CGCall.cpp
+index 246839492936..98bf00188df8 100644
+--- a/clang/lib/CodeGen/CGCall.cpp
++++ b/clang/lib/CodeGen/CGCall.cpp
+@@ -3162,7 +3162,8 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
+       break;
+     }
+ 
+-    if (FI.getExtParameterInfo(ArgNo).isNoEscape())
++    if (FI.getExtParameterInfo(ArgNo).isNoEscape() &&
++        isValidPointerAttrType(ParamType, /*RefOkay=*/true))
+       Attrs.addCapturesAttr(
+           llvm::CaptureInfo(llvm::CaptureComponents::Address));
+ 
+diff --git a/clang/lib/Sema/AnalysisBasedWarnings.cpp b/clang/lib/Sema/AnalysisBasedWarnings.cpp
+index 207ce373339f..786cbd6da10d 100644
+--- a/clang/lib/Sema/AnalysisBasedWarnings.cpp
++++ b/clang/lib/Sema/AnalysisBasedWarnings.cpp
+@@ -2930,6 +2930,10 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
+     AC.getCFGBuildOptions().setAllAlwaysAdd();
+     if (AC.getCFG())
+       runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
++    else
++      // No CFG: surface the skip so it is not a silent gap in coverage.
++      SemaHelper.reportAnalysisBailout(FD,
++                                       lifetimes::BailoutReason::CFGUnavailable);
+   }
+ }
+ 
+@@ -3165,11 +3169,14 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
+   // TODO: Enable lifetime safety analysis for other languages once it is
+   // stable.
+   if (EnableLifetimeSafetyAnalysis && S.getLangOpts().CPlusPlus) {
+-    if (AC.getCFG()) {
+-      lifetimes::LifetimeSafetySemaHelperImpl LifetimeSafetySemaHelper(S);
++    lifetimes::LifetimeSafetySemaHelperImpl LifetimeSafetySemaHelper(S);
++    if (AC.getCFG())
+       lifetimes::runLifetimeSafetyAnalysis(AC, &LifetimeSafetySemaHelper,
+                                            LSStats, S.CollectStats);
+-    }
++    else
++      // No CFG: surface the skip so it is not a silent gap in coverage.
++      LifetimeSafetySemaHelper.reportAnalysisBailout(
++          D, lifetimes::BailoutReason::CFGUnavailable);
+   }
+   // Check for violations of "called once" parameter properties.
+   if (S.getLangOpts().ObjC && !S.getLangOpts().CPlusPlus &&
+diff --git a/clang/lib/Sema/SemaAttr.cpp b/clang/lib/Sema/SemaAttr.cpp
+index ffd546138008..c08f8ee8907f 100644
+--- a/clang/lib/Sema/SemaAttr.cpp
++++ b/clang/lib/Sema/SemaAttr.cpp
+@@ -296,18 +296,26 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
+       auto *Param = CMD->getParamDecl(0);
+       if (Param->hasAttr<LifetimeBoundAttr>())
+         return;
+-      if (CRD->getName() == "basic_string_view" &&
+-          Param->getType()->isPointerType()) {
++      QualType PT = Param->getType();
++      if (CRD->getName() == "basic_string_view" && PT->isPointerType()) {
+         // construct from a char array pointed by a pointer.
+         //   basic_string_view(const CharT* s);
+         //   basic_string_view(const CharT* s, size_type count);
+         Param->addAttr(
+             LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
+       } else if (CRD->getName() == "span") {
+-        // construct from a reference of array.
++        // Construct from a pointer/iterator to the elements
++        //   span(It first, size_type count);
++        //   span(It first, End last);
++        // or from a reference to an array
+         //   span(std::type_identity_t<element_type> (&arr)[N]);
+-        const auto *LRT = Param->getType()->getAs<LValueReferenceType>();
+-        if (LRT && LRT->getPointeeType().IgnoreParens()->isArrayType())
++        // In both cases the span aliases the referenced storage.
++        // FIXME: the range/std::array reference constructors (span(R&& range),
++        // span(std::array&)) still miss this; broadening to reference params
++        // trips a forwarding-constructor false positive (see the project memo).
++        const auto *LRT = PT->getAs<LValueReferenceType>();
++        if (PT->isPointerType() ||
++            (LRT && LRT->getPointeeType().IgnoreParens()->isArrayType()))
+           Param->addAttr(
+               LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
+       }
+diff --git a/clang/lib/Sema/SemaCast.cpp b/clang/lib/Sema/SemaCast.cpp
+index 133837623a7a..b4ea42102cdf 100644
+--- a/clang/lib/Sema/SemaCast.cpp
++++ b/clang/lib/Sema/SemaCast.cpp
+@@ -372,6 +372,10 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
+         return ExprError();
+       DiscardMisalignedMemberAddress(DestType.getTypePtr(), E);
+     }
++    // Lifetime safety (safe programming model): 'const_cast' can subvert the
++    // const-correctness the analysis relies on to assume const member functions
++    // do not invalidate borrows.
++    Diag(OpLoc, diag::warn_lifetime_safety_const_cast);
+     return Op.complete(CXXConstCastExpr::Create(Context, Op.ResultType,
+                                   Op.ValueKind, Op.SrcExpr.get(), DestTInfo,
+                                                 OpLoc, Parens.getEnd(),
+diff --git a/clang/lib/Sema/SemaChecking.cpp b/clang/lib/Sema/SemaChecking.cpp
+index 8a8c9cc9d2c2..03c7470ab6b8 100644
+--- a/clang/lib/Sema/SemaChecking.cpp
++++ b/clang/lib/Sema/SemaChecking.cpp
+@@ -4153,7 +4153,7 @@ static void CheckNonNullArguments(Sema &S,
+       if (!NonNull->args_size()) {
+         // Easy case: all pointer arguments are nonnull.
+         for (const auto *Arg : Args)
+-          if (S.isValidPointerAttrType(Arg->getType()))
++          if (isValidPointerAttrType(Arg->getType()))
+             CheckNonNullArgument(S, Arg, CallSiteLoc);
+         return;
+       }
+diff --git a/clang/lib/Sema/SemaDeclAttr.cpp b/clang/lib/Sema/SemaDeclAttr.cpp
+index ae04d3855f01..fe67398ee39f 100644
+--- a/clang/lib/Sema/SemaDeclAttr.cpp
++++ b/clang/lib/Sema/SemaDeclAttr.cpp
+@@ -1310,37 +1310,11 @@ static void handleNoSpecializations(Sema &S, Decl *D, const ParsedAttr &AL) {
+       NoSpecializationsAttr::Create(S.Context, Message, AL));
+ }
+ 
+-bool Sema::isValidPointerAttrType(QualType T, bool RefOkay) {
+-  if (T->isDependentType())
+-    return true;
+-  if (RefOkay) {
+-    if (T->isReferenceType())
+-      return true;
+-  } else {
+-    T = T.getNonReferenceType();
+-  }
+-
+-  // The nonnull attribute, and other similar attributes, can be applied to a
+-  // transparent union that contains a pointer type.
+-  if (const RecordType *UT = T->getAsUnionType()) {
+-    RecordDecl *UD = UT->getDecl()->getDefinitionOrSelf();
+-    if (UD->hasAttr<TransparentUnionAttr>()) {
+-      for (const auto *I : UD->fields()) {
+-        QualType QT = I->getType();
+-        if (QT->isAnyPointerType() || QT->isBlockPointerType())
+-          return true;
+-      }
+-    }
+-  }
+-
+-  return T->isAnyPointerType() || T->isBlockPointerType();
+-}
+-
+ static bool attrNonNullArgCheck(Sema &S, QualType T, const ParsedAttr &AL,
+                                 SourceRange AttrParmRange,
+                                 SourceRange TypeRange,
+                                 bool isReturnValue = false) {
+-  if (!S.isValidPointerAttrType(T)) {
++  if (!isValidPointerAttrType(T)) {
+     if (isReturnValue)
+       S.Diag(AL.getLoc(), diag::warn_attribute_return_pointers_only)
+           << AL << AttrParmRange << TypeRange;
+@@ -1384,7 +1358,7 @@ static void handleNonNullAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+     for (unsigned I = 0, E = getFunctionOrMethodNumParams(D);
+          I != E && !AnyPointers; ++I) {
+       QualType T = getFunctionOrMethodParamType(D, I);
+-      if (S.isValidPointerAttrType(T))
++      if (isValidPointerAttrType(T))
+         AnyPointers = true;
+     }
+ 
+@@ -1432,10 +1406,11 @@ static void handleNoEscapeAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+   if (D->isInvalidDecl())
+     return;
+ 
+-  // noescape only applies to pointer types.
++  // noescape only applies to pointer and record types.
+   QualType T = cast<ParmVarDecl>(D)->getType();
+-  if (!S.isValidPointerAttrType(T, /* RefOkay */ true)) {
+-    S.Diag(AL.getLoc(), diag::warn_attribute_pointers_only)
++  if (!isValidPointerAttrType(T, /* RefOkay */ true) && !T->isRecordType()) {
++    S.Diag(AL.getLoc(),
++           diag::warn_attribute_pointer_or_reference_or_record_only)
+         << AL << AL.getRange() << 0;
+     return;
+   }
+diff --git a/clang/lib/Sema/SemaDeclCXX.cpp b/clang/lib/Sema/SemaDeclCXX.cpp
+index 9bbe99df064c..5c1937b215c8 100644
+--- a/clang/lib/Sema/SemaDeclCXX.cpp
++++ b/clang/lib/Sema/SemaDeclCXX.cpp
+@@ -27,6 +27,7 @@
+ #include "clang/AST/StmtVisitor.h"
+ #include "clang/AST/TypeLoc.h"
+ #include "clang/AST/TypeOrdering.h"
++#include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
+ #include "clang/Basic/AttributeCommonInfo.h"
+ #include "clang/Basic/PartialDiagnostic.h"
+ #include "clang/Basic/Specifiers.h"
+@@ -7109,6 +7110,18 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
+     }
+   }
+ 
++  // Lifetime safety (safe programming model): a 'mutable' data member can be
++  // changed by a const member function, which would break the analysis's
++  // assumption that const member functions do not invalidate borrows into the
++  // object. Flag such fields when the warning is enabled.
++  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
++      !getDiagnostics().isIgnored(diag::warn_lifetime_safety_mutable_field,
++                                  Record->getLocation()))
++    for (const auto *F : Record->fields())
++      if (F->isMutable())
++        Diag(F->getLocation(), diag::warn_lifetime_safety_mutable_field)
++            << F << F->getSourceRange();
++
+   if (Record->getIdentifier()) {
+     // C++ [class.mem]p13:
+     //   If T is the name of a class, then each of the following shall have a
+@@ -18836,6 +18849,55 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
+       }
+   }
+ 
++  // Lifetime-safety ("safe programming model"): an override must not strengthen
++  // its lifetime contract beyond what the overridden method advertises. Callers
++  // dispatch through the base-class signature, so a '[[clang::lifetimebound]]'
++  // the override adds -- on a parameter, or binding the return to the implicit
++  // object -- is invisible to them: the returned borrow could outlive its
++  // referent undetected. (The opposite direction, dropping 'noescape', is
++  // covered by -Wmissing-noescape above.) These diagnostics are off by default
++  // and only fire under the lifetime-safety validation/soundness groups, so
++  // gate the work on the group being enabled.
++  if (!Diags.isIgnored(
++          diag::warn_lifetime_safety_override_param_adds_lifetimebound,
++          New->getLocation())) {
++    for (unsigned I = 0, E = Old->getNumParams();
++         I != E && I < New->getNumParams(); ++I)
++      if (New->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
++          !Old->getParamDecl(I)->hasAttr<LifetimeBoundAttr>()) {
++        Diag(New->getParamDecl(I)->getLocation(),
++             diag::warn_lifetime_safety_override_param_adds_lifetimebound)
++            << New->getParamDecl(I);
++        Diag(Old->getLocation(), diag::note_overridden_virtual_function);
++      }
++    // An override that binds its return to the object ('[[clang::lifetimebound]]')
++    // when the overridden method does not is invisible to callers dispatching
++    // through the base class. (When the base is 'lifetime_immortal' the override
++    // is even less safe -- handled, with a clearer message, by the immortal
++    // check below -- so skip that case here.)
++    if (lifetimes::implicitObjectParamIsLifetimeBound(New) &&
++        !lifetimes::implicitObjectParamIsLifetimeBound(Old) &&
++        !Old->hasAttr<LifetimeImmortalAttr>()) {
++      Diag(New->getLocation(),
++           diag::warn_lifetime_safety_override_this_adds_lifetimebound);
++      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
++    }
++    // Overriding a '[[clang::lifetime_immortal]]' method, whose result never
++    // dangles, requires the override to preserve that guarantee -- it must also
++    // be 'lifetime_immortal'. Callers through the base class treat the result as
++    // immortal and do not track it, so an override that returns a borrow which
++    // can dangle (whether unannotated, or merely 'lifetimebound' to the object,
++    // a weaker guarantee) is a hole. Flag any non-immortal override.
++    QualType NewRetTy = New->getReturnType();
++    if (Old->hasAttr<LifetimeImmortalAttr>() &&
++        !New->hasAttr<LifetimeImmortalAttr>() &&
++        (NewRetTy->isPointerType() || NewRetTy->isReferenceType() ||
++         lifetimes::isGslPointerType(NewRetTy))) {
++      Diag(New->getLocation(), diag::warn_lifetime_safety_override_of_immortal);
++      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
++    }
++  }
++
+   // SME attributes must match when overriding a function declaration.
+   if (IsInvalidSMECallConversion(Old->getType(), New->getType())) {
+     Diag(New->getLocation(), diag::err_conflicting_overriding_attributes)
+diff --git a/clang/lib/Sema/SemaLifetimeSafety.h b/clang/lib/Sema/SemaLifetimeSafety.h
+index 6da4953dea56..332e32ab2043 100644
+--- a/clang/lib/Sema/SemaLifetimeSafety.h
++++ b/clang/lib/Sema/SemaLifetimeSafety.h
+@@ -48,7 +48,23 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
+       diag::warn_lifetime_safety_cross_tu_param_suggestion,
+       diag::warn_lifetime_safety_intra_tu_param_suggestion,
+       diag::warn_lifetime_safety_cross_tu_this_suggestion,
+-      diag::warn_lifetime_safety_intra_tu_this_suggestion};
++      diag::warn_lifetime_safety_intra_tu_this_suggestion,
++      diag::warn_lifetime_safety_lost_loan,
++      diag::warn_lifetime_safety_bailout,
++      diag::warn_lifetime_safety_indirect_call,
++      diag::warn_lifetime_safety_unannotated_indirection,
++      diag::warn_lifetime_safety_unannotated_param,
++      diag::warn_lifetime_safety_unannotated_this_return,
++      diag::warn_lifetime_safety_this_escapes_to_global,
++      diag::warn_lifetime_safety_annotated_param_escapes_to_global,
++      diag::warn_lifetime_safety_global_capture,
++      diag::warn_lifetime_safety_multilevel_indirection,
++      diag::warn_lifetime_safety_move_silencing,
++      diag::warn_lifetime_safety_assumed_invalidation,
++      diag::warn_lifetime_safety_naked_delete,
++      diag::warn_lifetime_safety_unknown_ownership,
++      diag::warn_lifetime_safety_exception,
++      diag::warn_lifetime_safety_owner_of_indirection};
+   for (unsigned DiagID : DiagIDs)
+     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
+       return true;
+@@ -402,6 +418,116 @@ public:
+     S.addLifetimeBoundToImplicitThis(const_cast<CXXMethodDecl *>(MD));
+   }
+ 
++  void reportLostLoan(const Expr *UseExpr) override {
++    std::string Subject = getDiagSubjectDescription(UseExpr);
++    if (Subject.empty())
++      Subject = "this value";
++    S.Diag(UseExpr->getExprLoc(), diag::warn_lifetime_safety_lost_loan)
++        << Subject << UseExpr->getSourceRange();
++  }
++
++  void reportAnalysisBailout(const Decl *FD, BailoutReason Reason) override {
++    if (!FD)
++      return;
++    S.Diag(FD->getLocation(), diag::warn_lifetime_safety_bailout)
++        << static_cast<unsigned>(Reason);
++  }
++
++  void reportIndirectCall(const Expr *CallExpr) override {
++    S.Diag(CallExpr->getExprLoc(), diag::warn_lifetime_safety_indirect_call)
++        << CallExpr->getSourceRange();
++  }
++
++  void reportUnannotatedIndirection(const Expr *ArgExpr) override {
++    S.Diag(ArgExpr->getExprLoc(),
++           diag::warn_lifetime_safety_unannotated_indirection)
++        << ArgExpr->getSourceRange();
++  }
++
++  void reportUnannotatedParam(const ParmVarDecl *PVD) override {
++    S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_unannotated_param)
++        << PVD->getSourceRange();
++  }
++
++  void reportUnannotatedThisReturn(const CXXMethodDecl *MD) override {
++    S.Diag(MD->getLocation(),
++           diag::warn_lifetime_safety_unannotated_this_return)
++        << MD->getReturnType() << MD->getSourceRange();
++  }
++
++  void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,
++                                 const VarDecl *Global) override {
++    S.Diag(Loc, diag::warn_lifetime_safety_this_escapes_to_global) << Global;
++  }
++
++  void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
++                                           const VarDecl *Global) override {
++    S.Diag(PVD->getLocation(),
++           diag::warn_lifetime_safety_annotated_param_escapes_to_global)
++        << Global << PVD->getSourceRange();
++  }
++
++  void reportGlobalCapture(const ParmVarDecl *PVD) override {
++    S.Diag(PVD->getLocation(), diag::warn_lifetime_safety_global_capture)
++        << PVD->getSourceRange();
++  }
++
++  void reportMultiLevelIndirection(const ValueDecl *VD) override {
++    S.Diag(VD->getLocation(),
++           diag::warn_lifetime_safety_multilevel_indirection)
++        << getDiagSubjectDescription(VD) << VD->getSourceRange();
++  }
++
++  void reportMoveSilencing(const Expr *MoveExpr) override {
++    S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)
++        << MoveExpr->getSourceRange();
++  }
++
++  void reportAssumedInvalidation(const Expr *IssueExpr,
++                                 const Expr *OperationExpr) override {
++    S.Diag(IssueExpr->getExprLoc(),
++           diag::warn_lifetime_safety_assumed_invalidation)
++        << /*object=*/0 << IssueExpr->getSourceRange();
++    S.Diag(OperationExpr->getExprLoc(),
++           diag::note_lifetime_safety_assumed_invalidated_here)
++        << OperationExpr->getSourceRange();
++  }
++  void reportAssumedInvalidation(const ParmVarDecl *PVD,
++                                 const Expr *OperationExpr) override {
++    S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_assumed_invalidation)
++        << /*parameter=*/1 << PVD->getSourceRange();
++    S.Diag(OperationExpr->getExprLoc(),
++           diag::note_lifetime_safety_assumed_invalidated_here)
++        << OperationExpr->getSourceRange();
++  }
++
++  void reportNakedDeallocation(const Expr *DeallocExpr) override {
++    S.Diag(DeallocExpr->getExprLoc(),
++           diag::warn_lifetime_safety_naked_delete)
++        << (isa<CXXDeleteExpr>(DeallocExpr) ? /*deleting=*/0 : /*freeing=*/1)
++        << DeallocExpr->getSourceRange();
++  }
++
++  void reportUnknownOwnership(const ValueDecl *VD) override {
++    S.Diag(VD->getLocation(), diag::warn_lifetime_safety_unknown_ownership)
++        << VD->getType() << VD->getSourceRange();
++  }
++  void reportUnknownOwnership(const Expr *E) override {
++    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unknown_ownership)
++        << E->getType() << E->getSourceRange();
++  }
++  void reportException(SourceLocation Loc) override {
++    S.Diag(Loc, diag::warn_lifetime_safety_exception);
++  }
++  void reportOwnerOfIndirection(const ValueDecl *VD) override {
++    S.Diag(VD->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
++        << VD->getType() << VD->getSourceRange();
++  }
++  void reportOwnerOfIndirection(const Expr *E) override {
++    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_owner_of_indirection)
++        << E->getType() << E->getSourceRange();
++  }
++
+ private:
+   std::pair<SourceLocation, StringRef>
+   getLifetimeBoundFixIt(const ParmVarDecl *Decl) {
