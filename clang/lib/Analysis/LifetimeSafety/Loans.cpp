@@ -32,6 +32,11 @@ void AccessPath::dump(llvm::raw_ostream &OS) const {
     if (const auto *E = getAsNewAllocation())
       OS << "NewAllocation at " << E;
     break;
+  case Kind::Immortal:
+    OS << "Immortal";
+    if (const auto *FD = getAsImmortal())
+      OS << " " << FD->getNameAsString();
+    break;
   }
 }
 

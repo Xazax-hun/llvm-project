@@ -957,6 +957,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleLifetimeCaptureBy(FD, Args);
   if (!CallList)
     return;
+  // A [[clang::lifetime_immortal]] function returns storage that lives for the
+  // whole program. Model it as a borrow of immortal storage that never expires,
+  // independent of the arguments.
+  if (FD->hasAttr<clang::LifetimeImmortalAttr>()) {
+    const Loan *L =
+        FactMgr.getLoanMgr().createLoan(AccessPath::Immortal(FD), Call);
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<IssueFact>(L->getID(), CallList->getOuterOriginID()));
+    return;
+  }
   if (isStdReferenceCast(FD)) {
     assert(Args.size() == 1 &&
            "std reference cast builtins take exactly one argument");

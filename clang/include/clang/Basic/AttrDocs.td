@@ -4572,6 +4572,33 @@ It is only supported when using the Microsoft C++ ABI.
   }];
 }
 
+def LifetimeImmortalDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``lifetime_immortal`` attribute marks a function whose returned pointer or
+view refers to storage that lives for the entire duration of the program (for
+example, a pointer into a global table, an interned string, or a singleton).
+
+The lifetime safety analysis models the return value as borrowing storage that
+never expires. As a result, the returned pointer is always considered valid:
+it never triggers use-after-scope, use-after-return, or dangling diagnostics,
+and -- because it carries a tracked (immortal) borrow -- it does not trigger the
+``-Wlifetime-safety-lost-loan`` completeness warning. This lets such functions
+participate in the "safe programming model" without the analysis losing track
+of their results.
+
+.. code-block:: c++
+
+    [[clang::lifetime_immortal]] int *get_immortal();
+
+    const int *p = get_immortal();
+    // `p` is treated as pointing to storage that never expires.
+
+The attribute applies to the function's return value; it has no effect on
+functions that do not return a pointer-like type.
+  }];
+}
+
 def LifetimeBoundDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{

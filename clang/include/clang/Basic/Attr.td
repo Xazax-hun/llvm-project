@@ -2162,6 +2162,13 @@ public:
 }];
 }
 
+def LifetimeImmortal : InheritableAttr {
+  let Spellings = [Clang<"lifetime_immortal", 0>];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [LifetimeImmortalDocs];
+  let SimpleHandler = 1;
+}
+
 def TrivialABI : InheritableAttr {
   // This attribute does not have a C [[]] spelling because it requires the
   // CPlusPlus language option.

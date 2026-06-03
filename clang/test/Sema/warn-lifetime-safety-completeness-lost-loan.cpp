@@ -9,10 +9,20 @@
 void use(int *p);
 int *make(); // No lifetime annotations: the analysis cannot model its result.
 
+// A [[clang::lifetime_immortal]] function returns storage that lives forever,
+// so its result carries a tracked (immortal) borrow and is never "lost".
+[[clang::lifetime_immortal]] int *get_immortal();
+
 // A borrow the analysis tracks end-to-end: no warning.
 void tracked() {
   int x;
   int *p = &x;
+  use(p); // no-warning
+}
+
+// The result of an immortal function is tracked: no warning.
+void immortal_is_tracked() {
+  int *p = get_immortal();
   use(p); // no-warning
 }
 

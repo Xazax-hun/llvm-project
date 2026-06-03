@@ -36,9 +36,12 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, LoanID ID) {
 ///   - ParmVarDecl: a function parameter (placeholder)
 ///   - CXXMethodDecl: the implicit 'this' object (placeholder)
 ///   - CXXNewExpr: a heap allocation made by `new`
+///   - Immortal: storage that lives for the whole program (the return value of
+///     a `[[clang::lifetime_immortal]]` function)
 ///
-/// Placeholder paths never expire within the function scope, as they represent
-/// storage from the caller's scope.
+/// Placeholder and Immortal paths never expire within the function scope, as
+/// they represent storage from the caller's scope or storage that outlives the
+/// program's execution.
 ///
 /// TODO: Model access paths of other types, e.g. field, array subscript, heap
 /// allocation not through `new`, and globals.
@@ -50,6 +53,7 @@ public:
     PlaceholderParam,
     PlaceholderThis,
     NewAllocation,
+    Immortal,
   };
 
 private:
@@ -66,6 +70,11 @@ public:
   }
   static AccessPath Placeholder(const CXXMethodDecl *MD) {
     return AccessPath(Kind::PlaceholderThis, MD);
+  }
+  /// Storage that lives for the whole program, identified by the
+  /// `[[clang::lifetime_immortal]]` function whose return value created it.
+  static AccessPath Immortal(const FunctionDecl *FD) {
+    return AccessPath(Kind::Immortal, FD);
   }
   AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
   AccessPath &operator=(const AccessPath &) = delete;
@@ -98,6 +107,11 @@ public:
                ? cast<const CXXNewExpr>(cast<const clang::Expr *>(Root))
                : nullptr;
   }
+  const FunctionDecl *getAsImmortal() const {
+    return K == Kind::Immortal
+               ? cast<const FunctionDecl>(cast<const clang::Decl *>(Root))
+               : nullptr;
+  }
 
   bool operator==(const AccessPath &RHS) const {
     return K == RHS.K && Root == RHS.Root;
@@ -108,6 +122,7 @@ public:
 private:
   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
   AccessPath(Kind K, const CXXMethodDecl *MD) : K(K), Root(MD) {}
+  AccessPath(Kind K, const FunctionDecl *FD) : K(K), Root(FD) {}
 };
 
 /// Represents lending a storage location.
