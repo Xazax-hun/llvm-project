@@ -11082,6 +11082,15 @@ def warn_lifetime_safety_noescape_escapes
       InGroup<LifetimeSafetyNoescape>,
       DefaultIgnore;
 
+// Completeness diagnostics: emitted wherever the analysis cannot fully model a
+// construct, so that enabling them (typically as errors) yields a sound "safe
+// programming model".
+def warn_lifetime_safety_lost_loan
+    : Warning<"lifetime safety cannot track %0 here; no borrow information flows "
+              "into it, so a borrow was likely lost to an unmodeled construct">,
+      InGroup<LifetimeSafetyLostLoan>,
+      DefaultIgnore;
+
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.
 // Array comparisons have similar warnings

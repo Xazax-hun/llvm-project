@@ -61,6 +61,10 @@ private:
   llvm::DenseMap<AnnotationTarget, EscapingTarget> AnnotationWarningsMap;
   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
+  /// Source locations already reported as lost-loan, to avoid duplicate
+  /// completeness warnings when several uses (e.g. a DeclRefExpr and its
+  /// lvalue-to-rvalue cast) share a location.
+  llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
   const LoanPropagationAnalysis &LoanPropagation;
   const MovedLoansAnalysis &MovedLoans;
   const LiveOriginsAnalysis &LiveOrigins;
@@ -99,6 +103,8 @@ public:
           checkInvalidation(IOF);
         else if (const auto *OEF = F->getAs<OriginEscapesFact>())
           checkAnnotations(OEF);
+        else if (const auto *UF = F->getAs<UseFact>())
+          checkLostLoan(UF);
     issuePendingWarnings();
     suggestAnnotations();
     reportNoescapeViolations();
@@ -237,6 +243,32 @@ public:
           }
         }
     }
+  }
+
+  /// Completeness check for the "safe programming model": a read of a
+  /// pointer-like value that the analysis tracks but for which no loan is held
+  /// indicates a borrow was lost because some construct was not modeled during
+  /// loan propagation (or the pointer is null/uninitialized, which is equally
+  /// untracked). Reports it so that, with the warning enabled as an error, the
+  /// analysis never silently fails to account for a borrow.
+  void checkLostLoan(const UseFact *UF) {
+    if (!SemaHelper || UF->isWritten())
+      return;
+    const Expr *UseExpr = UF->getUseExpr();
+    // Skip implicit nodes (e.g. an lvalue-to-rvalue cast) that duplicate an
+    // explicit use at the same location and carry no useful diagnostic subject.
+    // IgnoreImplicit() returns a different node exactly when the use expression
+    // is itself an implicit node.
+    if (UseExpr->IgnoreImplicit() != UseExpr)
+      return;
+    const OriginList *OL = UF->getUsedOrigins();
+    if (!OL)
+      return;
+    if (!LoanPropagation.getLoans(OL->getOuterOriginID(), UF).isEmpty())
+      return;
+    if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
+      return;
+    SemaHelper->reportLostLoan(UseExpr);
   }
 
   void issuePendingWarnings() {

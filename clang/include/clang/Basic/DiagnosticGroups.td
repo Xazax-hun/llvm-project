@@ -695,10 +695,34 @@ like verifying [[clang::noescape]] and [[clang::lifetimebound]].
   }];
 }
 
+// Completeness warnings: surfaced wherever the analysis cannot fully model a
+// construct. Enabling these (typically as errors over a region) turns the
+// best-effort analysis into a sound "safe programming model" where a clean
+// compile guarantees no lifetime mistake slipped through unmodeled.
+def LifetimeSafetyLostLoan : DiagGroup<"lifetime-safety-lost-loan"> {
+  code Documentation = [{
+Detects pointer-like values that the analysis tracks but for which no borrow
+information remains after analysis, indicating a borrow was lost because some
+language construct was not modeled.
+  }];
+}
+
+def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
+                                           [LifetimeSafetyLostLoan]> {
+  code Documentation = [{
+Warnings emitted wherever the lifetime safety analysis cannot fully model a
+construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).
+Intended to be enabled as errors over a region of code to opt into a "safe
+programming model" in which the analysis never silently fails to catch a
+lifetime mistake.
+  }];
+}
+
 def LifetimeSafetyAll : DiagGroup<"lifetime-safety-all",
                                   [LifetimeSafety,
                                   LifetimeSafetySuggestions,
-                                  LifetimeSafetyValidations]> {
+                                  LifetimeSafetyValidations,
+                                  LifetimeSafetyCompleteness]> {
   code Documentation = [{
 Turns on all the warnings in the lifetime-safety umbrella.
   }];

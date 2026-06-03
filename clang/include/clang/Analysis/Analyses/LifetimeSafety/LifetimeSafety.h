@@ -149,6 +149,15 @@ public:
   // Adds inferred lifetime bound attribute for implicit this to its
   // TypeSourceInfo.
   virtual void addLifetimeBoundToImplicitThis(const CXXMethodDecl *MD) {}
+
+  // Completeness ("safe programming model") diagnostics. These fire wherever the
+  // analysis cannot fully model a construct; enabling them as errors over a
+  // region guarantees no lifetime mistake slips through unmodeled.
+
+  // Reports a read of a pointer-like value that the analysis tracks but for
+  // which no borrow information remains, indicating a loan was lost to an
+  // unmodeled construct during loan propagation.
+  virtual void reportLostLoan(const Expr *UseExpr) {}
 };
 
 /// The main entry point for the analysis.

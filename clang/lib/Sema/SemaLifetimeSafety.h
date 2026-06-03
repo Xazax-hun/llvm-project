@@ -48,7 +48,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_cross_tu_param_suggestion,
       diag::warn_lifetime_safety_intra_tu_param_suggestion,
       diag::warn_lifetime_safety_cross_tu_this_suggestion,
-      diag::warn_lifetime_safety_intra_tu_this_suggestion};
+      diag::warn_lifetime_safety_intra_tu_this_suggestion,
+      diag::warn_lifetime_safety_lost_loan};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -400,6 +401,14 @@ public:
 
   void addLifetimeBoundToImplicitThis(const CXXMethodDecl *MD) override {
     S.addLifetimeBoundToImplicitThis(const_cast<CXXMethodDecl *>(MD));
+  }
+
+  void reportLostLoan(const Expr *UseExpr) override {
+    std::string Subject = getDiagSubjectDescription(UseExpr);
+    if (Subject.empty())
+      Subject = "this value";
+    S.Diag(UseExpr->getExprLoc(), diag::warn_lifetime_safety_lost_loan)
+        << Subject << UseExpr->getSourceRange();
   }
 
 private:
