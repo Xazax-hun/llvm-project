@@ -175,6 +175,14 @@ public:
   // call through a function or member-function pointer), which the analysis
   // cannot model.
   virtual void reportIndirectCall(const Expr *CallExpr) {}
+
+  // Reports an argument bound to a pointer/reference parameter that carries no
+  // lifetime annotation, so the analysis cannot tell whether the borrow escapes.
+  virtual void reportUnannotatedIndirection(const Expr *ArgExpr) {}
+
+  // Reports a pointer/reference parameter of the analyzed function that carries
+  // no lifetime annotation, leaving its lifetime contract unspecified.
+  virtual void reportUnannotatedParam(const ParmVarDecl *PVD) {}
 };
 
 /// The main entry point for the analysis.

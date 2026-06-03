@@ -11101,6 +11101,18 @@ def warn_lifetime_safety_indirect_call
               "is not modeled by lifetime safety analysis">,
       InGroup<LifetimeSafetyIndirectCall>,
       DefaultIgnore;
+def warn_lifetime_safety_unannotated_indirection
+    : Warning<"argument is bound to a parameter that can hold a borrow but is "
+              "not annotated for lifetime safety; annotate the parameter with "
+              "'lifetimebound', 'noescape', or 'lifetime_capture_by'">,
+      InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
+def warn_lifetime_safety_unannotated_param
+    : Warning<"parameter that can hold a borrow is not annotated for lifetime "
+              "safety; annotate it with 'lifetimebound', 'noescape', or "
+              "'lifetime_capture_by'">,
+      InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

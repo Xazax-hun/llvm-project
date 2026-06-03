@@ -347,6 +347,10 @@ enum class UntrackedConstructReason : uint8_t {
   /// through a function or member-function pointer. Such callees cannot carry
   /// lifetime annotations, so the call is not modeled.
   IndirectCall,
+  /// An argument bound to a pointer/reference parameter that carries none of
+  /// the lifetime annotations ('lifetimebound', 'noescape', 'lifetime_capture_by'),
+  /// so the analysis cannot tell whether the borrow escapes the call.
+  UnannotatedIndirection,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

@@ -723,10 +723,21 @@ lifetime annotations, so the analysis cannot model the call.
   }];
 }
 
+def LifetimeSafetyUnannotatedIndirection
+    : DiagGroup<"lifetime-safety-unannotated-indirection"> {
+  code Documentation = [{
+Warns when an argument is bound to a pointer or reference parameter that carries
+none of the lifetime annotations ('lifetimebound', 'noescape',
+'lifetime_capture_by'), so the analysis cannot tell whether the borrow escapes
+the call.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
-                                            LifetimeSafetyIndirectCall]> {
+                                            LifetimeSafetyIndirectCall,
+                                            LifetimeSafetyUnannotatedIndirection]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

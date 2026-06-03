@@ -943,6 +943,42 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   }
 }
 
+// Completeness: flag arguments bound to origin-carrying parameters (raw
+// pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
+// are not modeled via GSL recognition. The analysis cannot tell whether such a
+// borrow escapes the call. Runs independently of the call's return type.
+void FactsGenerator::handleUnannotatedIndirectionArgs(
+    const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  bool IsInstance =
+      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  for (unsigned I = 0; I < Args.size(); ++I) {
+    // Map the argument index to its explicit parameter, skipping the implicit
+    // object argument of instance methods.
+    const ParmVarDecl *PVD = nullptr;
+    if (IsInstance) {
+      if (I == 0)
+        continue;
+      if (I - 1 < Method->getNumParams())
+        PVD = Method->getParamDecl(I - 1);
+    } else if (I < FD->getNumParams()) {
+      PVD = FD->getParamDecl(I);
+    }
+    if (!PVD || !hasOrigins(PVD->getType()))
+      continue;
+    if (PVD->hasAttr<clang::LifetimeBoundAttr>() ||
+        PVD->hasAttr<clang::NoEscapeAttr>() ||
+        PVD->hasAttr<clang::LifetimeCaptureByAttr>())
+      continue;
+    // Skip arguments the analysis already models through GSL recognition.
+    if ((I == 0 && shouldTrackFirstArgument(FD)) ||
+        (I == 1 && shouldTrackSecondArgument(FD)))
+      continue;
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::UnannotatedIndirection, Args[I]));
+  }
+}
+
 void FactsGenerator::handleFunctionCall(const Expr *Call,
                                         const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args,
@@ -966,6 +1002,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleMovedArgsInCall(FD, Args);
   handleImplicitObjectFieldUses(Call, FD);
   handleLifetimeCaptureBy(FD, Args);
+  handleUnannotatedIndirectionArgs(FD, Args);
   if (!CallList)
     return;
   // A [[clang::lifetime_immortal]] function returns storage that lives for the

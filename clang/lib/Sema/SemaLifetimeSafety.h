@@ -51,7 +51,9 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_intra_tu_this_suggestion,
       diag::warn_lifetime_safety_lost_loan,
       diag::warn_lifetime_safety_bailout,
-      diag::warn_lifetime_safety_indirect_call};
+      diag::warn_lifetime_safety_indirect_call,
+      diag::warn_lifetime_safety_unannotated_indirection,
+      diag::warn_lifetime_safety_unannotated_param};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -423,6 +425,17 @@ public:
   void reportIndirectCall(const Expr *CallExpr) override {
     S.Diag(CallExpr->getExprLoc(), diag::warn_lifetime_safety_indirect_call)
         << CallExpr->getSourceRange();
+  }
+
+  void reportUnannotatedIndirection(const Expr *ArgExpr) override {
+    S.Diag(ArgExpr->getExprLoc(),
+           diag::warn_lifetime_safety_unannotated_indirection)
+        << ArgExpr->getSourceRange();
+  }
+
+  void reportUnannotatedParam(const ParmVarDecl *PVD) override {
+    S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_unannotated_param)
+        << PVD->getSourceRange();
   }
 
 private:

@@ -117,6 +117,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::IndirectCall:
     OS << "IndirectCall";
     break;
+  case UntrackedConstructReason::UnannotatedIndirection:
+    OS << "UnannotatedIndirection";
+    break;
   }
   OS << ")\n";
 }

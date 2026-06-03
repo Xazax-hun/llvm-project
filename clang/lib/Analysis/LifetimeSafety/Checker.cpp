@@ -111,6 +111,7 @@ public:
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
     issuePendingWarnings();
+    checkUnannotatedParams();
     suggestAnnotations();
     reportNoescapeViolations();
     reportLifetimeboundViolations();
@@ -288,6 +289,29 @@ public:
     case UntrackedConstructReason::IndirectCall:
       SemaHelper->reportIndirectCall(E);
       break;
+    case UntrackedConstructReason::UnannotatedIndirection:
+      SemaHelper->reportUnannotatedIndirection(E);
+      break;
+    }
+  }
+
+  /// Completeness check for the function's own signature: every parameter of
+  /// origin-carrying type (raw pointer/reference, gsl::Pointer, etc.) must carry
+  /// a lifetime annotation under the "safe programming model", otherwise its
+  /// lifetime contract is unspecified.
+  void checkUnannotatedParams() {
+    if (!SemaHelper)
+      return;
+    const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD);
+    if (!Fn)
+      return;
+    for (const ParmVarDecl *PVD : Fn->parameters()) {
+      if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
+        continue;
+      if (PVD->hasAttr<LifetimeBoundAttr>() || PVD->hasAttr<NoEscapeAttr>() ||
+          PVD->hasAttr<LifetimeCaptureByAttr>())
+        continue;
+      SemaHelper->reportUnannotatedParam(PVD);
     }
   }
 

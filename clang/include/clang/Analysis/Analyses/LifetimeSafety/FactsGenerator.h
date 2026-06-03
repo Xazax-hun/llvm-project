@@ -105,6 +105,12 @@ private:
   void handleLifetimeCaptureBy(const FunctionDecl *FD,
                                ArrayRef<const Expr *> Args);
 
+  // Completeness ("safe programming model"): flags call arguments bound to
+  // origin-carrying parameters that carry no lifetime annotation and are not
+  // modeled via GSL recognition.
+  void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
+                                        ArrayRef<const Expr *> Args);
+
   /// Checks if a call-like expression creates a borrow by passing a value to a
   /// reference parameter, creating an IssueFact if it does.
   /// \param IsGslConstruction True if this is a GSL construction where all
