@@ -170,6 +170,11 @@ public:
   // the configured block limit, or the CFG could not be built), so lifetime
   // mistakes in it may go undetected.
   virtual void reportAnalysisBailout(const Decl *FD, BailoutReason Reason) {}
+
+  // Reports a call whose callee could not be resolved to a function (e.g. a
+  // call through a function or member-function pointer), which the analysis
+  // cannot model.
+  virtual void reportIndirectCall(const Expr *CallExpr) {}
 };
 
 /// The main entry point for the analysis.

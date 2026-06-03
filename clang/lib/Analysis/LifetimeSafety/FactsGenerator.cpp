@@ -256,6 +256,11 @@ void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {
     Args.append(MCE->getArgs(), MCE->getArgs() + MCE->getNumArgs());
 
     handleFunctionCall(MCE, Method, Args, /*IsGslConstruction=*/false);
+  } else {
+    // No resolved method (e.g. a call through a member-function pointer): the
+    // callee cannot carry lifetime annotations, so the call is not modeled.
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::IndirectCall, MCE));
   }
 }
 
@@ -945,8 +950,14 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   OriginList *CallList = getOriginsList(*Call);
   // Ignore functions returning values with no origin.
   FD = getDeclWithMergedLifetimeBoundAttrs(FD);
-  if (!FD)
+  if (!FD) {
+    // The callee could not be resolved to a function (e.g. a call through a
+    // function or member-function pointer). Such callees cannot carry lifetime
+    // annotations, so the call is not modeled; surface it for completeness.
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::IndirectCall, Call));
     return;
+  }
   // All arguments to a function are a use of the corresponding expressions.
   for (const Expr *Arg : Args)
     handleUse(Arg);

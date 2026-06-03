@@ -65,6 +65,9 @@ private:
   /// completeness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
   llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
+  /// Expressions already reported as an untracked construct, to avoid duplicate
+  /// completeness warnings when a construct is visited more than once.
+  llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
   const LoanPropagationAnalysis &LoanPropagation;
   const MovedLoansAnalysis &MovedLoans;
   const LiveOriginsAnalysis &LiveOrigins;
@@ -105,6 +108,8 @@ public:
           checkAnnotations(OEF);
         else if (const auto *UF = F->getAs<UseFact>())
           checkLostLoan(UF);
+        else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
+          recordUntrackedConstruct(UCF);
     issuePendingWarnings();
     suggestAnnotations();
     reportNoescapeViolations();
@@ -269,6 +274,21 @@ public:
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;
     SemaHelper->reportLostLoan(UseExpr);
+  }
+
+  /// Translates a fact recording an unmodeled construct into the corresponding
+  /// completeness diagnostic, de-duplicating per construct expression.
+  void recordUntrackedConstruct(const UntrackedConstructFact *UCF) {
+    if (!SemaHelper)
+      return;
+    const Expr *E = UCF->getConstructExpr();
+    if (E && !ReportedUntrackedExprs.insert(E).second)
+      return;
+    switch (UCF->getReason()) {
+    case UntrackedConstructReason::IndirectCall:
+      SemaHelper->reportIndirectCall(E);
+      break;
+    }
   }
 
   void issuePendingWarnings() {

@@ -11096,6 +11096,11 @@ def warn_lifetime_safety_bailout
               "lifetime mistakes here may not be detected">,
       InGroup<LifetimeSafetyBailout>,
       DefaultIgnore;
+def warn_lifetime_safety_indirect_call
+    : Warning<"call through a function pointer or otherwise unresolved callee "
+              "is not modeled by lifetime safety analysis">,
+      InGroup<LifetimeSafetyIndirectCall>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

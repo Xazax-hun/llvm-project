@@ -715,9 +715,18 @@ function would otherwise go undetected.
   }];
 }
 
+def LifetimeSafetyIndirectCall : DiagGroup<"lifetime-safety-indirect-call"> {
+  code Documentation = [{
+Warns on calls whose callee cannot be resolved to a function (for example, a
+call through a function or member-function pointer). Such callees cannot carry
+lifetime annotations, so the analysis cannot model the call.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
-                                            LifetimeSafetyBailout]> {
+                                            LifetimeSafetyBailout,
+                                            LifetimeSafetyIndirectCall]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

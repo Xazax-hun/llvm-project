@@ -50,7 +50,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_cross_tu_this_suggestion,
       diag::warn_lifetime_safety_intra_tu_this_suggestion,
       diag::warn_lifetime_safety_lost_loan,
-      diag::warn_lifetime_safety_bailout};
+      diag::warn_lifetime_safety_bailout,
+      diag::warn_lifetime_safety_indirect_call};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -417,6 +418,11 @@ public:
       return;
     S.Diag(FD->getLocation(), diag::warn_lifetime_safety_bailout)
         << static_cast<unsigned>(Reason);
+  }
+
+  void reportIndirectCall(const Expr *CallExpr) override {
+    S.Diag(CallExpr->getExprLoc(), diag::warn_lifetime_safety_indirect_call)
+        << CallExpr->getSourceRange();
   }
 
 private:

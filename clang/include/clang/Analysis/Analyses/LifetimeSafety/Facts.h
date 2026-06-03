@@ -57,6 +57,9 @@ public:
     InvalidateOrigin,
     /// All loans of an origin are cleared.
     KillOrigin,
+    /// A construct the analysis cannot fully model. Drives the "safe
+    /// programming model" completeness warnings and carries no dataflow state.
+    UntrackedConstruct,
   };
 
 private:
@@ -334,6 +337,40 @@ public:
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
+};
+
+/// The kind of construct that the analysis could not fully model. Each value
+/// maps to a "safe programming model" completeness warning emitted by the
+/// checker.
+enum class UntrackedConstructReason : uint8_t {
+  /// A call whose callee could not be resolved to a function, e.g. a call
+  /// through a function or member-function pointer. Such callees cannot carry
+  /// lifetime annotations, so the call is not modeled.
+  IndirectCall,
+};
+
+/// Records a construct that the analysis cannot fully model, attached to the
+/// CFG block where it appears. The checker turns these into completeness
+/// diagnostics. This fact carries no Origin/Loan state and is ignored by the
+/// dataflow analyses.
+class UntrackedConstructFact : public Fact {
+  UntrackedConstructReason Reason;
+  /// The expression the diagnostic should point at (for location and range).
+  const Expr *ConstructExpr;
+
+public:
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::UntrackedConstruct;
+  }
+
+  UntrackedConstructFact(UntrackedConstructReason Reason, const Expr *E)
+      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(E) {}
+
+  UntrackedConstructReason getReason() const { return Reason; }
+  const Expr *getConstructExpr() const { return ConstructExpr; }
+
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &) const override;
 };
 
 class FactManager {

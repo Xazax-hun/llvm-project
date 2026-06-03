@@ -110,6 +110,17 @@ void KillOriginFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   OS << ")\n";
 }
 
+void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                                  const OriginManager &) const {
+  OS << "UntrackedConstruct (";
+  switch (getReason()) {
+  case UntrackedConstructReason::IndirectCall:
+    OS << "IndirectCall";
+    break;
+  }
+  OS << ")\n";
+}
+
 llvm::StringMap<ProgramPoint> FactManager::getTestPoints() const {
   llvm::StringMap<ProgramPoint> AnnotationToPointMap;
   for (const auto &BlockFacts : BlockToFacts) {
