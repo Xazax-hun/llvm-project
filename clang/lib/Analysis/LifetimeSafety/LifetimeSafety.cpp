@@ -66,6 +66,11 @@ void LifetimeSafetyAnalysis::run() {
         llvm::dbgs() << "LifetimeSafety: Skipping function " << FuncName
                      << "due to large CFG: " << Cfg.getNumBlockIDs()
                      << " blocks (threshold: " << LSOpts.MaxCFGBlocks << ")\n");
+    // Surface the bailout so that, under the "safe programming model", skipping
+    // a whole function is not a silent gap in coverage.
+    if (SemaHelper)
+      SemaHelper->reportAnalysisBailout(AC.getDecl(),
+                                        BailoutReason::CFGTooLarge);
     return;
   }
 

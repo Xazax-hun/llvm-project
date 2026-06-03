@@ -2930,6 +2930,10 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
     AC.getCFGBuildOptions().setAllAlwaysAdd();
     if (AC.getCFG())
       runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
+    else
+      // No CFG: surface the skip so it is not a silent gap in coverage.
+      SemaHelper.reportAnalysisBailout(FD,
+                                       lifetimes::BailoutReason::CFGUnavailable);
   }
 }
 
@@ -3165,11 +3169,14 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
   // TODO: Enable lifetime safety analysis for other languages once it is
   // stable.
   if (EnableLifetimeSafetyAnalysis && S.getLangOpts().CPlusPlus) {
-    if (AC.getCFG()) {
-      lifetimes::LifetimeSafetySemaHelperImpl LifetimeSafetySemaHelper(S);
+    lifetimes::LifetimeSafetySemaHelperImpl LifetimeSafetySemaHelper(S);
+    if (AC.getCFG())
       lifetimes::runLifetimeSafetyAnalysis(AC, &LifetimeSafetySemaHelper,
                                            LSStats, S.CollectStats);
-    }
+    else
+      // No CFG: surface the skip so it is not a silent gap in coverage.
+      LifetimeSafetySemaHelper.reportAnalysisBailout(
+          D, lifetimes::BailoutReason::CFGUnavailable);
   }
   // Check for violations of "called once" parameter properties.
   if (S.getLangOpts().ObjC && !S.getLangOpts().CPlusPlus &&

@@ -11090,6 +11090,12 @@ def warn_lifetime_safety_lost_loan
               "into it, so a borrow was likely lost to an unmodeled construct">,
       InGroup<LifetimeSafetyLostLoan>,
       DefaultIgnore;
+def warn_lifetime_safety_bailout
+    : Warning<"lifetime safety analysis skipped this function because its "
+              "control-flow graph %select{is too large|could not be built}0; "
+              "lifetime mistakes here may not be detected">,
+      InGroup<LifetimeSafetyBailout>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

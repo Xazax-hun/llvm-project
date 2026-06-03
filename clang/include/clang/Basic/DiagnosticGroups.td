@@ -707,8 +707,17 @@ language construct was not modeled.
   }];
 }
 
+def LifetimeSafetyBailout : DiagGroup<"lifetime-safety-bailout"> {
+  code Documentation = [{
+Warns when the lifetime safety analysis skips a function entirely (for example
+because its control-flow graph is too large), so that lifetime mistakes in that
+function would otherwise go undetected.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
-                                           [LifetimeSafetyLostLoan]> {
+                                           [LifetimeSafetyLostLoan,
+                                            LifetimeSafetyBailout]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

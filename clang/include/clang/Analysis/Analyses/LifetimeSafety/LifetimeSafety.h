@@ -46,6 +46,13 @@ enum class WarningScope {
   IntraTU  // For warnings on functions local to a Translation Unit.
 };
 
+/// Why the analysis skipped a function entirely. The values match the
+/// `%select` order of `warn_lifetime_safety_bailout`.
+enum class BailoutReason : unsigned {
+  CFGTooLarge = 0,   // The CFG exceeded the configured block limit.
+  CFGUnavailable = 1 // The CFG could not be built for the function.
+};
+
 /// Abstract interface for operations requiring Sema access.
 ///
 /// This class exists to break a circular dependency: the LifetimeSafety
@@ -158,6 +165,11 @@ public:
   // which no borrow information remains, indicating a loan was lost to an
   // unmodeled construct during loan propagation.
   virtual void reportLostLoan(const Expr *UseExpr) {}
+
+  // Reports that the analysis skipped a function entirely (e.g. its CFG exceeds
+  // the configured block limit, or the CFG could not be built), so lifetime
+  // mistakes in it may go undetected.
+  virtual void reportAnalysisBailout(const Decl *FD, BailoutReason Reason) {}
 };
 
 /// The main entry point for the analysis.
