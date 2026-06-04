@@ -68,6 +68,12 @@ private:
   /// Expressions already reported as an untracked construct, to avoid duplicate
   /// completeness warnings when a construct is visited more than once.
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
+  /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
+  /// duplicate warnings when several live origins hold the same borrow.
+  llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
+  /// Assumed-invalidation candidates collected during the fact walk, emitted
+  /// after the precise warnings are finalized.
+  llvm::SmallVector<std::pair<LoanID, const Expr *>> PendingAssumedInval;
   const LoanPropagationAnalysis &LoanPropagation;
   const MovedLoansAnalysis &MovedLoans;
   const LiveOriginsAnalysis &LiveOrigins;
@@ -102,8 +108,12 @@ public:
       for (const Fact *F : FactMgr.getFacts(B))
         if (const auto *EF = F->getAs<ExpireFact>())
           checkExpiry(EF);
-        else if (const auto *IOF = F->getAs<InvalidateOriginFact>())
-          checkInvalidation(IOF);
+        else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
+          if (IOF->isAssumed())
+            checkAssumedInvalidation(IOF);
+          else
+            checkInvalidation(IOF);
+        }
         else if (const auto *OEF = F->getAs<OriginEscapesFact>())
           checkAnnotations(OEF);
         else if (const auto *UF = F->getAs<UseFact>())
@@ -111,6 +121,7 @@ public:
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
     issuePendingWarnings();
+    issueAssumedInvalidations();
     checkUnannotatedParams();
     checkMultiLevelIndirection();
     suggestAnnotations();
@@ -252,8 +263,60 @@ public:
     }
   }
 
-  /// Completeness check for the "safe programming model": a read of a
-  /// pointer-like value that the analysis tracks but for which no loan is held
+  /// Completeness check for "assumed" invalidations (a non-const operation on an
+  /// owner, or passing an owner to a non-const pointer/reference parameter).
+  /// Mirrors checkInvalidation's borrow-matching but collects candidates to be
+  /// emitted after the precise warnings are finalized, so that a borrow already
+  /// reported as a known invalidation is not also flagged here.
+  void checkAssumedInvalidation(const InvalidateOriginFact *IOF) {
+    if (!SemaHelper)
+      return;
+    LoanSet DirectlyInvalidatedLoans =
+        LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF);
+    if (DirectlyInvalidatedLoans.isEmpty())
+      return;
+    auto IsInvalidated = [&](const Loan *L) {
+      for (LoanID InvalidID : DirectlyInvalidatedLoans)
+        if (FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath() ==
+            L->getAccessPath())
+          return true;
+      return false;
+    };
+    for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
+      for (LoanID LiveLoanID : LoanPropagation.getLoans(OID, IOF)) {
+        const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
+        if (!IsInvalidated(L))
+          continue;
+        // Record each invalidated borrow at most once per operation.
+        if (!ReportedAssumedInval
+                 .insert({LiveLoanID.Value, IOF->getInvalidationExpr()})
+                 .second)
+          continue;
+        PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationExpr()});
+      }
+    }
+  }
+
+  /// Emits the collected assumed-invalidation warnings, skipping any borrow
+  /// that was already reported as a known (precise) invalidation.
+  void issueAssumedInvalidations() {
+    if (!SemaHelper)
+      return;
+    for (auto &[LID, OperationExpr] : PendingAssumedInval) {
+      // If this borrow is already reported as a known invalidation, the
+      // lower-confidence assumed warning would be redundant.
+      auto It = FinalWarningsMap.find(LID);
+      if (It != FinalWarningsMap.end() && It->second.InvalidatedByExpr)
+        continue;
+      const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
+      if (const Expr *IssueExpr = L->getIssuingExpr())
+        SemaHelper->reportAssumedInvalidation(IssueExpr, OperationExpr);
+      else if (const ParmVarDecl *PVD =
+                   L->getAccessPath().getAsPlaceholderParam())
+        SemaHelper->reportAssumedInvalidation(PVD, OperationExpr);
+    }
+  }
+
   /// indicates a borrow was lost because some construct was not modeled during
   /// loan propagation (or the pointer is null/uninitialized, which is equally
   /// untracked). Reports it so that, with the warning enabled as an error, the

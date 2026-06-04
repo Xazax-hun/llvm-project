@@ -750,13 +750,23 @@ which silences lifetime safety checks for the moved-from object.
   }];
 }
 
+def LifetimeSafetyAssumedInvalidation
+    : DiagGroup<"lifetime-safety-assumed-invalidation"> {
+  code Documentation = [{
+Warns when a borrow into an owner may be invalidated by an operation the
+analysis conservatively assumes mutates the owner: a non-const member call, or
+passing the owner to a non-const pointer/reference parameter.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
                                             LifetimeSafetyIndirectCall,
                                             LifetimeSafetyUnannotatedIndirection,
                                             LifetimeSafetyMultilevelIndirection,
-                                            LifetimeSafetyMoveSilencing]> {
+                                            LifetimeSafetyMoveSilencing,
+                                            LifetimeSafetyAssumedInvalidation]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

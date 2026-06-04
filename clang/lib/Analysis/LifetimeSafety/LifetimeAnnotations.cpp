@@ -314,6 +314,50 @@ bool isGslOwnerType(const CXXRecordDecl *RD) {
   return isRecordWithAttr<OwnerAttr>(RD);
 }
 
+bool pointsToMutableOwner(QualType GslPointerType) {
+  const CXXRecordDecl *RD = GslPointerType->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  // A gsl::Pointer can mutate its pointee if it exposes mutable access to a
+  // non-const owner: operator*/operator[] returning a non-const owner
+  // reference, or operator-> returning a non-const owner pointer.
+  auto ExposesMutableOwner = [](const CXXRecordDecl *R) {
+    for (const CXXMethodDecl *M : R->methods()) {
+      QualType Ret = M->getReturnType();
+      switch (M->getOverloadedOperator()) {
+      case OO_Star:
+      case OO_Subscript:
+        if (Ret->isLValueReferenceType() &&
+            !Ret->getPointeeType().isConstQualified() &&
+            isGslOwnerType(Ret->getPointeeType()))
+          return true;
+        break;
+      case OO_Arrow:
+        if (Ret->isPointerType() &&
+            !Ret->getPointeeType().isConstQualified() &&
+            isGslOwnerType(Ret->getPointeeType()))
+          return true;
+        break;
+      default:
+        break;
+      }
+    }
+    return false;
+  };
+  if (ExposesMutableOwner(RD))
+    return true;
+  // The access operators may be inherited from base classes.
+  bool Found = false;
+  RD->forallBases([&](const CXXRecordDecl *Base) {
+    if (ExposesMutableOwner(Base)) {
+      Found = true;
+      return false; // Stop traversing bases.
+    }
+    return true;
+  });
+  return Found;
+}
+
 static StringRef getName(const CXXRecordDecl &RD) {
   if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(&RD))
     return CTSD->getSpecializedTemplate()->getName();

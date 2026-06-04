@@ -840,6 +840,69 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
         ThisList->getOuterOriginID(), Call));
 }
 
+// Completeness: the analysis conservatively assumes that operations it cannot
+// prove leave an owner unchanged invalidate borrows into that owner. Two cases:
+//   1. a non-const member call on an owner (other than known container mutators,
+//      which are handled precisely, and borrow-returning accessors), and
+//   2. passing an owner to a non-const pointer/reference parameter.
+// These emit an *assumed* InvalidateOriginFact; the checker only warns when a
+// borrow into the owner is actually live across the operation.
+void FactsGenerator::handleAssumedInvalidatingCall(
+    const Expr *Call, const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  bool IsInstance =
+      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+
+  // (1) Non-const member call on an owner receiver. Known container mutators
+  // are handled precisely elsewhere; borrow-returning accessors (recognized GSL
+  // accessors or methods that are lifetimebound on 'this') do not invalidate.
+  if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
+      !Args.empty() && isGslOwnerType(Args[0]->getType()) &&
+      !shouldTrackImplicitObjectArg(*Args[0], Method,
+                                    /*RunningUnderLifetimeSafety=*/true) &&
+      !implicitObjectParamIsLifetimeBound(Method)) {
+    if (OriginList *L = getOriginsList(*Args[0]))
+      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+          L->getOuterOriginID(), Call, /*Assumed=*/true));
+  }
+
+  // (2) Passing an owner to a non-const pointer/reference parameter. The
+  // implicit object argument (I == 0 for instance methods) is intentionally
+  // skipped here -- it is handled by case (1) above.
+  for (unsigned I = 0; I < Args.size(); ++I) {
+    const ParmVarDecl *PVD = nullptr;
+    if (IsInstance) {
+      if (I == 0)
+        continue; // Implicit object argument, handled above.
+      if (I - 1 < Method->getNumParams())
+        PVD = Method->getParamDecl(I - 1);
+    } else if (I < FD->getNumParams()) {
+      PVD = FD->getParamDecl(I);
+    }
+    if (!PVD)
+      continue;
+    QualType PT = PVD->getType();
+    // The parameter is assumed to mutate the owner the argument refers to if it
+    // is a non-const pointer/reference to an owner, or a gsl::Pointer (e.g.
+    // std::span) that exposes mutable access to a non-const owner pointee.
+    bool MutatesOwner = false;
+    if (PT->isPointerType()) {
+      QualType Pointee = PT->getPointeeType();
+      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
+    } else if (isGslPointerType(PT.getNonReferenceType())) {
+      MutatesOwner = pointsToMutableOwner(PT.getNonReferenceType());
+    } else if (PT->isReferenceType()) {
+      QualType Pointee = PT->getPointeeType();
+      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
+    }
+    if (!MutatesOwner)
+      continue;
+    if (OriginList *L = getOriginsList(*Args[I]))
+      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+          L->getOuterOriginID(), Call, /*Assumed=*/true));
+  }
+}
+
 void FactsGenerator::handleDestructiveCall(const Expr *Call,
                                            const FunctionDecl *FD,
                                            ArrayRef<const Expr *> Args) {
@@ -1016,6 +1079,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   for (const Expr *Arg : Args)
     handleUse(Arg);
   handleInvalidatingCall(Call, FD, Args);
+  handleAssumedInvalidatingCall(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);
   handleImplicitObjectFieldUses(Call, FD);

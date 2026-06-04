@@ -267,18 +267,25 @@ public:
 class InvalidateOriginFact : public Fact {
   OriginID OID;
   const Expr *InvalidationExpr;
+  /// True when the invalidation is only *assumed* (a non-const operation on an
+  /// owner, or passing an owner to a non-const pointer/reference parameter)
+  /// rather than a known container-mutation method. Drives the lower-confidence
+  /// "assumed invalidation" completeness diagnostic.
+  bool Assumed;
 
 public:
   static bool classof(const Fact *F) {
     return F->getKind() == Kind::InvalidateOrigin;
   }
 
-  InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr)
+  InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr,
+                       bool Assumed = false)
       : Fact(Kind::InvalidateOrigin), OID(OID),
-        InvalidationExpr(InvalidationExpr) {}
+        InvalidationExpr(InvalidationExpr), Assumed(Assumed) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   const Expr *getInvalidationExpr() const { return InvalidationExpr; }
+  bool isAssumed() const { return Assumed; }
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };

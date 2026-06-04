@@ -11124,6 +11124,14 @@ def warn_lifetime_safety_move_silencing
               "lifetime checks for the moved-from object are silenced">,
       InGroup<LifetimeSafetyMoveSilencing>,
       DefaultIgnore;
+def warn_lifetime_safety_assumed_invalidation
+    : Warning<"%select{object whose reference is captured|parameter}0 may be "
+              "invalidated by an operation that lifetime safety analysis "
+              "assumes mutates the owner">,
+      InGroup<LifetimeSafetyAssumedInvalidation>,
+      DefaultIgnore;
+def note_lifetime_safety_assumed_invalidated_here
+    : Note<"assumed to be invalidated by this operation">;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

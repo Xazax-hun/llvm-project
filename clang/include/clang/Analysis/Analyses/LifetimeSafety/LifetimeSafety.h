@@ -191,6 +191,14 @@ public:
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}
+
+  // Reports a borrow that may be invalidated by an operation the analysis
+  // conservatively assumes mutates the owner (a non-const member call, or
+  // passing the owner to a non-const pointer/reference parameter).
+  virtual void reportAssumedInvalidation(const Expr *IssueExpr,
+                                         const Expr *OperationExpr) {}
+  virtual void reportAssumedInvalidation(const ParmVarDecl *PVD,
+                                         const Expr *OperationExpr) {}
 };
 
 /// The main entry point for the analysis.

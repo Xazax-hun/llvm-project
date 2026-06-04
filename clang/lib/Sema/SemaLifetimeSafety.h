@@ -55,7 +55,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_unannotated_indirection,
       diag::warn_lifetime_safety_unannotated_param,
       diag::warn_lifetime_safety_multilevel_indirection,
-      diag::warn_lifetime_safety_move_silencing};
+      diag::warn_lifetime_safety_move_silencing,
+      diag::warn_lifetime_safety_assumed_invalidation};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -449,6 +450,24 @@ public:
   void reportMoveSilencing(const Expr *MoveExpr) override {
     S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)
         << MoveExpr->getSourceRange();
+  }
+
+  void reportAssumedInvalidation(const Expr *IssueExpr,
+                                 const Expr *OperationExpr) override {
+    S.Diag(IssueExpr->getExprLoc(),
+           diag::warn_lifetime_safety_assumed_invalidation)
+        << /*object=*/0 << IssueExpr->getSourceRange();
+    S.Diag(OperationExpr->getExprLoc(),
+           diag::note_lifetime_safety_assumed_invalidated_here)
+        << OperationExpr->getSourceRange();
+  }
+  void reportAssumedInvalidation(const ParmVarDecl *PVD,
+                                 const Expr *OperationExpr) override {
+    S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_assumed_invalidation)
+        << /*parameter=*/1 << PVD->getSourceRange();
+    S.Diag(OperationExpr->getExprLoc(),
+           diag::note_lifetime_safety_assumed_invalidated_here)
+        << OperationExpr->getSourceRange();
   }
 
 private:

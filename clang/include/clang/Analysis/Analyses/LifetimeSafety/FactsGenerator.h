@@ -130,6 +130,12 @@ private:
   void handleInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
                               ArrayRef<const Expr *> Args);
 
+  // Completeness: conservatively assume that a non-const member call on an
+  // owner, or passing an owner to a non-const pointer/reference parameter,
+  // invalidates borrows into that owner.
+  void handleAssumedInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
+                                     ArrayRef<const Expr *> Args);
+
   // Detect explicit destructor calls/`std::destroy_at`
   void handleDestructiveCall(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);

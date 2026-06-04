@@ -84,6 +84,13 @@ bool isGslPointerType(QualType QT);
 bool isGslOwnerType(QualType QT);
 bool isGslOwnerType(const CXXRecordDecl *RD);
 
+// Returns true if the given gsl::Pointer type can mutate the (non-const) owner
+// it points to, i.e. it (or a base class) exposes operator*/operator[]
+// returning a reference to a non-const gsl::Owner, or operator-> returning a
+// pointer to a non-const gsl::Owner. Passing such a pointer to a function is
+// assumed to invalidate borrows into the pointed-to owner.
+bool pointsToMutableOwner(QualType GslPointerType);
+
 // Returns true if the given method is std::unique_ptr::release().
 // This is treated as a move in lifetime analysis to avoid false-positives
 // when ownership is manually transferred.
