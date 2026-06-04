@@ -120,6 +120,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::UnannotatedIndirection:
     OS << "UnannotatedIndirection";
     break;
+  case UntrackedConstructReason::MoveSilencing:
+    OS << "MoveSilencing";
+    break;
   }
   OS << ")\n";
 }

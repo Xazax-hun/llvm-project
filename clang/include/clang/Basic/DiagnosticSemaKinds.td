@@ -11119,6 +11119,11 @@ def warn_lifetime_safety_multilevel_indirection
               "supports only a single level of indirection">,
       InGroup<LifetimeSafetyMultilevelIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_move_silencing
+    : Warning<"moving an owner is not modeled by lifetime safety analysis, so "
+              "lifetime checks for the moved-from object are silenced">,
+      InGroup<LifetimeSafetyMoveSilencing>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

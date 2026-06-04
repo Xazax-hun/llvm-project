@@ -111,6 +111,12 @@ private:
   void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args);
 
+  // Completeness: flags ownership-transferring moves of an owner (std::move of
+  // a gsl::Owner, or std::unique_ptr::release), which the analysis does not
+  // model.
+  void handleMoveSilencing(const Expr *Call, const FunctionDecl *FD,
+                           ArrayRef<const Expr *> Args);
+
   /// Checks if a call-like expression creates a borrow by passing a value to a
   /// reference parameter, creating an IssueFact if it does.
   /// \param IsGslConstruction True if this is a GSL construction where all

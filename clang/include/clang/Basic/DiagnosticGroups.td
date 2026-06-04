@@ -742,12 +742,21 @@ programming model" supports only a single level of indirection.
   }];
 }
 
+def LifetimeSafetyMoveSilencing : DiagGroup<"lifetime-safety-move-silencing"> {
+  code Documentation = [{
+Warns when an owner is moved (e.g. via 'std::move' or
+'std::unique_ptr::release'), an ownership transfer the analysis does not model,
+which silences lifetime safety checks for the moved-from object.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
                                             LifetimeSafetyIndirectCall,
                                             LifetimeSafetyUnannotatedIndirection,
-                                            LifetimeSafetyMultilevelIndirection]> {
+                                            LifetimeSafetyMultilevelIndirection,
+                                            LifetimeSafetyMoveSilencing]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

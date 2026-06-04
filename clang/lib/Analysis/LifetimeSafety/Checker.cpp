@@ -293,6 +293,9 @@ public:
     case UntrackedConstructReason::UnannotatedIndirection:
       SemaHelper->reportUnannotatedIndirection(E);
       break;
+    case UntrackedConstructReason::MoveSilencing:
+      SemaHelper->reportMoveSilencing(E);
+      break;
     }
   }
 

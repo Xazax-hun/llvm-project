@@ -351,6 +351,10 @@ enum class UntrackedConstructReason : uint8_t {
   /// the lifetime annotations ('lifetimebound', 'noescape', 'lifetime_capture_by'),
   /// so the analysis cannot tell whether the borrow escapes the call.
   UnannotatedIndirection,
+  /// An ownership-transferring move of an owner (e.g. 'std::move(owner)' or
+  /// 'std::unique_ptr::release'), which the analysis does not model, silencing
+  /// lifetime checks for the moved-from object.
+  MoveSilencing,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

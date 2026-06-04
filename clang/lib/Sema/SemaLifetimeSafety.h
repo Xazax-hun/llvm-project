@@ -54,7 +54,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_indirect_call,
       diag::warn_lifetime_safety_unannotated_indirection,
       diag::warn_lifetime_safety_unannotated_param,
-      diag::warn_lifetime_safety_multilevel_indirection};
+      diag::warn_lifetime_safety_multilevel_indirection,
+      diag::warn_lifetime_safety_move_silencing};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -443,6 +444,11 @@ public:
     S.Diag(VD->getLocation(),
            diag::warn_lifetime_safety_multilevel_indirection)
         << getDiagSubjectDescription(VD) << VD->getSourceRange();
+  }
+
+  void reportMoveSilencing(const Expr *MoveExpr) override {
+    S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)
+        << MoveExpr->getSourceRange();
   }
 
 private:

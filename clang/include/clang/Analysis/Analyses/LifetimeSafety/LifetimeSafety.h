@@ -187,6 +187,10 @@ public:
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
+
+  // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
+  // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
+  virtual void reportMoveSilencing(const Expr *MoveExpr) {}
 };
 
 /// The main entry point for the analysis.

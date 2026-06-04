@@ -979,6 +979,24 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   }
 }
 
+// Completeness: an ownership-transferring move of an owner (std::move/forward of
+// a gsl::Owner, or std::unique_ptr::release) is not modeled, so it silences the
+// analysis for the moved-from object. Moving a pointer-like value is a harmless
+// copy and is not flagged.
+void FactsGenerator::handleMoveSilencing(const Expr *Call,
+                                         const FunctionDecl *FD,
+                                         ArrayRef<const Expr *> Args) {
+  if (isStdReferenceCast(FD) && !Args.empty() &&
+      isGslOwnerType(Args[0]->getType())) {
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::MoveSilencing, Call));
+    return;
+  }
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD); MD && isUniquePtrRelease(*MD))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::MoveSilencing, Call));
+}
+
 void FactsGenerator::handleFunctionCall(const Expr *Call,
                                         const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args,
@@ -1003,6 +1021,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleImplicitObjectFieldUses(Call, FD);
   handleLifetimeCaptureBy(FD, Args);
   handleUnannotatedIndirectionArgs(FD, Args);
+  handleMoveSilencing(Call, FD, Args);
   if (!CallList)
     return;
   // A [[clang::lifetime_immortal]] function returns storage that lives for the
