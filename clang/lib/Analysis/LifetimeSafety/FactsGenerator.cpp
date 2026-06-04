@@ -157,7 +157,7 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
     const auto *VD = dyn_cast<VarDecl>(D);
     if (!VD)
       continue;
-    // Completeness: a local of a user-defined type whose ownership is unknown.
+    // Soundness: a local of a user-defined type whose ownership is unknown.
     if (isUnknownOwnershipType(VD->getType(),
                                FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
@@ -848,7 +848,7 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
         ThisList->getOuterOriginID(), Call));
 }
 
-// Completeness: the analysis conservatively assumes that operations it cannot
+// Soundness: the analysis conservatively assumes that operations it cannot
 // prove leave an owner unchanged invalidate borrows into that owner. Two cases:
 //   1. a non-const member call on an owner (other than known container mutators,
 //      which are handled precisely, and borrow-returning accessors), and
@@ -1015,7 +1015,7 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   }
 }
 
-// Completeness: flag arguments bound to origin-carrying parameters (raw
+// Soundness: flag arguments bound to origin-carrying parameters (raw
 // pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
 // are not modeled via GSL recognition. The analysis cannot tell whether such a
 // borrow escapes the call. Runs independently of the call's return type.
@@ -1051,7 +1051,7 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   }
 }
 
-// Completeness: an ownership-transferring move of an owner (std::move/forward of
+// Soundness: an ownership-transferring move of an owner (std::move/forward of
 // a gsl::Owner, or std::unique_ptr::release) is not modeled, so it silences the
 // analysis for the moved-from object. Moving a pointer-like value is a harmless
 // copy and is not flagged.
@@ -1079,7 +1079,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   if (!FD) {
     // The callee could not be resolved to a function (e.g. a call through a
     // function or member-function pointer). Such callees cannot carry lifetime
-    // annotations, so the call is not modeled; surface it for completeness.
+    // annotations, so the call is not modeled; surface it for soundness.
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::IndirectCall, Call));
     return;
@@ -1087,7 +1087,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // All arguments to a function are a use of the corresponding expressions.
   for (const Expr *Arg : Args)
     handleUse(Arg);
-  // Completeness: a call returning a user-defined type of unknown ownership
+  // Soundness: a call returning a user-defined type of unknown ownership
   // (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
   // [[gsl::Pointer]]) produces a value the analysis cannot track. Constructor
   // calls are skipped -- constructing such a value is reported at its

@@ -62,11 +62,11 @@ private:
   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// Source locations already reported as lost-loan, to avoid duplicate
-  /// completeness warnings when several uses (e.g. a DeclRefExpr and its
+  /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
   llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
   /// Expressions already reported as an untracked construct, to avoid duplicate
-  /// completeness warnings when a construct is visited more than once.
+  /// soundness warnings when a construct is visited more than once.
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
   /// Declarations already reported as an untracked construct.
   llvm::DenseSet<const ValueDecl *> ReportedUntrackedDecls;
@@ -268,7 +268,7 @@ public:
     }
   }
 
-  /// Completeness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
+  /// Soundness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
   /// loan flowing into the deallocated pointer is not a heap allocation -- the
   /// analysis cannot then prove the deallocation refers to a live, unaliased
   /// heap allocation. This is intentionally strict: every loan must be a heap
@@ -296,7 +296,7 @@ public:
       SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
   }
 
-  /// Completeness check for "assumed" invalidations (a non-const operation on an
+  /// Soundness check for "assumed" invalidations (a non-const operation on an
   /// owner, or passing an owner to a non-const pointer/reference parameter).
   /// Mirrors checkInvalidation's borrow-matching but collects candidates to be
   /// emitted after the precise warnings are finalized, so that a borrow already
@@ -375,7 +375,7 @@ public:
   }
 
   /// Translates a fact recording an unmodeled construct into the corresponding
-  /// completeness diagnostic, de-duplicating per construct expression.
+  /// soundness diagnostic, de-duplicating per construct expression.
   void recordUntrackedConstruct(const UntrackedConstructFact *UCF) {
     if (!SemaHelper)
       return;
@@ -404,7 +404,7 @@ public:
     }
   }
 
-  /// Completeness check for the function's own signature: every parameter of
+  /// Soundness check for the function's own signature: every parameter of
   /// origin-carrying type (raw pointer/reference, gsl::Pointer, etc.) must carry
   /// a lifetime annotation under the "safe programming model", otherwise its
   /// lifetime contract is unspecified.
@@ -415,7 +415,7 @@ public:
     if (!Fn)
       return;
     for (const ParmVarDecl *PVD : Fn->parameters()) {
-      // Completeness: a parameter of a user-defined type whose ownership is
+      // Soundness: a parameter of a user-defined type whose ownership is
       // unknown (reported separately from the annotation requirement).
       if (isUnknownOwnershipType(PVD->getType(),
                                  FactMgr.getUnknownOwnershipCache())) {
@@ -436,7 +436,7 @@ public:
     }
   }
 
-  /// Completeness check: under the "safe programming model" only a single level
+  /// Soundness check: under the "safe programming model" only a single level
   /// of indirection is supported. A declaration whose origin list has more than
   /// one level (e.g. 'int **', 'int *&') cannot be fully modeled, so flag it.
   void checkMultiLevelIndirection() {

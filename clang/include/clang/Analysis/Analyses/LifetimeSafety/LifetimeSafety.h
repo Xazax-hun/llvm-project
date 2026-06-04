@@ -157,7 +157,7 @@ public:
   // TypeSourceInfo.
   virtual void addLifetimeBoundToImplicitThis(const CXXMethodDecl *MD) {}
 
-  // Completeness ("safe programming model") diagnostics. These fire wherever the
+  // Soundness ("safe programming model") diagnostics. These fire wherever the
   // analysis cannot fully model a construct; enabling them as errors over a
   // region guarantees no lifetime mistake slips through unmodeled.
 

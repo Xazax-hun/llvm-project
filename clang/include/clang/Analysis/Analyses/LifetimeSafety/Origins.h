@@ -167,7 +167,7 @@ public:
   void collectMissingOrigins(Stmt &FunctionBody, LifetimeSafetyStats &LSStats);
 
   /// Returns the origin lists created for declarations (parameters and locals).
-  /// Used by completeness checks (e.g. detecting multi-level indirection).
+  /// Used by soundness checks (e.g. detecting multi-level indirection).
   const llvm::DenseMap<const clang::ValueDecl *, OriginList *> &
   getDeclOriginLists() const {
     return DeclToList;

@@ -105,13 +105,13 @@ private:
   void handleLifetimeCaptureBy(const FunctionDecl *FD,
                                ArrayRef<const Expr *> Args);
 
-  // Completeness ("safe programming model"): flags call arguments bound to
+  // Soundness ("safe programming model"): flags call arguments bound to
   // origin-carrying parameters that carry no lifetime annotation and are not
   // modeled via GSL recognition.
   void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args);
 
-  // Completeness: flags ownership-transferring moves of an owner (std::move of
+  // Soundness: flags ownership-transferring moves of an owner (std::move of
   // a gsl::Owner, or std::unique_ptr::release), which the analysis does not
   // model.
   void handleMoveSilencing(const Expr *Call, const FunctionDecl *FD,
@@ -130,7 +130,7 @@ private:
   void handleInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
                               ArrayRef<const Expr *> Args);
 
-  // Completeness: conservatively assume that a non-const member call on an
+  // Soundness: conservatively assume that a non-const member call on an
   // owner, or passing an owner to a non-const pointer/reference parameter,
   // invalidates borrows into that owner.
   void handleAssumedInvalidatingCall(const Expr *Call, const FunctionDecl *FD,

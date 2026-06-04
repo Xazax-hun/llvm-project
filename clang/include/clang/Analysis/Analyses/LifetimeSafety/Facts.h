@@ -59,7 +59,7 @@ public:
     /// All loans of an origin are cleared.
     KillOrigin,
     /// A construct the analysis cannot fully model. Drives the "safe
-    /// programming model" completeness warnings and carries no dataflow state.
+    /// programming model" soundness warnings and carries no dataflow state.
     UntrackedConstruct,
   };
 
@@ -271,7 +271,7 @@ class InvalidateOriginFact : public Fact {
   /// True when the invalidation is only *assumed* (a non-const operation on an
   /// owner, or passing an owner to a non-const pointer/reference parameter)
   /// rather than a known container-mutation method. Drives the lower-confidence
-  /// "assumed invalidation" completeness diagnostic.
+  /// "assumed invalidation" soundness diagnostic.
   bool Assumed;
   /// True when the invalidation is a deallocation (`delete`, `free`,
   /// `std::destroy_at`, a destructor). Drives the "naked deallocation" check.
@@ -353,7 +353,7 @@ public:
 };
 
 /// The kind of construct that the analysis could not fully model. Each value
-/// maps to a "safe programming model" completeness warning emitted by the
+/// maps to a "safe programming model" soundness warning emitted by the
 /// checker.
 enum class UntrackedConstructReason : uint8_t {
   /// A call whose callee could not be resolved to a function, e.g. a call
@@ -375,7 +375,7 @@ enum class UntrackedConstructReason : uint8_t {
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
-/// CFG block where it appears. The checker turns these into completeness
+/// CFG block where it appears. The checker turns these into soundness
 /// diagnostics. This fact carries no Origin/Loan state and is ignored by the
 /// dataflow analyses.
 class UntrackedConstructFact : public Fact {

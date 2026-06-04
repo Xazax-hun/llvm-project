@@ -695,9 +695,9 @@ like verifying [[clang::noescape]] and [[clang::lifetimebound]].
   }];
 }
 
-// Completeness warnings: surfaced wherever the analysis cannot fully model a
-// construct. Enabling these (typically as errors over a region) turns the
-// best-effort analysis into a sound "safe programming model" where a clean
+// Soundness warnings: surfaced wherever the analysis cannot fully model a
+// construct. Enabling these (typically as errors over a region) makes the
+// best-effort analysis sound for a "safe programming model" where a clean
 // compile guarantees no lifetime mistake slipped through unmodeled.
 def LifetimeSafetyLostLoan : DiagGroup<"lifetime-safety-lost-loan"> {
   code Documentation = [{
@@ -776,16 +776,16 @@ it owns or merely refers to the storage and cannot track its borrows.
   }];
 }
 
-def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
-                                           [LifetimeSafetyLostLoan,
-                                            LifetimeSafetyBailout,
-                                            LifetimeSafetyIndirectCall,
-                                            LifetimeSafetyUnannotatedIndirection,
-                                            LifetimeSafetyMultilevelIndirection,
-                                            LifetimeSafetyMoveSilencing,
-                                            LifetimeSafetyAssumedInvalidation,
-                                            LifetimeSafetyNakedDelete,
-                                            LifetimeSafetyUnknownOwnership]> {
+def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
+                                        [LifetimeSafetyLostLoan,
+                                         LifetimeSafetyBailout,
+                                         LifetimeSafetyIndirectCall,
+                                         LifetimeSafetyUnannotatedIndirection,
+                                         LifetimeSafetyMultilevelIndirection,
+                                         LifetimeSafetyMoveSilencing,
+                                         LifetimeSafetyAssumedInvalidation,
+                                         LifetimeSafetyNakedDelete,
+                                         LifetimeSafetyUnknownOwnership]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).
@@ -799,7 +799,7 @@ def LifetimeSafetyAll : DiagGroup<"lifetime-safety-all",
                                   [LifetimeSafety,
                                   LifetimeSafetySuggestions,
                                   LifetimeSafetyValidations,
-                                  LifetimeSafetyCompleteness]> {
+                                  LifetimeSafetySoundness]> {
   code Documentation = [{
 Turns on all the warnings in the lifetime-safety umbrella.
   }];

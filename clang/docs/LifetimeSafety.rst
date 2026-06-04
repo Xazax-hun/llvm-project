@@ -525,6 +525,66 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-noescape``: Warns when a parameter marked with ``[[clang::noescape]]`` escapes the function.
   * ``-Wlifetime-safety-lifetimebound-violation``: Warns when the analysis cannot verify that the return value can be lifetime bound to a parameter marked with ``[[clang::lifetimebound]]``.
 
+* ``-Wlifetime-safety-soundness``: Enables *soundness* checks that fire wherever the analysis cannot fully model a construct. They are intended to be enabled as errors over a region of code to opt into the :ref:`safe programming model <safe_programming_model>`. See that section for details.
+
+  * ``-Wlifetime-safety-bailout``: Warns when the analysis skips a whole function (e.g. its control-flow graph is too large or could not be built).
+  * ``-Wlifetime-safety-lost-loan``: Warns when a tracked pointer-like value ends up holding no borrow, indicating a borrow was lost to an unmodeled construct.
+  * ``-Wlifetime-safety-indirect-call``: Warns on calls through a function or member-function pointer, which cannot carry lifetime annotations.
+  * ``-Wlifetime-safety-unannotated-indirection``: Warns on a parameter that can hold a borrow but carries none of ``[[clang::lifetimebound]]``, ``[[clang::noescape]]`` or ``[[clang::lifetime_capture_by]]`` (both at the definition and at call sites).
+  * ``-Wlifetime-safety-multilevel-indirection``: Warns on declarations that use more than one level of indirection (e.g. ``int **``).
+  * ``-Wlifetime-safety-move-silencing``: Warns when an owner is moved (e.g. ``std::move`` or ``std::unique_ptr::release``), an ownership transfer the analysis does not model.
+  * ``-Wlifetime-safety-assumed-invalidation``: Warns when a borrow into an owner may be invalidated by an operation conservatively assumed to mutate it (a non-const member call, or passing the owner to a non-const pointer/reference parameter or mutable view).
+  * ``-Wlifetime-safety-naked-delete``: Warns on a ``delete``/``free`` of a pointer whose allocation the analysis did not see (deallocations inside destructors are exempt).
+  * ``-Wlifetime-safety-unknown-ownership``: Warns on a value of a user-defined type that can hold a borrow but is annotated neither ``[[gsl::Owner]]`` nor ``[[gsl::Pointer]]``.
+
+.. _safe_programming_model:
+
+Safe Programming Model
+======================
+
+The checks under :ref:`-Wlifetime-safety <warning_flags>` are *best-effort*:
+when the analysis cannot model a construct it silently tracks nothing, so a
+clean compile is not by itself a guarantee that no lifetime mistake slipped
+through. The *soundness* checks under ``-Wlifetime-safety-soundness``
+close that gap: each one fires wherever the analysis cannot fully account for a
+construct (an unsupported indirection, an unmodeled call, an analysis bailout,
+an unannotated or unknown-ownership type, and so on).
+
+By enabling these checks **as errors** over a region of code, you opt that code
+into a "safe programming model" in which the analysis never silently fails to
+catch a lifetime mistake. The model requires, among other things, that every
+indirection be annotated, that only a single level of indirection be used, and
+that user-defined types declare their ownership with ``[[gsl::Owner]]`` or
+``[[gsl::Pointer]]``.
+
+Opting in is done with the standard diagnostic pragmas, which apply to a region
+of code:
+
+.. code-block:: c++
+
+  #pragma clang diagnostic push
+  #pragma clang diagnostic error "-Wlifetime-safety-soundness"
+
+  // ... code that must adhere to the safe programming model ...
+
+  #pragma clang diagnostic pop
+
+When a region calls a function that is not annotated (for example, a library
+function), prefer providing an annotated redeclaration. Where that is not
+possible, the same pragma machinery provides a per-construct **opt-out**:
+
+.. code-block:: c++
+
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  legacy_call(p); // intentionally not modeled
+  #pragma clang diagnostic pop
+
+Because diagnostic pragma regions are resolved by source location, the opt-in
+and opt-out behave identically under translation-unit-wide analysis
+(``-fexperimental-lifetime-safety-tu-analysis``), even though the checks run at
+the end of the translation unit.
+
 Limitations
 ===========
 

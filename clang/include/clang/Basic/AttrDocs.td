@@ -4583,7 +4583,7 @@ The lifetime safety analysis models the return value as borrowing storage that
 never expires. As a result, the returned pointer is always considered valid:
 it never triggers use-after-scope, use-after-return, or dangling diagnostics,
 and -- because it carries a tracked (immortal) borrow -- it does not trigger the
-``-Wlifetime-safety-lost-loan`` completeness warning. This lets such functions
+``-Wlifetime-safety-lost-loan`` soundness warning. This lets such functions
 participate in the "safe programming model" without the analysis losing track
 of their results.
 

@@ -1,12 +1,12 @@
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-indirect-call -verify=expected %s
-// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-completeness -verify=expected,umbrella %s
+// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-soundness -verify=expected,umbrella %s
 
 // Calls whose callee cannot be resolved to a function (function pointers,
 // member-function pointers) cannot carry lifetime annotations, so the analysis
 // cannot model them. Results are discarded here to keep the focus on the
 // indirect-call warning (an unused pointer result would also be "lost").
 //
-// The second RUN enables the whole -completeness umbrella, which additionally
+// The second RUN enables the whole -soundness umbrella, which additionally
 // flags the unannotated function-pointer parameters (checked under 'umbrella').
 
 void use(int *);

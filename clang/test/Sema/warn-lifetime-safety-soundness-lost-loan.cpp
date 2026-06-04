@@ -1,12 +1,12 @@
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-lost-loan -verify=expected %s
-// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-completeness -verify=expected,umbrella %s
+// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-soundness -verify=expected,umbrella %s
 
-// The lost-loan completeness warning fires when the analysis tracks a
+// The lost-loan soundness warning fires when the analysis tracks a
 // pointer-like value but holds no borrow for it, i.e. a loan was lost because
 // some construct was not modeled (or the value is null/uninitialized and thus
-// untracked). It is part of the "safe programming model" completeness group.
+// untracked). It is part of the "safe programming model" soundness group.
 //
-// The second RUN enables the whole -completeness umbrella, which additionally
+// The second RUN enables the whole -soundness umbrella, which additionally
 // flags the unannotated indirection in each 'use' call (and the unannotated
 // parameter 'q'); those are checked under the 'umbrella' prefix.
 

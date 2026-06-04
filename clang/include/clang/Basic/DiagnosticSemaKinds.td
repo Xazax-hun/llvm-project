@@ -11082,7 +11082,7 @@ def warn_lifetime_safety_noescape_escapes
       InGroup<LifetimeSafetyNoescape>,
       DefaultIgnore;
 
-// Completeness diagnostics: emitted wherever the analysis cannot fully model a
+// Soundness diagnostics: emitted wherever the analysis cannot fully model a
 // construct, so that enabling them (typically as errors) yields a sound "safe
 // programming model".
 def warn_lifetime_safety_lost_loan
