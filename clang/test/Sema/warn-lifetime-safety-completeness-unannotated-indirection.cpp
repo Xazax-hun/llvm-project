@@ -27,7 +27,7 @@ const int *def_annotated(int *p [[clang::lifetimebound]],
   return p;
 }
 
-void def_by_value(int x, View *pv) { // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}}
+void def_by_value(int x, int *pv) { // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}}
   // 'x' is not an indirection; only 'pv' (a pointer) is flagged.
   (void)x;
   (void)pv;

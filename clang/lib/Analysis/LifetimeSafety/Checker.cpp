@@ -112,6 +112,7 @@ public:
           recordUntrackedConstruct(UCF);
     issuePendingWarnings();
     checkUnannotatedParams();
+    checkMultiLevelIndirection();
     suggestAnnotations();
     reportNoescapeViolations();
     reportLifetimeboundViolations();
@@ -308,11 +309,44 @@ public:
     for (const ParmVarDecl *PVD : Fn->parameters()) {
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
         continue;
+      // Multi-level indirection is reported separately; don't double-flag.
+      if (OriginList *L = FactMgr.getOriginMgr().getOrCreateList(PVD);
+          L && L->getLength() > 1)
+        continue;
       if (PVD->hasAttr<LifetimeBoundAttr>() || PVD->hasAttr<NoEscapeAttr>() ||
           PVD->hasAttr<LifetimeCaptureByAttr>())
         continue;
       SemaHelper->reportUnannotatedParam(PVD);
     }
+  }
+
+  /// Completeness check: under the "safe programming model" only a single level
+  /// of indirection is supported. A declaration whose origin list has more than
+  /// one level (e.g. 'int **', 'int *&') cannot be fully modeled, so flag it.
+  void checkMultiLevelIndirection() {
+    if (!SemaHelper)
+      return;
+    OriginManager &OM = FactMgr.getOriginMgr();
+    llvm::DenseSet<const ValueDecl *> Seen;
+    llvm::SmallVector<const ValueDecl *> MultiLevel;
+    auto Consider = [&](const ValueDecl *VD, OriginList *L) {
+      if (L && L->getLength() > 1 && Seen.insert(VD).second)
+        MultiLevel.push_back(VD);
+    };
+    // Parameters (including ones never used in the body).
+    if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
+      for (const ParmVarDecl *P : Fn->parameters())
+        Consider(P, OM.getOrCreateList(P));
+    // Local variables and any other tracked declarations.
+    for (const auto &[VD, L] : OM.getDeclOriginLists())
+      Consider(VD, L);
+    // Emit in source order for deterministic diagnostics.
+    llvm::sort(MultiLevel, [](const ValueDecl *A, const ValueDecl *B) {
+      return A->getLocation().getRawEncoding() <
+             B->getLocation().getRawEncoding();
+    });
+    for (const ValueDecl *VD : MultiLevel)
+      SemaHelper->reportMultiLevelIndirection(VD);
   }
 
   void issuePendingWarnings() {

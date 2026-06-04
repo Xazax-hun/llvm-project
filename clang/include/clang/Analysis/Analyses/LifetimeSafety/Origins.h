@@ -166,6 +166,13 @@ public:
   /// Collects statistics about expressions that lack associated origins.
   void collectMissingOrigins(Stmt &FunctionBody, LifetimeSafetyStats &LSStats);
 
+  /// Returns the origin lists created for declarations (parameters and locals).
+  /// Used by completeness checks (e.g. detecting multi-level indirection).
+  const llvm::DenseMap<const clang::ValueDecl *, OriginList *> &
+  getDeclOriginLists() const {
+    return DeclToList;
+  }
+
 private:
   OriginID getNextOriginID() { return NextOriginID++; }
 

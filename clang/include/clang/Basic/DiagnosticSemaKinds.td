@@ -11113,6 +11113,12 @@ def warn_lifetime_safety_unannotated_param
               "'lifetime_capture_by'">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_multilevel_indirection
+    : Warning<"%0 uses more than one level of indirection, which lifetime "
+              "safety analysis cannot fully model; the safe programming model "
+              "supports only a single level of indirection">,
+      InGroup<LifetimeSafetyMultilevelIndirection>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

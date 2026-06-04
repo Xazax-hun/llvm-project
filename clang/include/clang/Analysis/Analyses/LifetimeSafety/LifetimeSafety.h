@@ -183,6 +183,10 @@ public:
   // Reports a pointer/reference parameter of the analyzed function that carries
   // no lifetime annotation, leaving its lifetime contract unspecified.
   virtual void reportUnannotatedParam(const ParmVarDecl *PVD) {}
+
+  // Reports a declaration whose type uses more than one level of indirection
+  // (e.g. 'int **'), which the analysis cannot fully model.
+  virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
 };
 
 /// The main entry point for the analysis.

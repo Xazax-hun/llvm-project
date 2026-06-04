@@ -733,11 +733,21 @@ the call.
   }];
 }
 
+def LifetimeSafetyMultilevelIndirection
+    : DiagGroup<"lifetime-safety-multilevel-indirection"> {
+  code Documentation = [{
+Warns on declarations that use more than one level of indirection (e.g.
+'int **'), which the lifetime safety analysis cannot fully model. The "safe
+programming model" supports only a single level of indirection.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
                                             LifetimeSafetyIndirectCall,
-                                            LifetimeSafetyUnannotatedIndirection]> {
+                                            LifetimeSafetyUnannotatedIndirection,
+                                            LifetimeSafetyMultilevelIndirection]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).
