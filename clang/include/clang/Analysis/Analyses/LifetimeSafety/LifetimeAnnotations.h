@@ -12,6 +12,7 @@
 
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
+#include "llvm/ADT/DenseMap.h"
 
 namespace clang ::lifetimes {
 
@@ -90,6 +91,15 @@ bool isGslOwnerType(const CXXRecordDecl *RD);
 // pointer to a non-const gsl::Owner. Passing such a pointer to a function is
 // assumed to invalidate borrows into the pointed-to owner.
 bool pointsToMutableOwner(QualType GslPointerType);
+
+// Returns true if QT is a user-defined record type that can hold a borrow (has
+// a pointer/reference/gsl::Pointer member, transitively) but is annotated
+// neither [[gsl::Owner]] nor [[gsl::Pointer]], so the analysis cannot tell
+// whether it owns or merely refers to that storage. An incomplete record type
+// is conservatively treated as having unknown ownership. \p Cache memoizes
+// results by canonical type.
+bool isUnknownOwnershipType(QualType QT,
+                            llvm::DenseMap<const Type *, bool> &Cache);
 
 // Returns true if the given method is std::unique_ptr::release().
 // This is treated as a move in lifetime analysis to avoid false-positives

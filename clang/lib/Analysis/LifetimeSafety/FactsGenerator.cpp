@@ -153,16 +153,24 @@ static OriginList *getRValueOrigins(const Expr *E, OriginList *List) {
 }
 
 void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
-  for (const Decl *D : DS->decls())
-    if (const auto *VD = dyn_cast<VarDecl>(D))
-      if (const Expr *InitExpr = VD->getInit()) {
-        OriginList *VDList = getOriginsList(*VD);
-        if (!VDList)
-          continue;
-        OriginList *InitList = getOriginsList(*InitExpr);
-        assert(InitList && "VarDecl had origins but InitExpr did not");
-        flow(VDList, InitList, /*Kill=*/true);
-      }
+  for (const Decl *D : DS->decls()) {
+    const auto *VD = dyn_cast<VarDecl>(D);
+    if (!VD)
+      continue;
+    // Completeness: a local of a user-defined type whose ownership is unknown.
+    if (isUnknownOwnershipType(VD->getType(),
+                               FactMgr.getUnknownOwnershipCache()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::UnknownOwnership, VD));
+    if (const Expr *InitExpr = VD->getInit()) {
+      OriginList *VDList = getOriginsList(*VD);
+      if (!VDList)
+        continue;
+      OriginList *InitList = getOriginsList(*InitExpr);
+      assert(InitList && "VarDecl had origins but InitExpr did not");
+      flow(VDList, InitList, /*Kill=*/true);
+    }
+  }
 }
 
 void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
@@ -1079,6 +1087,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // All arguments to a function are a use of the corresponding expressions.
   for (const Expr *Arg : Args)
     handleUse(Arg);
+  // Completeness: a call returning a user-defined type of unknown ownership
+  // (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
+  // [[gsl::Pointer]]) produces a value the analysis cannot track. Constructor
+  // calls are skipped -- constructing such a value is reported at its
+  // declaration or surrounding context.
+  if (!isa<CXXConstructorDecl>(FD) &&
+      isUnknownOwnershipType(Call->getType(),
+                             FactMgr.getUnknownOwnershipCache()))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::UnknownOwnership, Call));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);

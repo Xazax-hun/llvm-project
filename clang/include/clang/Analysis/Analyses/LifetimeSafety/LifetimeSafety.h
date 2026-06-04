@@ -203,6 +203,12 @@ public:
   // Reports a 'delete'/'free' of a pointer whose allocation the analysis did not
   // see, so it cannot verify the deallocation is a live, unaliased allocation.
   virtual void reportNakedDeallocation(const Expr *DeallocExpr) {}
+
+  // Reports a declaration of a user-defined type that can hold a borrow but is
+  // annotated neither [[gsl::Owner]] nor [[gsl::Pointer]].
+  virtual void reportUnknownOwnership(const ValueDecl *VD) {}
+  // Reports an expression (e.g. a call result) of such a type.
+  virtual void reportUnknownOwnership(const Expr *E) {}
 };
 
 /// The main entry point for the analysis.

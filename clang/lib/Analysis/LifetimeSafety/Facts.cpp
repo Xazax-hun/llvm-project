@@ -123,6 +123,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::MoveSilencing:
     OS << "MoveSilencing";
     break;
+  case UntrackedConstructReason::UnknownOwnership:
+    OS << "UnknownOwnership";
+    break;
   }
   OS << ")\n";
 }

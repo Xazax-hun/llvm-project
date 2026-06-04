@@ -11138,6 +11138,12 @@ def warn_lifetime_safety_naked_delete
               "live, unaliased heap allocation">,
       InGroup<LifetimeSafetyNakedDelete>,
       DefaultIgnore;
+def warn_lifetime_safety_unknown_ownership
+    : Warning<"type %0 can hold a borrow but is annotated neither "
+              "[[gsl::Owner]] nor [[gsl::Pointer]], so lifetime safety cannot "
+              "track its ownership">,
+      InGroup<LifetimeSafetyUnknownOwnership>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

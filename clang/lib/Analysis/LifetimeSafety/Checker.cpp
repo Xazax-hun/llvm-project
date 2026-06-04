@@ -68,6 +68,8 @@ private:
   /// Expressions already reported as an untracked construct, to avoid duplicate
   /// completeness warnings when a construct is visited more than once.
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
+  /// Declarations already reported as an untracked construct.
+  llvm::DenseSet<const ValueDecl *> ReportedUntrackedDecls;
   /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
   /// duplicate warnings when several live origins hold the same borrow.
   llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
@@ -380,6 +382,9 @@ public:
     const Expr *E = UCF->getConstructExpr();
     if (E && !ReportedUntrackedExprs.insert(E).second)
       return;
+    const ValueDecl *D = UCF->getConstructDecl();
+    if (D && !ReportedUntrackedDecls.insert(D).second)
+      return;
     switch (UCF->getReason()) {
     case UntrackedConstructReason::IndirectCall:
       SemaHelper->reportIndirectCall(E);
@@ -389,6 +394,12 @@ public:
       break;
     case UntrackedConstructReason::MoveSilencing:
       SemaHelper->reportMoveSilencing(E);
+      break;
+    case UntrackedConstructReason::UnknownOwnership:
+      if (D)
+        SemaHelper->reportUnknownOwnership(D);
+      else
+        SemaHelper->reportUnknownOwnership(E);
       break;
     }
   }
@@ -404,6 +415,14 @@ public:
     if (!Fn)
       return;
     for (const ParmVarDecl *PVD : Fn->parameters()) {
+      // Completeness: a parameter of a user-defined type whose ownership is
+      // unknown (reported separately from the annotation requirement).
+      if (isUnknownOwnershipType(PVD->getType(),
+                                 FactMgr.getUnknownOwnershipCache())) {
+        if (ReportedUntrackedDecls.insert(PVD).second)
+          SemaHelper->reportUnknownOwnership(PVD);
+        continue;
+      }
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
         continue;
       // Multi-level indirection is reported separately; don't double-flag.

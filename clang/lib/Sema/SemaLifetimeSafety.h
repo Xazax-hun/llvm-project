@@ -57,7 +57,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_multilevel_indirection,
       diag::warn_lifetime_safety_move_silencing,
       diag::warn_lifetime_safety_assumed_invalidation,
-      diag::warn_lifetime_safety_naked_delete};
+      diag::warn_lifetime_safety_naked_delete,
+      diag::warn_lifetime_safety_unknown_ownership};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -476,6 +477,15 @@ public:
            diag::warn_lifetime_safety_naked_delete)
         << (isa<CXXDeleteExpr>(DeallocExpr) ? /*deleting=*/0 : /*freeing=*/1)
         << DeallocExpr->getSourceRange();
+  }
+
+  void reportUnknownOwnership(const ValueDecl *VD) override {
+    S.Diag(VD->getLocation(), diag::warn_lifetime_safety_unknown_ownership)
+        << VD->getType() << VD->getSourceRange();
+  }
+  void reportUnknownOwnership(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unknown_ownership)
+        << E->getType() << E->getSourceRange();
   }
 
 private:

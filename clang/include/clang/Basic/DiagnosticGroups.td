@@ -767,6 +767,15 @@ allocation. Deallocations inside a destructor are exempt.
   }];
 }
 
+def LifetimeSafetyUnknownOwnership
+    : DiagGroup<"lifetime-safety-unknown-ownership"> {
+  code Documentation = [{
+Warns on a value of a user-defined type that can hold a borrow but is annotated
+neither [[gsl::Owner]] nor [[gsl::Pointer]], so the analysis cannot tell whether
+it owns or merely refers to the storage and cannot track its borrows.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
@@ -775,7 +784,8 @@ def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                             LifetimeSafetyMultilevelIndirection,
                                             LifetimeSafetyMoveSilencing,
                                             LifetimeSafetyAssumedInvalidation,
-                                            LifetimeSafetyNakedDelete]> {
+                                            LifetimeSafetyNakedDelete,
+                                            LifetimeSafetyUnknownOwnership]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

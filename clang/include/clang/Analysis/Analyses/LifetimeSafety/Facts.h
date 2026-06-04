@@ -22,6 +22,7 @@
 #include "clang/Analysis/CFG.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 #include <cstdint>
 #include <optional>
@@ -367,6 +368,10 @@ enum class UntrackedConstructReason : uint8_t {
   /// 'std::unique_ptr::release'), which the analysis does not model, silencing
   /// lifetime checks for the moved-from object.
   MoveSilencing,
+  /// An expression or declaration of a user-defined type whose ownership is
+  /// unknown (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
+  /// [[gsl::Pointer]]), e.g. a call returning such a type or a local of one.
+  UnknownOwnership,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
@@ -376,7 +381,11 @@ enum class UntrackedConstructReason : uint8_t {
 class UntrackedConstructFact : public Fact {
   UntrackedConstructReason Reason;
   /// The expression the diagnostic should point at (for location and range).
+  /// Null when the construct is a declaration (see ConstructDecl).
   const Expr *ConstructExpr;
+  /// The declaration the diagnostic should point at, when the construct is a
+  /// declaration rather than an expression. Null otherwise.
+  const ValueDecl *ConstructDecl;
 
 public:
   static bool classof(const Fact *F) {
@@ -384,10 +393,15 @@ public:
   }
 
   UntrackedConstructFact(UntrackedConstructReason Reason, const Expr *E)
-      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(E) {}
+      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(E),
+        ConstructDecl(nullptr) {}
+  UntrackedConstructFact(UntrackedConstructReason Reason, const ValueDecl *D)
+      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
+        ConstructDecl(D) {}
 
   UntrackedConstructReason getReason() const { return Reason; }
   const Expr *getConstructExpr() const { return ConstructExpr; }
+  const ValueDecl *getConstructDecl() const { return ConstructDecl; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &) const override;
@@ -439,6 +453,12 @@ public:
   OriginManager &getOriginMgr() { return OriginMgr; }
   const OriginManager &getOriginMgr() const { return OriginMgr; }
 
+  /// Memoizes `isUnknownOwnershipType` results (keyed by canonical type) for
+  /// the duration of the analysis.
+  llvm::DenseMap<const Type *, bool> &getUnknownOwnershipCache() {
+    return UnknownOwnershipCache;
+  }
+
 private:
   FactID NextFactID{0};
   LoanManager LoanMgr;
@@ -446,6 +466,7 @@ private:
   /// Facts for each CFG block, indexed by block ID.
   llvm::SmallVector<llvm::SmallVector<const Fact *>> BlockToFacts;
   llvm::BumpPtrAllocator FactAllocator;
+  llvm::DenseMap<const Type *, bool> UnknownOwnershipCache;
 };
 } // namespace clang::lifetimes::internal
 

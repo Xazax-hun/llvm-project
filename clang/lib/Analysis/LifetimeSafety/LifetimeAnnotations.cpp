@@ -314,6 +314,54 @@ bool isGslOwnerType(const CXXRecordDecl *RD) {
   return isRecordWithAttr<OwnerAttr>(RD);
 }
 
+bool isUnknownOwnershipType(QualType QT,
+                            llvm::DenseMap<const Type *, bool> &Cache) {
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD)
+    return false;
+  // Annotated/recognized types have known semantics.
+  if (isGslOwnerType(QT) || isGslPointerType(QT) || isStdCallableWrapperType(RD))
+    return false;
+  if (RD->isLambda())
+    return false;
+
+  const Type *Key = QT.getCanonicalType().getTypePtr();
+  if (auto It = Cache.find(Key); It != Cache.end())
+    return It->second;
+  // Tentatively cache `false` to break any cyclic recursion.
+  Cache[Key] = false;
+
+  // An incomplete type cannot be inspected, so its ownership is conservatively
+  // unknown.
+  const CXXRecordDecl *Def = RD->getDefinition();
+  bool Result = !Def;
+  if (Def) {
+    // The type's ownership is "unknown" if it (or a base) has a member that can
+    // hold a borrow (pointer/reference/gsl::Pointer) or is itself a type of
+    // unknown ownership.
+    auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
+      for (const FieldDecl *F : R->fields()) {
+        QualType FT = F->getType();
+        if (isPointerLikeType(FT) || FT->isReferenceType() ||
+            isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
+          return true;
+      }
+      return false;
+    };
+    Result = RecordHoldsBorrow(Def);
+    if (!Result)
+      Def->forallBases([&](const CXXRecordDecl *Base) {
+        if (RecordHoldsBorrow(Base)) {
+          Result = true;
+          return false; // Stop traversing bases.
+        }
+        return true;
+      });
+  }
+  Cache[Key] = Result;
+  return Result;
+}
+
 bool pointsToMutableOwner(QualType GslPointerType) {
   const CXXRecordDecl *RD = GslPointerType->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
