@@ -539,6 +539,24 @@ bool isInvalidationMethod(const CXXMethodDecl &MD) {
   return InvalidatingMethods->contains(MD.getName());
 }
 
+bool isStlContainerInsertionMethod(const CXXMethodDecl &MD) {
+  const CXXRecordDecl *RD = MD.getParent();
+  if (!isInStlNamespace(RD) || !MD.getIdentifier())
+    return false;
+  // Insertion methods take the element by const reference or rvalue reference
+  // and copy/move it into the container; the reference parameter does not
+  // escape. This is a curated name-based heuristic across STL containers.
+  static const llvm::StringSet<> Insertion = {
+      "push_back",          "push_front",  "emplace_back",
+      "emplace_front",      "push",        "insert",
+      "emplace",            "insert_or_assign", "try_emplace",
+      "append",             "assign",      "insert_range",
+      "append_range",       "prepend_range", "push_range",
+      "replace",            "replace_with_range", "insert_after",
+      "emplace_after",      "merge",       "assign_range"};
+  return Insertion.contains(MD.getName());
+}
+
 bool destructsFirstArg(const FunctionDecl &FD) {
   if (isa<CXXDestructorDecl>(FD))
     return true;

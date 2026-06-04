@@ -1042,6 +1042,16 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
         PVD->hasAttr<clang::NoEscapeAttr>() ||
         PVD->hasAttr<clang::LifetimeCaptureByAttr>())
       continue;
+    // Heuristic: STL container insertion methods (push_back, insert, emplace,
+    // ...) take the element by const/rvalue reference and copy or move it into
+    // the container. The reference parameter is noescape *only* when the element
+    // itself cannot hold a borrow; if the element is pointer-like (e.g.
+    // 'vector<int*>::push_back(&x)' or 'vector<string_view>'), the borrow is
+    // captured by the container and must still be surfaced.
+    if (Method && PVD->getType()->isReferenceType() &&
+        !hasOrigins(PVD->getType().getNonReferenceType()) &&
+        isStlContainerInsertionMethod(*Method))
+      continue;
     // Skip arguments the analysis already models through GSL recognition.
     if ((I == 0 && shouldTrackFirstArgument(FD)) ||
         (I == 1 && shouldTrackSecondArgument(FD)))

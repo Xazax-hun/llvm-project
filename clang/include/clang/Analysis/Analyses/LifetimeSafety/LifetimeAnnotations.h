@@ -115,6 +115,12 @@ bool isUniquePtrRelease(const CXXMethodDecl &MD);
 // https://en.cppreference.com/w/cpp/container#Iterator_invalidation
 bool isInvalidationMethod(const CXXMethodDecl &MD);
 
+// Returns true if the given method is an STL container insertion method
+// (e.g. push_back, insert, emplace). Such methods take the element by const
+// reference or rvalue reference and copy/move it into the container, so the
+// reference parameter is effectively noescape.
+bool isStlContainerInsertionMethod(const CXXMethodDecl &MD);
+
 // Returns true if the function destroys its first argument
 // (e.g., destructors via implicit 'this', std::destroy_at).
 bool destructsFirstArg(const FunctionDecl &FD);
