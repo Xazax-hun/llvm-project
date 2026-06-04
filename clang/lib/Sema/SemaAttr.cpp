@@ -296,18 +296,26 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
       auto *Param = CMD->getParamDecl(0);
       if (Param->hasAttr<LifetimeBoundAttr>())
         return;
-      if (CRD->getName() == "basic_string_view" &&
-          Param->getType()->isPointerType()) {
+      QualType PT = Param->getType();
+      if (CRD->getName() == "basic_string_view" && PT->isPointerType()) {
         // construct from a char array pointed by a pointer.
         //   basic_string_view(const CharT* s);
         //   basic_string_view(const CharT* s, size_type count);
         Param->addAttr(
             LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
       } else if (CRD->getName() == "span") {
-        // construct from a reference of array.
+        // Construct from a pointer/iterator to the elements
+        //   span(It first, size_type count);
+        //   span(It first, End last);
+        // or from a reference to an array
         //   span(std::type_identity_t<element_type> (&arr)[N]);
-        const auto *LRT = Param->getType()->getAs<LValueReferenceType>();
-        if (LRT && LRT->getPointeeType().IgnoreParens()->isArrayType())
+        // In both cases the span aliases the referenced storage.
+        // FIXME: the range/std::array reference constructors (span(R&& range),
+        // span(std::array&)) still miss this; broadening to reference params
+        // trips a forwarding-constructor false positive (see the project memo).
+        const auto *LRT = PT->getAs<LValueReferenceType>();
+        if (PT->isPointerType() ||
+            (LRT && LRT->getPointeeType().IgnoreParens()->isArrayType()))
           Param->addAttr(
               LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
       }

@@ -1048,6 +1048,26 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   }
 }
 
+// Comparison and relational operators (==, !=, <, >, <=, >=, <=>) compare their
+// operands and yield a bool/ordering; by convention they neither capture an
+// argument nor return a borrow into one, so passing an origin-carrying value
+// (e.g. an iterator or view) to them is safe and needs no annotation. This is
+// what makes a range-based for loop's `__begin != __end` test clean.
+static bool isComparisonOperator(const FunctionDecl *FD) {
+  switch (FD->getOverloadedOperator()) {
+  case OO_EqualEqual:
+  case OO_ExclaimEqual:
+  case OO_Less:
+  case OO_Greater:
+  case OO_LessEqual:
+  case OO_GreaterEqual:
+  case OO_Spaceship:
+    return true;
+  default:
+    return false;
+  }
+}
+
 // Soundness: flag arguments bound to origin-carrying parameters (raw
 // pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
 // are not modeled via GSL recognition. The analysis cannot tell whether such a
@@ -1057,6 +1077,9 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  // Comparison/relational operators do not capture their operands.
+  if (isComparisonOperator(FD))
+    return;
   for (unsigned I = 0; I < Args.size(); ++I) {
     // Map the argument index to its explicit parameter, skipping the implicit
     // object argument of instance methods.
@@ -1075,16 +1098,34 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
         PVD->hasAttr<clang::NoEscapeAttr>() ||
         PVD->hasAttr<clang::LifetimeCaptureByAttr>())
       continue;
-    // Heuristic: STL container insertion methods (push_back, insert, emplace,
-    // ...) take the element by const/rvalue reference and copy or move it into
-    // the container. The reference parameter is noescape *only* when the element
-    // itself cannot hold a borrow; if the element is pointer-like (e.g.
-    // 'vector<int*>::push_back(&x)' or 'vector<string_view>'), the borrow is
-    // captured by the container and must still be surfaced.
-    if (Method && PVD->getType()->isReferenceType() &&
-        !hasOrigins(PVD->getType().getNonReferenceType()) &&
-        isStlContainerInsertionMethod(*Method))
-      continue;
+    // Heuristic: a parameter that the callee copies/moves in (rather than
+    // capturing as a borrow) is effectively noescape. The value is copied in
+    // only when the level of storage it refers to cannot itself hold a borrow.
+    //
+    //  * STL container insertion methods (push_back, insert, emplace, ...) take
+    //    the element by const/rvalue *reference* and copy it in -- safe only
+    //    when the referent is not pointer-like (so 'vector<int*>::push_back(&x)'
+    //    is still surfaced, and 'emplace_back' building a view from a pointer
+    //    stays flagged).
+    //  * STL container constructors copy in the values they are given. Here a
+    //    *pointer* parameter is also a copy-in when its pointee cannot hold a
+    //    borrow -- this is what makes 'std::string s = "abc"' (the
+    //    'basic_string(const char *)' constructor) clean: the characters are
+    //    copied, the pointer does not escape.
+    //
+    // It never applies to arbitrary user constructors, which may capture.
+    if (Method) {
+      QualType ParamTy = PVD->getType();
+      bool IsContainerCtor = isa<CXXConstructorDecl>(Method) &&
+                             isStlContainerType(Method->getParent());
+      if (ParamTy->isReferenceType() &&
+          !hasOrigins(ParamTy.getNonReferenceType()) &&
+          (isStlContainerInsertionMethod(*Method) || IsContainerCtor))
+        continue;
+      if (IsContainerCtor && ParamTy->isPointerType() &&
+          !hasOrigins(ParamTy->getPointeeType()))
+        continue;
+    }
     // Skip arguments the analysis already models through GSL recognition.
     if ((I == 0 && shouldTrackFirstArgument(FD)) ||
         (I == 1 && shouldTrackSecondArgument(FD)))

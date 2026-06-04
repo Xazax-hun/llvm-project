@@ -121,6 +121,12 @@ bool isInvalidationMethod(const CXXMethodDecl &MD);
 // reference parameter is effectively noescape.
 bool isStlContainerInsertionMethod(const CXXMethodDecl &MD);
 
+// Returns true if the record is a standard container template (vector, map,
+// basic_string, ...). A constructor of such a type copies/moves in the values
+// it is given, so a by-reference parameter to a non-borrow-holding type does
+// not escape.
+bool isStlContainerType(const CXXRecordDecl *RD);
+
 // Returns true if the function destroys its first argument
 // (e.g., destructors via implicit 'this', std::destroy_at).
 bool destructsFirstArg(const FunctionDecl &FD);

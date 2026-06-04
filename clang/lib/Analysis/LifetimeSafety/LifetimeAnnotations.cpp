@@ -557,6 +557,28 @@ bool isStlContainerInsertionMethod(const CXXMethodDecl &MD) {
   return Insertion.contains(MD.getName());
 }
 
+bool isStlContainerType(const CXXRecordDecl *RD) {
+  if (!RD || !isInStlNamespace(RD))
+    return false;
+  // Curated set of standard container templates. A constructor of one of these
+  // builds the container by copying/moving the elements it is given in, so a
+  // by-(const-)reference parameter whose referent cannot itself hold a borrow
+  // does not escape.
+  static const llvm::StringSet<> Containers = {
+      "vector",         "deque",
+      "list",           "forward_list",
+      "array",          "map",
+      "multimap",       "set",
+      "multiset",       "unordered_map",
+      "unordered_multimap", "unordered_set",
+      "unordered_multiset", "basic_string",
+      "stack",          "queue",
+      "priority_queue", "flat_map",
+      "flat_multimap",  "flat_set",
+      "flat_multiset"};
+  return Containers.contains(getName(*RD));
+}
+
 bool destructsFirstArg(const FunctionDecl &FD) {
   if (isa<CXXDestructorDecl>(FD))
     return true;
