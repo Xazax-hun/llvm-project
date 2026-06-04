@@ -112,9 +112,11 @@ void FactsGenerator::run() {
     CurrentBlockFacts.clear();
     EscapesInCurrentBlock.clear();
     CurrentBlock = Block;
-    if (Block == &Cfg.getEntry())
+    if (Block == &Cfg.getEntry()) {
       CurrentBlockFacts.append(PlaceholderLoanFacts.begin(),
                                PlaceholderLoanFacts.end());
+      handleTryStatements();
+    }
     for (unsigned I = 0; I < Block->size(); ++I) {
       const CFGElement &Element = Block->Elements[I];
       if (std::optional<CFGStmt> CS = Element.getAs<CFGStmt>())
@@ -707,6 +709,37 @@ void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {
   OriginList *List = getOriginsList(*DE->getArgument());
   CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
       List->getOuterOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true));
+}
+
+void FactsGenerator::VisitCXXThrowExpr(const CXXThrowExpr *TE) {
+  // Exception control flow (stack unwinding, running destructors and resuming
+  // in a handler) is not modeled, so a borrow that dangles only along an
+  // exception path can be missed. Surface the `throw` as an unsupported
+  // construct.
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      UntrackedConstructReason::Exception, TE->getThrowLoc()));
+}
+
+void FactsGenerator::handleTryStatements() {
+  const Stmt *Body = AC.getBody();
+  if (!Body)
+    return;
+  // Shallow worklist over the body's statements. Do not descend into nested
+  // lambdas/blocks; their bodies are separate functions analyzed on their own.
+  llvm::SmallVector<const Stmt *, 32> Worklist{Body};
+  while (!Worklist.empty()) {
+    const Stmt *S = Worklist.pop_back_val();
+    if (!S || isa<LambdaExpr>(S))
+      continue;
+    if (const auto *TS = dyn_cast<CXXTryStmt>(S))
+      // A `try`/`catch` introduces exception-handling control flow that the
+      // analysis does not model (the handler resumes after the stack has
+      // unwound, with destructors having run). Surface it so a dangling borrow
+      // along a handler path is not silently missed.
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::Exception, TS->getTryLoc()));
+    Worklist.append(S->child_begin(), S->child_end());
+  }
 }
 
 bool FactsGenerator::escapesViaReturn(OriginID OID) const {

@@ -70,6 +70,9 @@ private:
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
   /// Declarations already reported as an untracked construct.
   llvm::DenseSet<const ValueDecl *> ReportedUntrackedDecls;
+  /// Source locations already reported as an untracked construct, for facts
+  /// anchored to a statement rather than an expression or declaration.
+  llvm::DenseSet<SourceLocation> ReportedUntrackedLocs;
   /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
   /// duplicate warnings when several live origins hold the same borrow.
   llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
@@ -400,6 +403,10 @@ public:
         SemaHelper->reportUnknownOwnership(D);
       else
         SemaHelper->reportUnknownOwnership(E);
+      break;
+    case UntrackedConstructReason::Exception:
+      if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
+        SemaHelper->reportException(UCF->getConstructLoc());
       break;
     }
   }

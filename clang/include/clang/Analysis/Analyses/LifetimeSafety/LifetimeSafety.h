@@ -209,6 +209,11 @@ public:
   virtual void reportUnknownOwnership(const ValueDecl *VD) {}
   // Reports an expression (e.g. a call result) of such a type.
   virtual void reportUnknownOwnership(const Expr *E) {}
+
+  // Reports a `throw` or `try`/`catch`. Exception control flow (stack
+  // unwinding, running destructors and resuming in a handler) is not modeled,
+  // so a borrow that dangles only along an exception path can be missed.
+  virtual void reportException(SourceLocation Loc) {}
 };
 
 /// The main entry point for the analysis.

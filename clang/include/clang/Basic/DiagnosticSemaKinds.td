@@ -11144,6 +11144,12 @@ def warn_lifetime_safety_unknown_ownership
               "track its ownership">,
       InGroup<LifetimeSafetyUnknownOwnership>,
       DefaultIgnore;
+def warn_lifetime_safety_exception
+    : Warning<"exception control flow is not modeled by lifetime safety "
+              "analysis; a borrow that dangles only along an exception path "
+              "may be missed">,
+      InGroup<LifetimeSafetyException>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

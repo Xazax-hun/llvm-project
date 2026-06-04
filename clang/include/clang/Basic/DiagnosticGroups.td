@@ -776,6 +776,14 @@ it owns or merely refers to the storage and cannot track its borrows.
   }];
 }
 
+def LifetimeSafetyException : DiagGroup<"lifetime-safety-exception"> {
+  code Documentation = [{
+Warns on a 'throw' or a 'try'/'catch'. Exception control flow (stack unwinding,
+running destructors and resuming in a handler) is not modeled by the analysis,
+so a borrow that dangles only along an exception path may be missed.
+  }];
+}
+
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                         [LifetimeSafetyLostLoan,
                                          LifetimeSafetyBailout,
@@ -785,7 +793,8 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyMoveSilencing,
                                          LifetimeSafetyAssumedInvalidation,
                                          LifetimeSafetyNakedDelete,
-                                         LifetimeSafetyUnknownOwnership]> {
+                                         LifetimeSafetyUnknownOwnership,
+                                         LifetimeSafetyException]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

@@ -126,6 +126,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::UnknownOwnership:
     OS << "UnknownOwnership";
     break;
+  case UntrackedConstructReason::Exception:
+    OS << "Exception";
+    break;
   }
   OS << ")\n";
 }

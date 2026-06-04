@@ -536,6 +536,7 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-assumed-invalidation``: Warns when a borrow into an owner may be invalidated by an operation conservatively assumed to mutate it (a non-const member call, or passing the owner to a non-const pointer/reference parameter or mutable view).
   * ``-Wlifetime-safety-naked-delete``: Warns on a ``delete``/``free`` of a pointer whose allocation the analysis did not see (deallocations inside destructors are exempt).
   * ``-Wlifetime-safety-unknown-ownership``: Warns on a value of a user-defined type that can hold a borrow but is annotated neither ``[[gsl::Owner]]`` nor ``[[gsl::Pointer]]``.
+  * ``-Wlifetime-safety-exception``: Warns on a ``throw`` or a ``try``/``catch``. Exception control flow (stack unwinding, running destructors and resuming in a handler) is not modeled, so a borrow that dangles only along an exception path can be missed.
 
 .. _safe_programming_model:
 
@@ -553,9 +554,10 @@ an unannotated or unknown-ownership type, and so on).
 By enabling these checks **as errors** over a region of code, you opt that code
 into a "safe programming model" in which the analysis never silently fails to
 catch a lifetime mistake. The model requires, among other things, that every
-indirection be annotated, that only a single level of indirection be used, and
-that user-defined types declare their ownership with ``[[gsl::Owner]]`` or
-``[[gsl::Pointer]]``.
+indirection be annotated, that only a single level of indirection be used, that
+user-defined types declare their ownership with ``[[gsl::Owner]]`` or
+``[[gsl::Pointer]]``, and that exceptions not be used (their unwinding control
+flow is not modeled).
 
 Opting in is done with the standard diagnostic pragmas, which apply to a region
 of code:

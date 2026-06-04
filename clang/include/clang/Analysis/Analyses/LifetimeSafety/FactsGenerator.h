@@ -55,6 +55,7 @@ public:
   void VisitArraySubscriptExpr(const ArraySubscriptExpr *ASE);
   void VisitCXXNewExpr(const CXXNewExpr *NE);
   void VisitCXXDeleteExpr(const CXXDeleteExpr *DE);
+  void VisitCXXThrowExpr(const CXXThrowExpr *TE);
 
 private:
   OriginList *getOriginsList(const ValueDecl &D);
@@ -83,6 +84,13 @@ private:
   void handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds);
 
   void handleFullExprCleanup(const CFGFullExprCleanup &FullExprCleanup);
+
+  /// Scans the function body for `try`/`catch` statements and emits an
+  /// Exception UntrackedConstructFact for each. A `try` whose body only calls
+  /// potentially-throwing functions has no explicit `throw` and produces no
+  /// CFG exception edges, so it is not reached by the CFG walk; detect it on
+  /// the AST instead. (`throw` expressions are caught by VisitCXXThrowExpr.)
+  void handleTryStatements();
 
   void handleExitBlock();
 

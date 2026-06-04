@@ -372,6 +372,10 @@ enum class UntrackedConstructReason : uint8_t {
   /// unknown (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
   /// [[gsl::Pointer]]), e.g. a call returning such a type or a local of one.
   UnknownOwnership,
+  /// A `throw` or `try`/`catch`. Exception control flow (unwinding, running
+  /// destructors and resuming in a handler) is not modeled, so lifetime errors
+  /// on exception paths may be missed.
+  Exception,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
@@ -386,6 +390,10 @@ class UntrackedConstructFact : public Fact {
   /// The declaration the diagnostic should point at, when the construct is a
   /// declaration rather than an expression. Null otherwise.
   const ValueDecl *ConstructDecl;
+  /// The location the diagnostic should point at, when the construct is a
+  /// statement that is neither an expression nor a declaration (e.g. a `try`).
+  /// Invalid otherwise.
+  SourceLocation ConstructLoc;
 
 public:
   static bool classof(const Fact *F) {
@@ -398,10 +406,14 @@ public:
   UntrackedConstructFact(UntrackedConstructReason Reason, const ValueDecl *D)
       : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
         ConstructDecl(D) {}
+  UntrackedConstructFact(UntrackedConstructReason Reason, SourceLocation Loc)
+      : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
+        ConstructDecl(nullptr), ConstructLoc(Loc) {}
 
   UntrackedConstructReason getReason() const { return Reason; }
   const Expr *getConstructExpr() const { return ConstructExpr; }
   const ValueDecl *getConstructDecl() const { return ConstructDecl; }
+  SourceLocation getConstructLoc() const { return ConstructLoc; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &) const override;
