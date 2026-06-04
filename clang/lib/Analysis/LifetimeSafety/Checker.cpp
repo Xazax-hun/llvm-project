@@ -111,8 +111,11 @@ public:
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
           if (IOF->isAssumed())
             checkAssumedInvalidation(IOF);
-          else
+          else {
             checkInvalidation(IOF);
+            if (IOF->isDeallocation())
+              checkNakedDeallocation(IOF);
+          }
         }
         else if (const auto *OEF = F->getAs<OriginEscapesFact>())
           checkAnnotations(OEF);
@@ -261,6 +264,34 @@ public:
           }
         }
     }
+  }
+
+  /// Completeness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
+  /// loan flowing into the deallocated pointer is not a heap allocation -- the
+  /// analysis cannot then prove the deallocation refers to a live, unaliased
+  /// heap allocation. This is intentionally strict: every loan must be a heap
+  /// allocation. Deallocations inside a destructor are exempt (freeing owned
+  /// members there is the normal ownership pattern).
+  void checkNakedDeallocation(const InvalidateOriginFact *IOF) {
+    if (!SemaHelper || isa_and_present<CXXDestructorDecl>(FD))
+      return;
+    // Strict: a deallocation is safe only if every borrow flowing into it is a
+    // tracked heap allocation. A non-heap loan (e.g. a stack borrow) cannot be
+    // freed; an *empty* loan set means the allocation was never seen -- e.g.
+    // deleting through a member or parameter pointer -- which is equally
+    // unverifiable (the pointer may be aliased or not heap-owned).
+    LoanSet Loans = LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF);
+    bool Safe = !Loans.isEmpty();
+    for (LoanID LID : Loans)
+      if (!FactMgr.getLoanMgr()
+               .getLoan(LID)
+               ->getAccessPath()
+               .isHeapAllocation()) {
+        Safe = false;
+        break;
+      }
+    if (!Safe)
+      SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
   }
 
   /// Completeness check for "assumed" invalidations (a non-const operation on an

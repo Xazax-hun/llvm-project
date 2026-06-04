@@ -697,8 +697,8 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
 
 void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {
   OriginList *List = getOriginsList(*DE->getArgument());
-  CurrentBlockFacts.push_back(
-      FactMgr.createFact<InvalidateOriginFact>(List->getOuterOriginID(), DE));
+  CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+      List->getOuterOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true));
 }
 
 bool FactsGenerator::escapesViaReturn(OriginID OID) const {
@@ -911,7 +911,8 @@ void FactsGenerator::handleDestructiveCall(const Expr *Call,
   OriginList *ArgList = getOriginsList(*Args[0]);
   if (ArgList)
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-        ArgList->getOuterOriginID(), Call));
+        ArgList->getOuterOriginID(), Call, /*Assumed=*/false,
+        /*Deallocation=*/true));
 }
 
 void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
@@ -1094,6 +1095,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   if (FD->hasAttr<clang::LifetimeImmortalAttr>()) {
     const Loan *L =
         FactMgr.getLoanMgr().createLoan(AccessPath::Immortal(FD), Call);
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<IssueFact>(L->getID(), CallList->getOuterOriginID()));
+    return;
+  }
+  // A function with __attribute__((malloc)) returns a fresh heap allocation.
+  // Model it like `new` so the result is tracked and a later free/delete of it
+  // is not reported as a naked deallocation.
+  if (FD->hasAttr<clang::RestrictAttr>()) {
+    const Loan *L = FactMgr.getLoanMgr().createLoan(
+        AccessPath::HeapAllocation(Call), Call);
     CurrentBlockFacts.push_back(
         FactMgr.createFact<IssueFact>(L->getID(), CallList->getOuterOriginID()));
     return;

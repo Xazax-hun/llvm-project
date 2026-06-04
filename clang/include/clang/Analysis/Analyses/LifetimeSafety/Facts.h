@@ -272,6 +272,9 @@ class InvalidateOriginFact : public Fact {
   /// rather than a known container-mutation method. Drives the lower-confidence
   /// "assumed invalidation" completeness diagnostic.
   bool Assumed;
+  /// True when the invalidation is a deallocation (`delete`, `free`,
+  /// `std::destroy_at`, a destructor). Drives the "naked deallocation" check.
+  bool Deallocation;
 
 public:
   static bool classof(const Fact *F) {
@@ -279,13 +282,15 @@ public:
   }
 
   InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr,
-                       bool Assumed = false)
+                       bool Assumed = false, bool Deallocation = false)
       : Fact(Kind::InvalidateOrigin), OID(OID),
-        InvalidationExpr(InvalidationExpr), Assumed(Assumed) {}
+        InvalidationExpr(InvalidationExpr), Assumed(Assumed),
+        Deallocation(Deallocation) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   const Expr *getInvalidationExpr() const { return InvalidationExpr; }
   bool isAssumed() const { return Assumed; }
+  bool isDeallocation() const { return Deallocation; }
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };

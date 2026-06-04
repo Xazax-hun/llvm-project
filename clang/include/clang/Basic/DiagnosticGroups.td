@@ -759,6 +759,14 @@ passing the owner to a non-const pointer/reference parameter.
   }];
 }
 
+def LifetimeSafetyNakedDelete : DiagGroup<"lifetime-safety-naked-delete"> {
+  code Documentation = [{
+Warns on a 'delete' or 'free' of a pointer whose allocation the analysis did not
+see, so it cannot verify the deallocation refers to a live, unaliased heap
+allocation. Deallocations inside a destructor are exempt.
+  }];
+}
+
 def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                            [LifetimeSafetyLostLoan,
                                             LifetimeSafetyBailout,
@@ -766,7 +774,8 @@ def LifetimeSafetyCompleteness : DiagGroup<"lifetime-safety-completeness",
                                             LifetimeSafetyUnannotatedIndirection,
                                             LifetimeSafetyMultilevelIndirection,
                                             LifetimeSafetyMoveSilencing,
-                                            LifetimeSafetyAssumedInvalidation]> {
+                                            LifetimeSafetyAssumedInvalidation,
+                                            LifetimeSafetyNakedDelete]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

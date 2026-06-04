@@ -11132,6 +11132,12 @@ def warn_lifetime_safety_assumed_invalidation
       DefaultIgnore;
 def note_lifetime_safety_assumed_invalidated_here
     : Note<"assumed to be invalidated by this operation">;
+def warn_lifetime_safety_naked_delete
+    : Warning<"%select{deleting|freeing}0 a pointer whose allocation was not "
+              "seen by lifetime safety analysis; it cannot be verified to be a "
+              "live, unaliased heap allocation">,
+      InGroup<LifetimeSafetyNakedDelete>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

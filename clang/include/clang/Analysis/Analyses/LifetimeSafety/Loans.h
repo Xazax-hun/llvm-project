@@ -76,6 +76,11 @@ public:
   static AccessPath Immortal(const FunctionDecl *FD) {
     return AccessPath(Kind::Immortal, FD);
   }
+  /// A heap allocation produced by an allocating function (e.g. one with
+  /// `__attribute__((malloc))`), identified by the call expression.
+  static AccessPath HeapAllocation(const clang::Expr *AllocExpr) {
+    return AccessPath(Kind::NewAllocation, AllocExpr);
+  }
   AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
   AccessPath &operator=(const AccessPath &) = delete;
 
@@ -104,8 +109,17 @@ public:
   }
   const CXXNewExpr *getAsNewAllocation() const {
     return K == Kind::NewAllocation
-               ? cast<const CXXNewExpr>(cast<const clang::Expr *>(Root))
+               ? dyn_cast_if_present<CXXNewExpr>(
+                     Root.dyn_cast<const clang::Expr *>())
                : nullptr;
+  }
+  /// A heap allocation is `new`/`new[]` or a call to an allocating function
+  /// (e.g. one with `__attribute__((malloc))`); the root is the allocating
+  /// expression.
+  bool isHeapAllocation() const { return K == Kind::NewAllocation; }
+  const clang::Expr *getAsHeapAllocation() const {
+    return K == Kind::NewAllocation ? Root.dyn_cast<const clang::Expr *>()
+                                    : nullptr;
   }
   const FunctionDecl *getAsImmortal() const {
     return K == Kind::Immortal
@@ -123,6 +137,7 @@ private:
   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
   AccessPath(Kind K, const CXXMethodDecl *MD) : K(K), Root(MD) {}
   AccessPath(Kind K, const FunctionDecl *FD) : K(K), Root(FD) {}
+  AccessPath(Kind K, const clang::Expr *E) : K(K), Root(E) {}
 };
 
 /// Represents lending a storage location.

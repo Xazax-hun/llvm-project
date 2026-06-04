@@ -199,6 +199,10 @@ public:
                                          const Expr *OperationExpr) {}
   virtual void reportAssumedInvalidation(const ParmVarDecl *PVD,
                                          const Expr *OperationExpr) {}
+
+  // Reports a 'delete'/'free' of a pointer whose allocation the analysis did not
+  // see, so it cannot verify the deallocation is a live, unaliased allocation.
+  virtual void reportNakedDeallocation(const Expr *DeallocExpr) {}
 };
 
 /// The main entry point for the analysis.

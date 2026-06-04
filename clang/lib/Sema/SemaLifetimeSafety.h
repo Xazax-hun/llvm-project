@@ -56,7 +56,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_unannotated_param,
       diag::warn_lifetime_safety_multilevel_indirection,
       diag::warn_lifetime_safety_move_silencing,
-      diag::warn_lifetime_safety_assumed_invalidation};
+      diag::warn_lifetime_safety_assumed_invalidation,
+      diag::warn_lifetime_safety_naked_delete};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -468,6 +469,13 @@ public:
     S.Diag(OperationExpr->getExprLoc(),
            diag::note_lifetime_safety_assumed_invalidated_here)
         << OperationExpr->getSourceRange();
+  }
+
+  void reportNakedDeallocation(const Expr *DeallocExpr) override {
+    S.Diag(DeallocExpr->getExprLoc(),
+           diag::warn_lifetime_safety_naked_delete)
+        << (isa<CXXDeleteExpr>(DeallocExpr) ? /*deleting=*/0 : /*freeing=*/1)
+        << DeallocExpr->getSourceRange();
   }
 
 private:
