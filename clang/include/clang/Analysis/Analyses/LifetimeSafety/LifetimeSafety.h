@@ -214,6 +214,11 @@ public:
   // unwinding, running destructors and resuming in a handler) is not modeled,
   // so a borrow that dangles only along an exception path can be missed.
   virtual void reportException(SourceLocation Loc) {}
+
+  // Reports a value of a [[gsl::Owner]] container whose element type is an
+  // indirection (e.g. std::vector<int*>); per-element borrows are not tracked.
+  virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
+  virtual void reportOwnerOfIndirection(const Expr *E) {}
 };
 
 /// The main entry point for the analysis.

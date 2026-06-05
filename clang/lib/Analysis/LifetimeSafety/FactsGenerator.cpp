@@ -164,6 +164,11 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
                                FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::UnknownOwnership, VD));
+    // Soundness: a local gsl::Owner container whose elements are indirections
+    // (e.g. std::vector<int*>); per-element borrows are not tracked.
+    else if (isGslOwnerOfIndirection(VD->getType()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::OwnerOfIndirection, VD));
     // An array of pointer-like elements shares one element-origin across all
     // elements. Seed it with a non-expiring "uninitialized" loan so the origin
     // is never empty: a borrow stored into an element later merges in beside
@@ -1204,6 +1209,12 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
                              FactMgr.getUnknownOwnershipCache()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::UnknownOwnership, Call));
+  // Likewise a call returning a gsl::Owner container of indirections
+  // (e.g. std::vector<int*>); per-element borrows are not tracked.
+  else if (!isa<CXXConstructorDecl>(FD) &&
+           isGslOwnerOfIndirection(Call->getType()))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::OwnerOfIndirection, Call));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);

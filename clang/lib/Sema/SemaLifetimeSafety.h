@@ -59,7 +59,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_assumed_invalidation,
       diag::warn_lifetime_safety_naked_delete,
       diag::warn_lifetime_safety_unknown_ownership,
-      diag::warn_lifetime_safety_exception};
+      diag::warn_lifetime_safety_exception,
+      diag::warn_lifetime_safety_owner_of_indirection};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -490,6 +491,14 @@ public:
   }
   void reportException(SourceLocation Loc) override {
     S.Diag(Loc, diag::warn_lifetime_safety_exception);
+  }
+  void reportOwnerOfIndirection(const ValueDecl *VD) override {
+    S.Diag(VD->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
+        << VD->getType() << VD->getSourceRange();
+  }
+  void reportOwnerOfIndirection(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_owner_of_indirection)
+        << E->getType() << E->getSourceRange();
   }
 
 private:

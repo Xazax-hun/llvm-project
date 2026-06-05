@@ -314,6 +314,28 @@ bool isGslOwnerType(const CXXRecordDecl *RD) {
   return isRecordWithAttr<OwnerAttr>(RD);
 }
 
+bool isGslOwnerOfIndirection(QualType QT) {
+  if (!isGslOwnerType(QT))
+    return false;
+  const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
+      QT->getAsCXXRecordDecl());
+  if (!CTSD)
+    return false;
+  for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray()) {
+    if (Arg.getKind() != TemplateArgument::Type)
+      continue;
+    QualType ArgT = Arg.getAsType();
+    // A type template argument that is itself an indirection (pointer,
+    // reference, or gsl::Pointer) means the container's elements hold borrows
+    // the analysis cannot track per element. Recurse so a container of
+    // containers-of-indirections (e.g. vector<vector<int*>>) is caught too.
+    if (isPointerLikeType(ArgT) || ArgT->isReferenceType() ||
+        isGslOwnerOfIndirection(ArgT))
+      return true;
+  }
+  return false;
+}
+
 bool isUnknownOwnershipType(QualType QT,
                             llvm::DenseMap<const Type *, bool> &Cache) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();

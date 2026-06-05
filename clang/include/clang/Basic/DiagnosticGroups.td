@@ -784,6 +784,16 @@ so a borrow that dangles only along an exception path may be missed.
   }];
 }
 
+def LifetimeSafetyOwnerOfIndirection
+    : DiagGroup<"lifetime-safety-owner-of-indirection"> {
+  code Documentation = [{
+Warns on a value of a [[gsl::Owner]] container whose element type is an
+indirection (a pointer, reference, or [[gsl::Pointer]]), e.g. std::vector<int*>.
+The analysis does not track borrows held by individual container elements, so
+such a container is rejected under the safe programming model.
+  }];
+}
+
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                         [LifetimeSafetyLostLoan,
                                          LifetimeSafetyBailout,
@@ -794,7 +804,8 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyAssumedInvalidation,
                                          LifetimeSafetyNakedDelete,
                                          LifetimeSafetyUnknownOwnership,
-                                         LifetimeSafetyException]> {
+                                         LifetimeSafetyException,
+                                         LifetimeSafetyOwnerOfIndirection]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

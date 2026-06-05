@@ -11150,6 +11150,12 @@ def warn_lifetime_safety_exception
               "may be missed">,
       InGroup<LifetimeSafetyException>,
       DefaultIgnore;
+def warn_lifetime_safety_owner_of_indirection
+    : Warning<"type %0 is a container whose element type is a pointer or "
+              "reference; lifetime safety cannot track borrows held by its "
+              "elements">,
+      InGroup<LifetimeSafetyOwnerOfIndirection>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

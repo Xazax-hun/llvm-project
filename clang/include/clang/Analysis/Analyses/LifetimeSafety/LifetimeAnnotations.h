@@ -85,6 +85,14 @@ bool isGslPointerType(QualType QT);
 bool isGslOwnerType(QualType QT);
 bool isGslOwnerType(const CXXRecordDecl *RD);
 
+// Returns true if QT is a [[gsl::Owner]] class template specialization with a
+// type template argument that is an indirection (pointer, reference, or
+// gsl::Pointer), e.g. std::vector<int*> or std::array<std::string_view, N>.
+// Such a container's elements hold borrows the analysis cannot track per
+// element, so the safe programming model rejects it. The check recurses into
+// owner template arguments (e.g. std::vector<std::vector<int*>>).
+bool isGslOwnerOfIndirection(QualType QT);
+
 // Returns true if the given gsl::Pointer type can mutate the (non-const) owner
 // it points to, i.e. it (or a base class) exposes operator*/operator[]
 // returning a reference to a non-const gsl::Owner, or operator-> returning a

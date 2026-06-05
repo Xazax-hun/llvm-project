@@ -404,6 +404,12 @@ public:
       else
         SemaHelper->reportUnknownOwnership(E);
       break;
+    case UntrackedConstructReason::OwnerOfIndirection:
+      if (D)
+        SemaHelper->reportOwnerOfIndirection(D);
+      else
+        SemaHelper->reportOwnerOfIndirection(E);
+      break;
     case UntrackedConstructReason::Exception:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportException(UCF->getConstructLoc());
@@ -428,6 +434,15 @@ public:
                                  FactMgr.getUnknownOwnershipCache())) {
         if (ReportedUntrackedDecls.insert(PVD).second)
           SemaHelper->reportUnknownOwnership(PVD);
+        continue;
+      }
+      // Soundness: a parameter of a gsl::Owner container whose elements are
+      // indirections (e.g. std::vector<int*>); per-element borrows are not
+      // tracked. This holds regardless of any annotation, so check before the
+      // annotation requirement and see through a reference parameter.
+      if (isGslOwnerOfIndirection(PVD->getType().getNonReferenceType())) {
+        if (ReportedUntrackedDecls.insert(PVD).second)
+          SemaHelper->reportOwnerOfIndirection(PVD);
         continue;
       }
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))

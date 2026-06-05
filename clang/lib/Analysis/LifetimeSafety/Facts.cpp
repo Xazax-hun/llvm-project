@@ -129,6 +129,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::Exception:
     OS << "Exception";
     break;
+  case UntrackedConstructReason::OwnerOfIndirection:
+    OS << "OwnerOfIndirection";
+    break;
   }
   OS << ")\n";
 }

@@ -376,6 +376,9 @@ enum class UntrackedConstructReason : uint8_t {
   /// destructors and resuming in a handler) is not modeled, so lifetime errors
   /// on exception paths may be missed.
   Exception,
+  /// A value of a [[gsl::Owner]] container whose element type is an indirection
+  /// (e.g. std::vector<int*>). Per-element borrows are not tracked.
+  OwnerOfIndirection,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
