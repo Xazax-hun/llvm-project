@@ -538,6 +538,7 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-unknown-ownership``: Warns on a value of a user-defined type that can hold a borrow but is annotated neither ``[[gsl::Owner]]`` nor ``[[gsl::Pointer]]``.
   * ``-Wlifetime-safety-exception``: Warns on a ``throw`` or a ``try``/``catch``. Exception control flow (stack unwinding, running destructors and resuming in a handler) is not modeled, so a borrow that dangles only along an exception path can be missed.
   * ``-Wlifetime-safety-owner-of-indirection``: Warns on a value of a ``[[gsl::Owner]]`` container whose element type is an indirection (e.g. ``std::vector<int*>``); the analysis does not track borrows held by individual elements.
+  * ``-Wlifetime-safety-const-subversion``: Warns on a ``mutable`` data member or a ``const_cast``. The analysis assumes a const member function does not invalidate borrows into the object; either construct can subvert that assumption.
 
 .. _safe_programming_model:
 
@@ -558,8 +559,9 @@ catch a lifetime mistake. The model requires, among other things, that every
 indirection be annotated, that only a single level of indirection be used, that
 user-defined types declare their ownership with ``[[gsl::Owner]]`` or
 ``[[gsl::Pointer]]``, that containers not store indirections (e.g. no
-``std::vector<int*>``), and that exceptions not be used (their unwinding control
-flow is not modeled).
+``std::vector<int*>``), that ``mutable`` fields and ``const_cast`` not be used
+(so const member functions can be assumed not to invalidate borrows), and that
+exceptions not be used (their unwinding control flow is not modeled).
 
 Opting in is done with the standard diagnostic pragmas, which apply to a region
 of code:

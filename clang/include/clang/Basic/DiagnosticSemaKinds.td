@@ -11163,6 +11163,18 @@ def warn_lifetime_safety_owner_of_indirection
               "elements">,
       InGroup<LifetimeSafetyOwnerOfIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_mutable_field
+    : Warning<"'mutable' field %0 can be modified by a const member function; "
+              "lifetime safety assumes const member functions do not invalidate "
+              "borrows into the object">,
+      InGroup<LifetimeSafetyConstSubversion>,
+      DefaultIgnore;
+def warn_lifetime_safety_const_cast
+    : Warning<"'const_cast' can subvert the const-correctness that lifetime "
+              "safety relies on to assume const member functions do not "
+              "invalidate borrows into the object">,
+      InGroup<LifetimeSafetyConstSubversion>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

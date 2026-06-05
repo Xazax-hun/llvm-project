@@ -372,6 +372,10 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
         return ExprError();
       DiscardMisalignedMemberAddress(DestType.getTypePtr(), E);
     }
+    // Lifetime safety (safe programming model): 'const_cast' can subvert the
+    // const-correctness the analysis relies on to assume const member functions
+    // do not invalidate borrows.
+    Diag(OpLoc, diag::warn_lifetime_safety_const_cast);
     return Op.complete(CXXConstCastExpr::Create(Context, Op.ResultType,
                                   Op.ValueKind, Op.SrcExpr.get(), DestTInfo,
                                                 OpLoc, Parens.getEnd(),

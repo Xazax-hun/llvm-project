@@ -794,6 +794,16 @@ such a container is rejected under the safe programming model.
   }];
 }
 
+def LifetimeSafetyConstSubversion
+    : DiagGroup<"lifetime-safety-const-subversion"> {
+  code Documentation = [{
+Warns on a 'mutable' data member or a 'const_cast'. The analysis assumes a
+const member function does not invalidate borrows into the object; a 'mutable'
+field or a 'const_cast' can subvert that assumption, so both are rejected under
+the safe programming model.
+  }];
+}
+
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                         [LifetimeSafetyLostLoan,
                                          LifetimeSafetyBailout,
@@ -805,7 +815,8 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyNakedDelete,
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
-                                         LifetimeSafetyOwnerOfIndirection]> {
+                                         LifetimeSafetyOwnerOfIndirection,
+                                         LifetimeSafetyConstSubversion]> {
   code Documentation = [{
 Warnings emitted wherever the lifetime safety analysis cannot fully model a
 construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).

@@ -7109,6 +7109,18 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
     }
   }
 
+  // Lifetime safety (safe programming model): a 'mutable' data member can be
+  // changed by a const member function, which would break the analysis's
+  // assumption that const member functions do not invalidate borrows into the
+  // object. Flag such fields when the warning is enabled.
+  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
+      !getDiagnostics().isIgnored(diag::warn_lifetime_safety_mutable_field,
+                                  Record->getLocation()))
+    for (const auto *F : Record->fields())
+      if (F->isMutable())
+        Diag(F->getLocation(), diag::warn_lifetime_safety_mutable_field)
+            << F << F->getSourceRange();
+
   if (Record->getIdentifier()) {
     // C++ [class.mem]p13:
     //   If T is the name of a class, then each of the following shall have a
