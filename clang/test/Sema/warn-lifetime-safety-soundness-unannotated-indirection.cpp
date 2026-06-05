@@ -47,3 +47,22 @@ void caller() {
   sink_noescape(&x);     // no-warning
   sink_lifetimebound(&x); // no-warning
 }
+
+//===----------------------------------------------------------------------===//
+// Definition site: the implicit object of a member function whose result is an
+// indirection. A (often implicit) call like 'int *p = obj;' cannot be tracked
+// unless the implicit object is 'lifetimebound' (or the function is
+// 'lifetime_immortal').
+//===----------------------------------------------------------------------===//
+
+struct S {
+  int m;
+  int *unannotated() { return &m; }                            // expected-warning {{member function returning 'int *' is not annotated for lifetime safety}}
+  operator int *() { return &m; }                              // expected-warning {{member function returning 'int *' is not annotated for lifetime safety}}
+  int &ref_unannotated() { return m; }                         // expected-warning {{member function returning 'int &' is not annotated for lifetime safety}}
+  int *bound() [[clang::lifetimebound]] { return &m; }         // no-warning
+  [[clang::lifetime_immortal]] int *immortal();                // no-warning (no body to analyze)
+  int *from_param(int *p [[clang::lifetimebound]]) { return p; } // no-warning (param annotated)
+  int by_value() { return m; }                                 // no-warning (not an indirection)
+};
+

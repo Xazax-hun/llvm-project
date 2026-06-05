@@ -11113,6 +11113,13 @@ def warn_lifetime_safety_unannotated_param
               "'lifetime_capture_by'">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_unannotated_this_return
+    : Warning<"member function returning %0 is not annotated for lifetime "
+              "safety; the returned borrow's lifetime is unspecified, so mark "
+              "the implicit object 'lifetimebound' or the function "
+              "'lifetime_immortal'">,
+      InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
 def warn_lifetime_safety_multilevel_indirection
     : Warning<"%0 uses more than one level of indirection, which lifetime "
               "safety analysis cannot fully model; the safe programming model "

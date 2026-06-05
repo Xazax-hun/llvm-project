@@ -184,6 +184,13 @@ public:
   // no lifetime annotation, leaving its lifetime contract unspecified.
   virtual void reportUnannotatedParam(const ParmVarDecl *PVD) {}
 
+  // Reports an instance member function (including a conversion operator) whose
+  // return type is an indirection (pointer, reference, or gsl::Pointer) but
+  // whose implicit object is not [[clang::lifetimebound]] and which is not
+  // [[clang::lifetime_immortal]], leaving the returned borrow's lifetime
+  // unspecified for callers.
+  virtual void reportUnannotatedThisReturn(const CXXMethodDecl *MD) {}
+
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}

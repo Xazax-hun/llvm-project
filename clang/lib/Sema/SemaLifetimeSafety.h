@@ -54,6 +54,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_indirect_call,
       diag::warn_lifetime_safety_unannotated_indirection,
       diag::warn_lifetime_safety_unannotated_param,
+      diag::warn_lifetime_safety_unannotated_this_return,
       diag::warn_lifetime_safety_multilevel_indirection,
       diag::warn_lifetime_safety_move_silencing,
       diag::warn_lifetime_safety_assumed_invalidation,
@@ -443,6 +444,12 @@ public:
   void reportUnannotatedParam(const ParmVarDecl *PVD) override {
     S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_unannotated_param)
         << PVD->getSourceRange();
+  }
+
+  void reportUnannotatedThisReturn(const CXXMethodDecl *MD) override {
+    S.Diag(MD->getLocation(),
+           diag::warn_lifetime_safety_unannotated_this_return)
+        << MD->getReturnType() << MD->getSourceRange();
   }
 
   void reportMultiLevelIndirection(const ValueDecl *VD) override {
