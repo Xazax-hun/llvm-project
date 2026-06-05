@@ -66,3 +66,21 @@ struct S {
   int by_value() { return m; }                                 // no-warning (not an indirection)
 };
 
+
+//===----------------------------------------------------------------------===//
+// Passing a value by value is not an indirection: the implicit copy/move
+// constructor's reference parameter copies the value rather than capturing it
+// (and cannot be annotated). It must not be flagged.
+//===----------------------------------------------------------------------===//
+
+struct Vec2 {
+  float x, y;
+};
+Vec2 add(Vec2 a, Vec2 b) { return {a.x + b.x, a.y + b.y}; } // no-warning
+void by_value_is_fine() {
+  Vec2 a{1, 2}, b{3, 4};
+  Vec2 c = add(a, b); // no-warning (copy/move ctors, not captures)
+  Vec2 d = c;         // no-warning (copy)
+  d = a;              // no-warning (copy assignment)
+  (void)d;
+}

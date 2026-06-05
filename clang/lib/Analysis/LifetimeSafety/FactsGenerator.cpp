@@ -1108,6 +1108,18 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   // Comparison/relational operators do not capture their operands.
   if (isComparisonOperator(FD))
     return;
+  // A copy/move constructor or copy/move assignment copies or moves its source
+  // rather than capturing the reference to it; any borrows the value itself
+  // carries are propagated by the origin model (see VisitCXXConstructExpr), so
+  // the source reference parameter is effectively noescape. This also avoids
+  // false positives on the implicit special members synthesized for passing a
+  // value-type argument by value, which cannot be annotated.
+  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD);
+      Ctor && Ctor->isCopyOrMoveConstructor())
+    return;
+  if (Method &&
+      (Method->isCopyAssignmentOperator() || Method->isMoveAssignmentOperator()))
+    return;
   for (unsigned I = 0; I < Args.size(); ++I) {
     // Map the argument index to its explicit parameter, skipping the implicit
     // object argument of instance methods.
