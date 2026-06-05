@@ -164,6 +164,17 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
                                FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::UnknownOwnership, VD));
+    // An array of pointer-like elements shares one element-origin across all
+    // elements. Seed it with a non-expiring "uninitialized" loan so the origin
+    // is never empty: a borrow stored into an element later merges in beside
+    // it, and an access before any store does not look like a lost borrow.
+    if (VD->getType()->isArrayType() && hasOrigins(VD->getType()))
+      if (OriginList *VDList = getOriginsList(*VD)) {
+        const Loan *L = FactMgr.getLoanMgr().createLoan(
+            AccessPath::Uninitialized(VD), /*IssuingExpr=*/nullptr);
+        CurrentBlockFacts.push_back(
+            FactMgr.createFact<IssueFact>(L->getID(), VDList->getOuterOriginID()));
+      }
     if (const Expr *InitExpr = VD->getInit()) {
       OriginList *VDList = getOriginsList(*VD);
       if (!VDList)
@@ -405,6 +416,17 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
     LHSList = getOriginsList(*ME_LHS);
     assert(LHSList && "LHS is a MemberExpr and should have an origin list");
   }
+  // Assignment to an array element (`arr[i] = &x`). All elements share the
+  // array's single element-origin, so we cannot tell which element is
+  // overwritten: merge the new loans in rather than killing the old ones (the
+  // origin conservatively holds the loans of every element ever stored).
+  bool MergeIntoSharedElement = false;
+  if (const auto *ASE_LHS = dyn_cast<ArraySubscriptExpr>(LHSExpr);
+      ASE_LHS &&
+      ASE_LHS->getBase()->IgnoreParenImpCasts()->getType()->isArrayType()) {
+    LHSList = getOriginsList(*ASE_LHS);
+    MergeIntoSharedElement = LHSList != nullptr;
+  }
   if (!LHSList)
     return;
   OriginList *RHSList = getOriginsList(*RHSExpr);
@@ -448,8 +470,9 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
     return;
   }
   // Kill the old loans of the destination origin and flow the new loans
-  // from the source origin.
-  flow(LHSList->peelOuterOrigin(), RHSList, /*Kill=*/true);
+  // from the source origin. For a shared array element-origin we merge instead
+  // of killing (see above).
+  flow(LHSList->peelOuterOrigin(), RHSList, /*Kill=*/!MergeIntoSharedElement);
   killAndFlowOrigin(*TargetExpr, *LHSExpr);
 }
 

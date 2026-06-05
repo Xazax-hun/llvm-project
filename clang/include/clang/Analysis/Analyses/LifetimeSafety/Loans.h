@@ -54,6 +54,11 @@ public:
     PlaceholderThis,
     NewAllocation,
     Immortal,
+    /// The initial, uninitialized contents of an array of pointer-like
+    /// elements. Seeded into the array's shared element-origin at declaration
+    /// so the origin is never empty (a borrow stored into an element merges in
+    /// alongside it). Like the placeholders, it never expires.
+    Uninitialized,
   };
 
 private:
@@ -80,6 +85,11 @@ public:
   /// `__attribute__((malloc))`), identified by the call expression.
   static AccessPath HeapAllocation(const clang::Expr *AllocExpr) {
     return AccessPath(Kind::NewAllocation, AllocExpr);
+  }
+  /// The uninitialized initial contents of an array of pointer-like elements,
+  /// identified by the array declaration. Never expires.
+  static AccessPath Uninitialized(const clang::ValueDecl *D) {
+    return AccessPath(Kind::Uninitialized, D);
   }
   AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
   AccessPath &operator=(const AccessPath &) = delete;
@@ -137,6 +147,7 @@ private:
   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
   AccessPath(Kind K, const CXXMethodDecl *MD) : K(K), Root(MD) {}
   AccessPath(Kind K, const FunctionDecl *FD) : K(K), Root(FD) {}
+  AccessPath(Kind K, const clang::ValueDecl *VD) : K(K), Root(VD) {}
   AccessPath(Kind K, const clang::Expr *E) : K(K), Root(E) {}
 };
 

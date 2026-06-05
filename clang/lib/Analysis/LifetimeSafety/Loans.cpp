@@ -37,6 +37,12 @@ void AccessPath::dump(llvm::raw_ostream &OS) const {
     if (const auto *FD = getAsImmortal())
       OS << " " << FD->getNameAsString();
     break;
+  case Kind::Uninitialized:
+    OS << "Uninitialized";
+    if (const auto *D = dyn_cast_if_present<clang::ValueDecl>(
+            Root.dyn_cast<const clang::Decl *>()))
+      OS << " " << D->getNameAsString();
+    break;
   }
 }
 

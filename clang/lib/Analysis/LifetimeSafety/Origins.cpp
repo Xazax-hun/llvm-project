@@ -103,6 +103,11 @@ private:
 bool OriginManager::hasOrigins(QualType QT) const {
   if (QT->isPointerOrReferenceType() || isGslPointerType(QT))
     return true;
+  // An array of pointer-like elements is tracked with a single origin shared
+  // across all elements (indices are not disambiguated). A borrow stored into
+  // any element is merged into that origin.
+  if (QT->isArrayType())
+    return hasOrigins(QT->getAsArrayTypeUnsafe()->getElementType());
   if (LifetimeAnnotatedOriginTypes.contains(QT.getCanonicalType().getTypePtr()))
     return true;
   const auto *RD = QT->getAsCXXRecordDecl();
@@ -193,6 +198,12 @@ OriginList *OriginManager::createSingleOriginList(OriginID OID) {
 template <typename T>
 OriginList *OriginManager::buildListForType(QualType QT, const T *Node) {
   assert(hasOrigins(QT) && "buildListForType called for non-pointer type");
+  // An array shares a single origin across all of its elements; model it as if
+  // it were one element. `arr[i]` accesses (built in getOrCreateList) reuse
+  // this same origin, so a borrow stored into any element is visible through
+  // every element.
+  if (QT->isArrayType())
+    return buildListForType(QT->getAsArrayTypeUnsafe()->getElementType(), Node);
   OriginList *Head = createNode(Node, QT);
 
   if (QT->isPointerOrReferenceType()) {
@@ -263,6 +274,20 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
       Head = getOrCreateList(ReferencedDecl);
     }
     return ExprToList[E] = Head;
+  }
+
+  // An array subscript `arr[i]` accesses an element. All elements share the
+  // array's single element-origin (indices are not disambiguated), and the
+  // array's own lvalue list already has the `[storage] -> [element-value]`
+  // shape an element access needs, so reuse it directly. A borrow stored into
+  // one element is then visible through every element access. This applies only
+  // to genuine array subscripts; a subscript of a *pointer* (e.g. an `int a[]`
+  // parameter, which is really `int *`) is an ordinary indirection.
+  if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+    const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
+    if (Base->getType()->isArrayType())
+      if (OriginList *BaseList = getOrCreateList(Base))
+        return ExprToList[E] = BaseList;
   }
 
   // If E is an lvalue , it refers to storage. We model this storage as the
