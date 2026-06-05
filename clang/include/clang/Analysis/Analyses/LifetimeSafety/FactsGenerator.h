@@ -85,6 +85,14 @@ private:
 
   void handleFullExprCleanup(const CFGFullExprCleanup &FullExprCleanup);
 
+  /// Generates origin flows for a structured binding's holding expressions
+  /// (e.g. `e[i]` / `e.field`), which are not visited by the CFG walk, so that
+  /// references to the bindings -- which alias them -- are tracked. The holding
+  /// variable is borrowable storage only for by-value bindings (a copy); for
+  /// by-reference bindings it aliases the original.
+  void handleStructuredBinding(const DecompositionDecl *DD);
+  void visitBindingHoldingExpr(const Stmt *S);
+
   /// Scans the function body for `try`/`catch` statements and emits an
   /// Exception UntrackedConstructFact for each. A `try` whose body only calls
   /// potentially-throwing functions has no explicit `throw` and produces no

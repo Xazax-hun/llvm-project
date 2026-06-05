@@ -181,14 +181,36 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
             FactMgr.createFact<IssueFact>(L->getID(), VDList->getOuterOriginID()));
       }
     if (const Expr *InitExpr = VD->getInit()) {
-      OriginList *VDList = getOriginsList(*VD);
-      if (!VDList)
-        continue;
-      OriginList *InitList = getOriginsList(*InitExpr);
-      assert(InitList && "VarDecl had origins but InitExpr did not");
-      flow(VDList, InitList, /*Kill=*/true);
+      if (OriginList *VDList = getOriginsList(*VD)) {
+        OriginList *InitList = getOriginsList(*InitExpr);
+        assert(InitList && "VarDecl had origins but InitExpr did not");
+        flow(VDList, InitList, /*Kill=*/true);
+      }
     }
+    // A structured binding's holding expressions (`e[i]` / `e.field`) are not
+    // visited by the CFG walk; generate their flows so the bindings, which
+    // alias them, are tracked. This must run even when the holding variable
+    // itself has no origin list (e.g. a by-value `int[2]` copy): taking the
+    // address of a binding still borrows the copy's storage.
+    if (const auto *DD = dyn_cast<DecompositionDecl>(VD))
+      handleStructuredBinding(DD);
   }
+}
+
+void FactsGenerator::handleStructuredBinding(const DecompositionDecl *DD) {
+  for (const BindingDecl *BD : DD->bindings())
+    if (const Expr *Holding = BD->getBinding())
+      visitBindingHoldingExpr(Holding);
+}
+
+void FactsGenerator::visitBindingHoldingExpr(const Stmt *S) {
+  if (!S)
+    return;
+  // Post-order: generate flows for sub-expressions (the holding variable
+  // reference, array-to-pointer decay, etc.) before the access itself.
+  for (const Stmt *Child : S->children())
+    visitBindingHoldingExpr(Child);
+  Visit(S);
 }
 
 void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {

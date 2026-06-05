@@ -1465,15 +1465,57 @@ struct Pair {
   ~Pair() {}
 };
 
-// FIXME: Detect this.
+// Borrow taken through a struct structured binding (by reference): the binding
+// aliases the field of the holding object, so the view dangles when it expires.
 void structured_binding_use_after_scope() {
   View v;
   {
     Pair p;
-    auto &[a_ref, b_ref] = p;
+    auto &[a_ref, b_ref] = p; // expected-warning {{local variable 'p' does not live long enough}}
     v = a_ref;
-  }
-  v.use();
+  }          // expected-note {{destroyed here}}
+  v.use();   // expected-note {{later used here}}
+}
+
+// Taking the address of an array structured-binding element (by reference).
+void structured_binding_array_addr() {
+  int *q;
+  {
+    int arr[2] = {1, 2};
+    auto &[a, b] = arr; // expected-warning {{local variable 'arr' does not live long enough}}
+    q = &a;
+  }         // expected-note {{destroyed here}}
+  (void)*q; // expected-note {{later used here}}
+}
+
+// By-value array binding: the borrow is to the (local) copy, which also dies.
+void structured_binding_by_value_addr() {
+  int *q;
+  {
+    int arr[2] = {1, 2};
+    auto [a, b] = arr; // expected-warning {{local variable '[a, b]' does not live long enough}}
+    q = &a;
+  }         // expected-note {{destroyed here}}
+  (void)*q; // expected-note {{later used here}}
+}
+
+// Taking the address of a struct structured-binding member (by value): the
+// borrow is to the local copy's member, which dies with the copy.
+void structured_binding_struct_by_value_addr() {
+  int *q;
+  {
+    struct P { int x, y; } s{1, 2};
+    auto [a, b] = s; // expected-warning {{local variable '[a, b]' does not live long enough}}
+    q = &a;
+  }         // expected-note {{destroyed here}}
+  (void)*q; // expected-note {{later used here}}
+}
+
+// A binding of a long-lived array is not flagged.
+int g_arr[2] = {1, 2};
+int *structured_binding_long_lived() {
+  auto &[a, b] = g_arr;
+  return &a; // no-warning
 }
 }
 

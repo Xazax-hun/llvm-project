@@ -159,6 +159,11 @@ bool OriginManager::hasOrigins(const Expr *E) const {
 ///   Foo&& f = Foo{};   // temporary has storage, lifetime extended
 /// Currently, this function returns false for all reference types.
 bool doesDeclHaveStorage(const ValueDecl *D) {
+  // A structured binding aliases an element of its holding object; it has no
+  // borrowable storage of its own. The holding object provides the storage
+  // (its own, for a by-value copy; the referent's, for a by-reference binding).
+  if (isa<BindingDecl>(D))
+    return false;
   return !D->getType()->isReferenceType();
 }
 
@@ -244,6 +249,17 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
   // implicit object parameter.
   if (isa<CXXThisExpr>(E) && ThisOrigins)
     return *ThisOrigins;
+
+  // A structured binding is an alias for an element of its holding object.
+  // Resolve a binding reference to its holding expression (e.g. `e[i]` /
+  // `e.field`); the flows for those expressions are generated in
+  // handleStructuredBinding. A borrow of the binding (e.g. `&a`) then borrows
+  // the holding object's storage -- the copy for a by-value binding (which
+  // expires), or the referent for a by-reference binding.
+  if (auto *DRE = dyn_cast<DeclRefExpr>(E))
+    if (auto *BD = dyn_cast<BindingDecl>(DRE->getDecl()))
+      if (const Expr *Binding = BD->getBinding())
+        return ExprToList[E] = getOrCreateList(Binding);
 
   // Special handling for expressions referring to a decl to share origins with
   // the underlying decl.
