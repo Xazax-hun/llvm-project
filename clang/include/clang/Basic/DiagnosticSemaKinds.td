@@ -11120,6 +11120,12 @@ def warn_lifetime_safety_unannotated_this_return
               "'lifetime_immortal'">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_this_escapes_to_global
+    : Warning<"a borrow of the enclosing object or one of its members escapes to "
+              "global or static storage %0, whose lifetime is unrelated to the "
+              "caller's object; it may dangle">,
+      InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
 def warn_lifetime_safety_multilevel_indirection
     : Warning<"%0 uses more than one level of indirection, which lifetime "
               "safety analysis cannot fully model; the safe programming model "

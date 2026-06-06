@@ -60,6 +60,17 @@ private:
   llvm::DenseMap<LoanID, PendingWarning> FinalWarningsMap;
   llvm::DenseMap<AnnotationTarget, EscapingTarget> AnnotationWarningsMap;
   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
+  /// Borrows of the implicit object (`this`) or one of its fields that escape
+  /// to global/static storage from a method. The global is caller-independent
+  /// and outlives the call, but the borrowed object's lifetime is the caller's,
+  /// so such an escape may dangle. Keyed by the global to de-duplicate; the
+  /// value records whether the borrow was of `this` (false) or a field (true)
+  /// and a source location to anchor the diagnostic.
+  struct ThisEscapeToGlobal {
+    bool IsField;
+    SourceLocation Loc;
+  };
+  llvm::DenseMap<const VarDecl *, ThisEscapeToGlobal> ThisEscapesToGlobalMap;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
@@ -134,6 +145,7 @@ public:
     checkMultiLevelIndirection();
     suggestAnnotations();
     reportNoescapeViolations();
+    reportThisEscapesToGlobal();
     reportLifetimeboundViolations();
     reportMisplacedLifetimebound();
     //  Annotation inference is currently guarded by a frontend flag. In the
@@ -192,6 +204,23 @@ public:
     for (LoanID LID : EscapedLoans) {
       const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
       const AccessPath &AP = L->getAccessPath();
+      // Safe-model rule: a borrow of the implicit object (`this`) or one of its
+      // fields must not escape to global/static storage. Intra-procedurally the
+      // object is caller-scope (a placeholder that never expires), so such a
+      // store is otherwise silently accepted even though the global outlives the
+      // caller's object. Flag it here.
+      if (const auto *GlobalEsc = dyn_cast<GlobalEscapeFact>(OEF)) {
+        bool IsThis = AP.getAsPlaceholderThis() != nullptr;
+        const auto *VD = AP.getAsValueDecl();
+        bool IsField = VD && isa<FieldDecl>(VD);
+        if (IsThis || IsField) {
+          SourceLocation Loc = L->getIssuingExpr()
+                                   ? L->getIssuingExpr()->getExprLoc()
+                                   : FD->getLocation();
+          ThisEscapesToGlobalMap.try_emplace(GlobalEsc->getGlobal(),
+                                             ThisEscapeToGlobal{IsField, Loc});
+        }
+      }
       if (const auto *PVD = AP.getAsPlaceholderParam())
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
       else if (const auto *MD = AP.getAsPlaceholderThis())
@@ -687,6 +716,13 @@ public:
       else
         llvm_unreachable("Unhandled EscapingTarget type");
     }
+  }
+
+  void reportThisEscapesToGlobal() {
+    if (!SemaHelper)
+      return;
+    for (auto [Global, Info] : ThisEscapesToGlobalMap)
+      SemaHelper->reportThisEscapesToGlobal(Info.Loc, Info.IsField, Global);
   }
 
   void reportLifetimeboundViolations() {

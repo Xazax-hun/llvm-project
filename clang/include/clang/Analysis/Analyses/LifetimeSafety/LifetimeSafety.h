@@ -191,6 +191,13 @@ public:
   // unspecified for callers.
   virtual void reportUnannotatedThisReturn(const CXXMethodDecl *MD) {}
 
+  // Reports a borrow of the implicit object ('this', \p IsField false) or one of
+  // its fields (\p IsField true) escaping to global or static storage \p Global
+  // from a method. The global outlives the call, but the object's lifetime is
+  // caller-determined, so the stored borrow may dangle.
+  virtual void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,
+                                         const VarDecl *Global) {}
+
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
