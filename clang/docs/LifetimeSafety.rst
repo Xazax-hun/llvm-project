@@ -525,7 +525,11 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-noescape``: Warns when a parameter marked with ``[[clang::noescape]]`` escapes the function.
   * ``-Wlifetime-safety-lifetimebound-violation``: Warns when the analysis cannot verify that the return value can be lifetime bound to a parameter marked with ``[[clang::lifetimebound]]``.
 
-* ``-Wlifetime-safety-soundness``: Enables *soundness* checks that fire wherever the analysis cannot fully model a construct. They are intended to be enabled as errors over a region of code to opt into the :ref:`safe programming model <safe_programming_model>`. See that section for details.
+* ``-Wlifetime-safety-soundness``: The completeness group for the :ref:`safe programming model <safe_programming_model>`. Enabling it (typically as errors over a region of code) makes the analysis never silently fail to catch a lifetime mistake. It bundles three kinds of warning:
+
+  * The strict bug-detection warnings -- ``-Wlifetime-safety-strict`` (which itself includes ``-Wlifetime-safety-permissive``) -- so the actual use-after-free, use-after-scope, return-stack-address, dangling-field/global, and invalidation findings are reported, not just the modeling-gap warnings below. (Reporting a construct as "unmodeled" would be of little use if the bugs the analysis *can* prove were not also surfaced.)
+  * The annotation-validation warnings -- ``-Wlifetime-safety-noescape`` and ``-Wlifetime-safety-lifetimebound-violation`` -- since an annotation the function body does not honor is itself a hole that callers trust.
+  * The modeling-gap warnings, which fire wherever the analysis cannot fully model a construct:
 
   * ``-Wlifetime-safety-bailout``: Warns when the analysis skips a whole function (e.g. its control-flow graph is too large or could not be built).
   * ``-Wlifetime-safety-lost-loan``: Warns when a tracked pointer-like value ends up holding no borrow, indicating a borrow was lost to an unmodeled construct.
@@ -548,10 +552,16 @@ Safe Programming Model
 The checks under :ref:`-Wlifetime-safety <warning_flags>` are *best-effort*:
 when the analysis cannot model a construct it silently tracks nothing, so a
 clean compile is not by itself a guarantee that no lifetime mistake slipped
-through. The *soundness* checks under ``-Wlifetime-safety-soundness``
-close that gap: each one fires wherever the analysis cannot fully account for a
-construct (an unsupported indirection, an unmodeled call, an analysis bailout,
-an unannotated or unknown-ownership type, and so on).
+through. The ``-Wlifetime-safety-soundness`` group closes that gap. It is a
+superset of the bug-detection checks: it includes everything in
+``-Wlifetime-safety-strict`` (and therefore ``-Wlifetime-safety-permissive``),
+the annotation-validation checks (``-Wlifetime-safety-noescape`` and
+``-Wlifetime-safety-lifetimebound-violation``), and a family of *modeling-gap*
+checks that each fire wherever the analysis cannot fully account for a construct
+(an unsupported indirection, an unmodeled call, an analysis bailout, an
+unannotated or unknown-ownership type, and so on). Enabling this one group is
+therefore sufficient -- the actual dangling-pointer findings are reported
+alongside the places the analysis gives up.
 
 By enabling these checks **as errors** over a region of code, you opt that code
 into a "safe programming model" in which the analysis never silently fails to

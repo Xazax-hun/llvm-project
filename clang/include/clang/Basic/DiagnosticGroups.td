@@ -805,7 +805,17 @@ the safe programming model.
 }
 
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
-                                        [LifetimeSafetyLostLoan,
+                                        [// The strict bug-finding warnings
+                                         // (use-after-scope/free,
+                                         // return-stack-address, dangling
+                                         // field/global, and the experimental
+                                         // moved/invalidation variants). The
+                                         // safe programming model is only sound
+                                         // if the bugs the analysis *can* prove
+                                         // are reported alongside the
+                                         // modeling-gap warnings below.
+                                         LifetimeSafetyStrict,
+                                         LifetimeSafetyLostLoan,
                                          LifetimeSafetyBailout,
                                          LifetimeSafetyIndirectCall,
                                          LifetimeSafetyUnannotatedIndirection,
@@ -816,13 +826,30 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
                                          LifetimeSafetyOwnerOfIndirection,
-                                         LifetimeSafetyConstSubversion]> {
+                                         LifetimeSafetyConstSubversion,
+                                         // An annotation that cannot be verified
+                                         // (a [[noescape]] parameter that
+                                         // escapes, or a [[lifetimebound]] whose
+                                         // binding cannot be confirmed) is a
+                                         // soundness hole: callers trust a
+                                         // contract the body does not honor.
+                                         LifetimeSafetyNoescape,
+                                         LifetimeSafetyLifetimeboundViolation]> {
   code Documentation = [{
-Warnings emitted wherever the lifetime safety analysis cannot fully model a
-construct (unsupported indirection, unmodeled calls, analysis bailouts, etc.).
-Intended to be enabled as errors over a region of code to opt into a "safe
-programming model" in which the analysis never silently fails to catch a
-lifetime mistake.
+The completeness group for the "safe programming model": enabling it (typically
+as errors over a region of code) makes the analysis never silently fail to catch
+a lifetime mistake. It bundles three kinds of warning:
+
+* the strict bug-detection warnings (``-Wlifetime-safety-strict``, which itself
+  includes ``-Wlifetime-safety-permissive``) -- the actual use-after-free,
+  use-after-scope, return-stack-address, dangling-field/global, and
+  invalidation findings;
+* the modeling-gap warnings emitted wherever the analysis cannot fully model a
+  construct (unsupported indirection, unmodeled or indirect calls, analysis
+  bailouts, unknown ownership, etc.); and
+* the annotation-validation warnings (``-Wlifetime-safety-noescape`` and
+  ``-Wlifetime-safety-lifetimebound-violation``), since an annotation the body
+  does not honor is a hole that callers trust.
   }];
 }
 
