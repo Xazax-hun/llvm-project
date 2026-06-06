@@ -58,3 +58,53 @@ void address_of_global() {
   int *p = &g;
   use(p); // umbrella-warning {{argument is bound to a parameter that can hold a borrow}}
 }
+
+// Members of the implicit object are caller-provided storage; they are seeded
+// with an uninitialized loan at method entry (recursively, through by-value
+// sub-objects). Reading an unwritten member -- directly, through an array
+// element, or through a nested sub-object -- is therefore not a "lost loan".
+struct WithMembers {
+  int *scalar;
+  int *arr[4];
+  struct Inner {
+    int *q;
+    int *iarr[2];
+  } nested;
+  void other();
+
+  void read_scalar() {
+    int *p = scalar;
+    (void)p; // no lost-loan
+  }
+  void read_array_elem() {
+    int *p = arr[0];
+    (void)p; // no lost-loan
+  }
+  void read_nested() {
+    int *p = nested.q;
+    (void)p; // no lost-loan
+  }
+  void read_nested_array() {
+    int *p = nested.iarr[1];
+    (void)p; // no lost-loan
+  }
+  // Calling another method marks the implicit object's fields as used; with the
+  // members seeded this is not a lost loan on 'this'.
+  void calls_other() { other(); } // no lost-loan
+};
+
+// A pointer materialized from an integer has no tracked provenance: a borrow
+// laundered through the integer was dropped. The result is reported as a lost
+// loan even when it is consumed directly as an rvalue (dereferenced or indexed)
+// without ever binding a named pointer variable.
+int deref_int_to_ptr(unsigned long n) {
+  return *reinterpret_cast<int *>(n); // expected-warning {{lifetime safety cannot track this value here; no borrow information flows into it, so a borrow was likely lost to an unmodeled construct}}
+}
+
+int index_int_to_ptr(unsigned long n) {
+  return reinterpret_cast<int *>(n)[3]; // expected-warning {{lifetime safety cannot track this value here}}
+}
+
+int cstyle_int_to_ptr(unsigned long n) {
+  return *(int *)(n); // expected-warning {{lifetime safety cannot track this value here}}
+}

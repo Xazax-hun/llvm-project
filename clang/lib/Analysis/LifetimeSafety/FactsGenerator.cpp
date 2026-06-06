@@ -391,6 +391,15 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     if (Src && Dest && Dest->getLength() == Src->getLength())
       flow(Dest, Src, /*Kill=*/true);
     return;
+  case CK_IntegralToPointer:
+    // A pointer materialized from an integer (e.g. 'reinterpret_cast<int*>(n)'
+    // or a C-style '(int*)n') has no tracked provenance: any borrow laundered
+    // through the integer was dropped. Mark the result as a use so the empty
+    // origin is reported as a lost loan -- this covers the result being
+    // dereferenced/indexed directly as an rvalue, which would otherwise create
+    // no tracked pointer lvalue and slip through.
+    handleUse(CE);
+    return;
   default:
     return;
   }
