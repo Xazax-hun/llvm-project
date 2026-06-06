@@ -71,6 +71,13 @@ private:
     SourceLocation Loc;
   };
   llvm::DenseMap<const VarDecl *, ThisEscapeToGlobal> ThisEscapesToGlobalMap;
+  /// Parameters annotated [[clang::lifetimebound]] or [[clang::lifetime_capture_by]]
+  /// (to something other than `global`) whose borrow nonetheless escapes to
+  /// global/static storage. Those annotations describe a return/capture
+  /// relationship, not a global capture, so the caller is unaware the global
+  /// now aliases the argument. Keyed by parameter to de-duplicate.
+  llvm::DenseMap<const ParmVarDecl *, const VarDecl *>
+      AnnotatedParamEscapesToGlobalMap;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
@@ -155,6 +162,16 @@ public:
       inferAnnotations();
   }
 
+  /// Returns true if \p PVD is annotated [[clang::lifetime_capture_by(global)]],
+  /// which documents that the parameter may be captured by global storage.
+  static bool capturesGlobal(const ParmVarDecl *PVD) {
+    if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
+      for (int Idx : A->params())
+        if (Idx == LifetimeCaptureByAttr::Global)
+          return true;
+    return false;
+  }
+
   /// Checks if an escaping origin holds a placeholder loan, indicating a
   /// missing [[clang::lifetimebound]] annotation or a violation of
   /// [[clang::noescape]].
@@ -220,6 +237,20 @@ public:
           ThisEscapesToGlobalMap.try_emplace(GlobalEsc->getGlobal(),
                                              ThisEscapeToGlobal{IsField, Loc});
         }
+        // A parameter annotated [[clang::lifetimebound]] or
+        // [[clang::lifetime_capture_by]] (to something other than `global`)
+        // describes a return/capture relationship, not a global capture; its
+        // escape to a global is therefore uncovered by the annotation. An
+        // unannotated parameter is already reported by checkUnannotatedParams,
+        // and a [[clang::noescape]] one by reportNoescapeViolations, so they are
+        // excluded here.
+        if (const auto *PVD = AP.getAsPlaceholderParam();
+            PVD && !PVD->hasAttr<NoEscapeAttr>() &&
+            (PVD->hasAttr<LifetimeBoundAttr>() ||
+             PVD->hasAttr<LifetimeCaptureByAttr>()) &&
+            !capturesGlobal(PVD))
+          AnnotatedParamEscapesToGlobalMap.try_emplace(PVD,
+                                                       GlobalEsc->getGlobal());
       }
       if (const auto *PVD = AP.getAsPlaceholderParam())
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
@@ -723,6 +754,8 @@ public:
       return;
     for (auto [Global, Info] : ThisEscapesToGlobalMap)
       SemaHelper->reportThisEscapesToGlobal(Info.Loc, Info.IsField, Global);
+    for (auto [PVD, Global] : AnnotatedParamEscapesToGlobalMap)
+      SemaHelper->reportAnnotatedParamEscapesToGlobal(PVD, Global);
   }
 
   void reportLifetimeboundViolations() {

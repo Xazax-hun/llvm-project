@@ -11126,6 +11126,12 @@ def warn_lifetime_safety_this_escapes_to_global
               "caller's object; it may dangle">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_annotated_param_escapes_to_global
+    : Warning<"parameter escapes to global or static storage %0, which its "
+              "lifetime annotation does not describe; annotate it with "
+              "'lifetime_capture_by(global)' or do not store the borrow">,
+      InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
 def warn_lifetime_safety_multilevel_indirection
     : Warning<"%0 uses more than one level of indirection, which lifetime "
               "safety analysis cannot fully model; the safe programming model "

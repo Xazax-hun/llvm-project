@@ -44,6 +44,26 @@ struct Clean {
   void store(int v) { f = v; }   // no-warning
 };
 
+// A [[clang::lifetimebound]] (or [[clang::lifetime_capture_by]]) parameter
+// describes a return/capture relationship, not a global capture: if its borrow
+// also escapes to a global, the annotation does not cover it and the caller is
+// unaware.
+int *g_p;
+int *lifetimebound_to_global(int *a [[clang::lifetimebound]]) { // expected-warning {{parameter escapes to global or static storage 'g_p', which its lifetime annotation does not describe}}
+  g_p = a;
+  return a;
+}
+
+// Documenting the global capture with lifetime_capture_by(global) is accepted.
+void capture_by_global_ok(int *a [[clang::lifetime_capture_by(global)]]) {
+  g_p = a; // no-warning
+}
+
+// A lifetimebound parameter that does not escape to a global is fine.
+int *lifetimebound_no_escape(int *a [[clang::lifetimebound]]) {
+  return a; // no-warning
+}
+
 int main() {
   Clean c;
   return c.read();

@@ -56,6 +56,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_unannotated_param,
       diag::warn_lifetime_safety_unannotated_this_return,
       diag::warn_lifetime_safety_this_escapes_to_global,
+      diag::warn_lifetime_safety_annotated_param_escapes_to_global,
       diag::warn_lifetime_safety_multilevel_indirection,
       diag::warn_lifetime_safety_move_silencing,
       diag::warn_lifetime_safety_assumed_invalidation,
@@ -456,6 +457,13 @@ public:
   void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,
                                  const VarDecl *Global) override {
     S.Diag(Loc, diag::warn_lifetime_safety_this_escapes_to_global) << Global;
+  }
+
+  void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
+                                           const VarDecl *Global) override {
+    S.Diag(PVD->getLocation(),
+           diag::warn_lifetime_safety_annotated_param_escapes_to_global)
+        << Global << PVD->getSourceRange();
   }
 
   void reportMultiLevelIndirection(const ValueDecl *VD) override {

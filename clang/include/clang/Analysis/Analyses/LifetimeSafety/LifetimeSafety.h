@@ -198,6 +198,15 @@ public:
   virtual void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,
                                          const VarDecl *Global) {}
 
+  // Reports a parameter annotated [[clang::lifetimebound]] or
+  // [[clang::lifetime_capture_by]] (to an entity other than `global`) whose
+  // borrow escapes to global or static storage \p Global. Those annotations
+  // describe a return/capture relationship, not a global capture, so the
+  // escape is uncovered and the caller is unaware the global aliases the
+  // argument.
+  virtual void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
+                                                   const VarDecl *Global) {}
+
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
