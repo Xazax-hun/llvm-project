@@ -27,6 +27,7 @@
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/AST/TypeOrdering.h"
+#include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Basic/AttributeCommonInfo.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/Specifiers.h"
@@ -18846,6 +18847,55 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
         Diag(Old->getParamDecl(I)->getLocation(),
              diag::note_overridden_marked_noescape);
       }
+  }
+
+  // Lifetime-safety ("safe programming model"): an override must not strengthen
+  // its lifetime contract beyond what the overridden method advertises. Callers
+  // dispatch through the base-class signature, so a '[[clang::lifetimebound]]'
+  // the override adds -- on a parameter, or binding the return to the implicit
+  // object -- is invisible to them: the returned borrow could outlive its
+  // referent undetected. (The opposite direction, dropping 'noescape', is
+  // covered by -Wmissing-noescape above.) These diagnostics are off by default
+  // and only fire under the lifetime-safety validation/soundness groups, so
+  // gate the work on the group being enabled.
+  if (!Diags.isIgnored(
+          diag::warn_lifetime_safety_override_param_adds_lifetimebound,
+          New->getLocation())) {
+    for (unsigned I = 0, E = Old->getNumParams();
+         I != E && I < New->getNumParams(); ++I)
+      if (New->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
+          !Old->getParamDecl(I)->hasAttr<LifetimeBoundAttr>()) {
+        Diag(New->getParamDecl(I)->getLocation(),
+             diag::warn_lifetime_safety_override_param_adds_lifetimebound)
+            << New->getParamDecl(I);
+        Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+      }
+    // An override that binds its return to the object ('[[clang::lifetimebound]]')
+    // when the overridden method does not is invisible to callers dispatching
+    // through the base class. (When the base is 'lifetime_immortal' the override
+    // is even less safe -- handled, with a clearer message, by the immortal
+    // check below -- so skip that case here.)
+    if (lifetimes::implicitObjectParamIsLifetimeBound(New) &&
+        !lifetimes::implicitObjectParamIsLifetimeBound(Old) &&
+        !Old->hasAttr<LifetimeImmortalAttr>()) {
+      Diag(New->getLocation(),
+           diag::warn_lifetime_safety_override_this_adds_lifetimebound);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
+    // Overriding a '[[clang::lifetime_immortal]]' method, whose result never
+    // dangles, requires the override to preserve that guarantee -- it must also
+    // be 'lifetime_immortal'. Callers through the base class treat the result as
+    // immortal and do not track it, so an override that returns a borrow which
+    // can dangle (whether unannotated, or merely 'lifetimebound' to the object,
+    // a weaker guarantee) is a hole. Flag any non-immortal override.
+    QualType NewRetTy = New->getReturnType();
+    if (Old->hasAttr<LifetimeImmortalAttr>() &&
+        !New->hasAttr<LifetimeImmortalAttr>() &&
+        (NewRetTy->isPointerType() || NewRetTy->isReferenceType() ||
+         lifetimes::isGslPointerType(NewRetTy))) {
+      Diag(New->getLocation(), diag::warn_lifetime_safety_override_of_immortal);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
   }
 
   // SME attributes must match when overriding a function declaration.

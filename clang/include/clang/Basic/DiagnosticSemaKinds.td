@@ -2334,6 +2334,22 @@ def warn_overriding_method_missing_noescape : Warning<
   "__attribute__((noescape))">, InGroup<MissingNoEscape>;
 def note_overridden_marked_noescape : Note<
   "parameter of overridden method is annotated with __attribute__((noescape))">;
+def warn_lifetime_safety_override_param_adds_lifetimebound : Warning<
+  "overriding parameter %0 adds '[[clang::lifetimebound]]' not present on the "
+  "overridden method; a call through the base class would not enforce that the "
+  "returned borrow's lifetime is bound to it">,
+  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_this_adds_lifetimebound : Warning<
+  "this overriding member function binds its return value to the object "
+  "('[[clang::lifetimebound]]'), but the overridden method does not; a call "
+  "through the base class would not enforce it">,
+  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_of_immortal : Warning<
+  "this override of a 'lifetime_immortal' method does not guarantee its return "
+  "never dangles; a call through the base class assumes it does, so the override "
+  "must also be 'lifetime_immortal' (binding the return to the object with "
+  "'[[clang::lifetimebound]]' is a weaker guarantee and is not sufficient)">,
+  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
 def note_cat_conform_to_noescape_prot : Note<
   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
 

@@ -847,7 +847,13 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          // soundness hole: callers trust a
                                          // contract the body does not honor.
                                          LifetimeSafetyNoescape,
-                                         LifetimeSafetyLifetimeboundViolation]> {
+                                         LifetimeSafetyLifetimeboundViolation,
+                                         // An override that drops a 'noescape'
+                                         // its overridden method advertises is a
+                                         // soundness hole: callers dispatching
+                                         // through the base class assume the
+                                         // parameter does not escape.
+                                         MissingNoEscape]> {
   code Documentation = [{
 The completeness group for the "safe programming model": enabling it (typically
 as errors over a region of code) makes the analysis never silently fail to catch
