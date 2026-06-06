@@ -844,35 +844,42 @@ void FactsGenerator::handleExitBlock() {
 
 void FactsGenerator::handleGSLPointerConstruction(const CXXConstructExpr *CCE) {
   assert(isGslPointerType(CCE->getType()));
-  if (CCE->getNumArgs() != 1)
-    return;
-
-  const Expr *Arg = CCE->getArg(0);
-  if (isGslPointerType(Arg->getType())) {
-    OriginList *ArgList = getOriginsList(*Arg);
-    assert(ArgList && "GSL pointer argument should have an origin list");
-    // GSL pointer is constructed from another gsl pointer.
-    // Example:
-    //  View(View v);
-    //  View(const View &v);
-    ArgList = getRValueOrigins(Arg, ArgList);
-    flow(getOriginsList(*CCE), ArgList, /*Kill=*/true);
-  } else if (Arg->getType()->isPointerType()) {
-    // GSL pointer is constructed from a raw pointer. Flow only the outermost
-    // raw pointer. Example:
-    //  View(const char*);
-    //  Span<int*>(const in**);
-    OriginList *ArgList = getOriginsList(*Arg);
-    CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
-        getOriginsList(*CCE)->getOuterOriginID(), ArgList->getOuterOriginID(),
-        /*Kill=*/true));
-  } else {
-    // This could be a new borrow.
-    // TODO: Add code example here.
-    handleFunctionCall(CCE, CCE->getConstructor(),
-                       {CCE->getArgs(), CCE->getNumArgs()},
-                       /*IsGslConstruction=*/true);
+  if (CCE->getNumArgs() == 1) {
+    const Expr *Arg = CCE->getArg(0);
+    if (isGslPointerType(Arg->getType())) {
+      OriginList *ArgList = getOriginsList(*Arg);
+      assert(ArgList && "GSL pointer argument should have an origin list");
+      // GSL pointer is constructed from another gsl pointer.
+      // Example:
+      //  View(View v);
+      //  View(const View &v);
+      ArgList = getRValueOrigins(Arg, ArgList);
+      flow(getOriginsList(*CCE), ArgList, /*Kill=*/true);
+      return;
+    }
+    if (Arg->getType()->isPointerType()) {
+      // GSL pointer is constructed from a raw pointer. Flow only the outermost
+      // raw pointer. Example:
+      //  View(const char*);
+      //  Span<int*>(const in**);
+      OriginList *ArgList = getOriginsList(*Arg);
+      CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+          getOriginsList(*CCE)->getOuterOriginID(), ArgList->getOuterOriginID(),
+          /*Kill=*/true));
+      return;
+    }
   }
+  // Other constructions -- a multi-argument pointer/iterator form such as
+  // `span(ptr, size)` or `span(first, last)`, or a single container/range
+  // argument -- are handled by the general lifetimebound parameter->return
+  // propagation in handleFunctionCall: the data/iterator parameter of the
+  // standard views carries an (inferred) [[clang::lifetimebound]], so its borrow
+  // flows into the constructed view. The range/container constructor parameter
+  // is deliberately *not* lifetimebound, so `span(container)` is unaffected
+  // here (it remains an unannotated indirection).
+  handleFunctionCall(CCE, CCE->getConstructor(),
+                     {CCE->getArgs(), CCE->getNumArgs()},
+                     /*IsGslConstruction=*/true);
 }
 
 void FactsGenerator::handleMovedArgsInCall(const FunctionDecl *FD,
