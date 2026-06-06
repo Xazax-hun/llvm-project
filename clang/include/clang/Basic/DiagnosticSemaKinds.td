@@ -11128,9 +11128,16 @@ def warn_lifetime_safety_this_escapes_to_global
       DefaultIgnore;
 def warn_lifetime_safety_annotated_param_escapes_to_global
     : Warning<"parameter escapes to global or static storage %0, which its "
-              "lifetime annotation does not describe; annotate it with "
-              "'lifetime_capture_by(global)' or do not store the borrow">,
+              "lifetime annotation does not describe; the safe programming "
+              "model does not allow storing the borrow there">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
+      DefaultIgnore;
+def warn_lifetime_safety_global_capture
+    : Warning<"'lifetime_capture_by(global)' is not supported by the safe "
+              "programming model; the analysis cannot track borrows captured "
+              "into global or static storage, so such a capture may dangle "
+              "undetected">,
+      InGroup<LifetimeSafetyGlobalCapture>,
       DefaultIgnore;
 def warn_lifetime_safety_multilevel_indirection
     : Warning<"%0 uses more than one level of indirection, which lifetime "

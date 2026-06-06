@@ -54,9 +54,10 @@ int *lifetimebound_to_global(int *a [[clang::lifetimebound]]) { // expected-warn
   return a;
 }
 
-// Documenting the global capture with lifetime_capture_by(global) is accepted.
-void capture_by_global_ok(int *a [[clang::lifetime_capture_by(global)]]) {
-  g_p = a; // no-warning
+// lifetime_capture_by(global) is itself rejected: the analysis cannot track a
+// borrow captured into global storage (see -Wlifetime-safety-global-capture).
+void capture_by_global_banned(int *a [[clang::lifetime_capture_by(global)]]) { // expected-warning {{'lifetime_capture_by(global)' is not supported by the safe programming model}}
+  g_p = a;
 }
 
 // A lifetimebound parameter that does not escape to a global is fine.

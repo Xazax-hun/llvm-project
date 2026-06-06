@@ -149,6 +149,7 @@ public:
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
+    checkGlobalCaptureAnnotations();
     checkMultiLevelIndirection();
     suggestAnnotations();
     reportNoescapeViolations();
@@ -756,6 +757,19 @@ public:
       SemaHelper->reportThisEscapesToGlobal(Info.Loc, Info.IsField, Global);
     for (auto [PVD, Global] : AnnotatedParamEscapesToGlobalMap)
       SemaHelper->reportAnnotatedParamEscapesToGlobal(PVD, Global);
+  }
+
+  // Bans [[clang::lifetime_capture_by(global)]]: the analysis cannot track a
+  // borrow captured into global/static storage, so the construct is rejected.
+  void checkGlobalCaptureAnnotations() {
+    if (!SemaHelper)
+      return;
+    const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD);
+    if (!Fn)
+      return;
+    for (const ParmVarDecl *PVD : Fn->parameters())
+      if (capturesGlobal(PVD))
+        SemaHelper->reportGlobalCapture(PVD);
   }
 
   void reportLifetimeboundViolations() {

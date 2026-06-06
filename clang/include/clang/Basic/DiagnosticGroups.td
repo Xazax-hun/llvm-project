@@ -804,6 +804,18 @@ the safe programming model.
   }];
 }
 
+def LifetimeSafetyGlobalCapture
+    : DiagGroup<"lifetime-safety-global-capture"> {
+  code Documentation = [{
+Warns on a parameter annotated [[clang::lifetime_capture_by(global)]]. The
+annotation documents that the argument may be captured by global or static
+storage, but the analysis cannot track such a capture (it does not know where
+the borrow is stored or how long the global lives), so a borrow captured this
+way can dangle undetected. The construct is therefore rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                         [// The strict bug-finding warnings
                                          // (use-after-scope/free,
@@ -827,6 +839,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyException,
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyConstSubversion,
+                                         LifetimeSafetyGlobalCapture,
                                          // An annotation that cannot be verified
                                          // (a [[noescape]] parameter that
                                          // escapes, or a [[lifetimebound]] whose

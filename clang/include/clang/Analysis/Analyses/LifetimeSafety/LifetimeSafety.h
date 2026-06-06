@@ -207,6 +207,12 @@ public:
   virtual void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
                                                    const VarDecl *Global) {}
 
+  // Reports a parameter annotated [[clang::lifetime_capture_by(global)]]. The
+  // safe programming model rejects it: the analysis cannot track a borrow
+  // captured into global/static storage, so such a capture may dangle
+  // undetected.
+  virtual void reportGlobalCapture(const ParmVarDecl *PVD) {}
+
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
