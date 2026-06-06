@@ -223,6 +223,7 @@ struct basic_string {
   basic_string& operator=(const basic_string&);
   basic_string& operator+=(const basic_string&);
   basic_string& operator+=(const T*);
+  basic_string& operator+=(T);
   void push_back(T);
 
   template<class StringViewLike> basic_string& insert(size_t index, const StringViewLike&);
@@ -234,6 +235,12 @@ struct basic_string {
   const T *data() const;
 };
 using string = basic_string<char>;
+
+template <class T>
+basic_string<T> operator+(const basic_string<T> &, const basic_string<T> &);
+template <class T> basic_string<T> operator+(const basic_string<T> &, const T *);
+template <class T> basic_string<T> operator+(const T *, const basic_string<T> &);
+template <class T> basic_string<T> operator+(const basic_string<T> &, T);
 
 template<typename T>
 struct unique_ptr {

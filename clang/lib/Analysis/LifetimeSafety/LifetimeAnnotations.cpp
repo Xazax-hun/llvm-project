@@ -579,6 +579,23 @@ bool isStlContainerInsertionMethod(const CXXMethodDecl &MD) {
   return Insertion.contains(MD.getName());
 }
 
+// Returns true if \p RD is a std::basic_string specialization.
+static bool isStlBasicStringType(const CXXRecordDecl *RD) {
+  return RD && isInStlNamespace(RD) && getName(*RD) == "basic_string";
+}
+
+bool isStlStringConcatenationOperator(const FunctionDecl &FD) {
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(&FD))
+    // Member `s += x`: appends a copy of x's characters; x does not escape.
+    return MD->getOverloadedOperator() == OO_PlusEqual &&
+           isStlBasicStringType(MD->getParent());
+  // Free `a + b`: builds a new string from copies of its operands. Recognized by
+  // a basic_string result in the STL namespace (covers the string/char*/char
+  // overloads); iterator `operator+` returns an iterator, not a string.
+  return FD.getOverloadedOperator() == OO_Plus && isInStlNamespace(&FD) &&
+         isStlBasicStringType(FD.getReturnType()->getAsCXXRecordDecl());
+}
+
 bool isStlContainerType(const CXXRecordDecl *RD) {
   if (!RD || !isInStlNamespace(RD))
     return false;

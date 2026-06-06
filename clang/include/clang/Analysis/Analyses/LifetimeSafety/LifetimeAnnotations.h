@@ -129,6 +129,12 @@ bool isInvalidationMethod(const CXXMethodDecl &MD);
 // reference parameter is effectively noescape.
 bool isStlContainerInsertionMethod(const CXXMethodDecl &MD);
 
+// Returns true if the function is a std::basic_string concatenation operator:
+// the member `operator+=` (append-assign) or a free `operator+` returning a
+// basic_string. Both deep-copy their operands' characters into a string, so an
+// operand reference (or character pointer) does not escape.
+bool isStlStringConcatenationOperator(const FunctionDecl &FD);
+
 // Returns true if the record is a standard container template (vector, map,
 // basic_string, ...). A constructor of such a type copies/moves in the values
 // it is given, so a by-reference parameter to a non-borrow-holding type does

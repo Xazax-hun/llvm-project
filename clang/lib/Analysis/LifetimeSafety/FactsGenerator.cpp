@@ -1174,18 +1174,25 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
     //    borrow -- this is what makes 'std::string s = "abc"' (the
     //    'basic_string(const char *)' constructor) clean: the characters are
     //    copied, the pointer does not escape.
+    //  * std::string concatenation operators ('s += x', 'a + b') deep-copy their
+    //    operands' characters; a string reference or a character pointer operand
+    //    does not escape. Unlike the others this also applies to the free
+    //    'operator+', which is not a method.
     //
     // It never applies to arbitrary user constructors, which may capture.
-    if (Method) {
+    {
       QualType ParamTy = PVD->getType();
-      bool IsContainerCtor = isa<CXXConstructorDecl>(Method) &&
+      bool IsContainerCtor = Method && isa<CXXConstructorDecl>(Method) &&
                              isStlContainerType(Method->getParent());
+      bool IsCopyInByRef =
+          (Method && isStlContainerInsertionMethod(*Method)) ||
+          IsContainerCtor || isStlStringConcatenationOperator(*FD);
+      bool IsCopyInByPtr = IsContainerCtor || isStlStringConcatenationOperator(*FD);
       if (ParamTy->isReferenceType() &&
-          !hasOrigins(ParamTy.getNonReferenceType()) &&
-          (isStlContainerInsertionMethod(*Method) || IsContainerCtor))
+          !hasOrigins(ParamTy.getNonReferenceType()) && IsCopyInByRef)
         continue;
-      if (IsContainerCtor && ParamTy->isPointerType() &&
-          !hasOrigins(ParamTy->getPointeeType()))
+      if (ParamTy->isPointerType() && !hasOrigins(ParamTy->getPointeeType()) &&
+          IsCopyInByPtr)
         continue;
     }
     // Skip arguments the analysis already models through GSL recognition.
