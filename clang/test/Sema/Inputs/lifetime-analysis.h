@@ -190,6 +190,7 @@ struct basic_string_view {
   basic_string_view();
   basic_string_view(const T *);
   const T *begin() const;
+  const T *end() const;
   const T *data() const;
   int size() const;
 };
@@ -202,6 +203,8 @@ template<typename T>
 struct span {
   span();
   span(const vector<T>&);
+  const T *begin() const;
+  const T *end() const;
 };
 
 template<class _Mystr> struct iter {

@@ -14,6 +14,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/Checker.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/StmtCXX.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LiveOrigins.h"
@@ -41,6 +42,20 @@ static bool causingFactDominatesExpiry(LivenessKind K) {
 }
 
 namespace {
+
+/// Collects the compiler-introduced range variables ('auto&& __range = ...') of
+/// every range-based for statement reachable from \p S.
+static void collectRangeForRangeVars(const Stmt *S,
+                                     llvm::DenseSet<const VarDecl *> &Out) {
+  if (!S)
+    return;
+  if (const auto *FRS = dyn_cast<CXXForRangeStmt>(S))
+    if (const DeclStmt *DS = FRS->getRangeStmt())
+      if (const auto *VD = dyn_cast_or_null<VarDecl>(DS->getSingleDecl()))
+        Out.insert(VD);
+  for (const Stmt *Child : S->children())
+    collectRangeForRangeVars(Child, Out);
+}
 
 /// Struct to store the complete context for a potential lifetime violation.
 struct PendingWarning {
@@ -549,10 +564,27 @@ public:
     if (!SemaHelper)
       return;
     OriginManager &OM = FactMgr.getOriginMgr();
+    // Compiler-introduced range-for range variables ('auto&& __range = ...')
+    // are references that merely alias the range expression. The reference does
+    // not add a real level of indirection, so it must not count toward the
+    // one-level limit -- otherwise iterating a view (e.g. 'for (x : span)')
+    // would be rejected as multi-level even though the view itself is a single
+    // level. A genuinely untrackable range is still caught elsewhere (a
+    // dangling view via use-after-scope / lost-loan on its borrow).
+    llvm::DenseSet<const VarDecl *> RangeVars;
+    if (const Stmt *Body = FD ? FD->getBody() : nullptr)
+      collectRangeForRangeVars(Body, RangeVars);
     llvm::DenseSet<const ValueDecl *> Seen;
     llvm::SmallVector<const ValueDecl *> MultiLevel;
     auto Consider = [&](const ValueDecl *VD, OriginList *L) {
-      if (L && L->getLength() > 1 && Seen.insert(VD).second)
+      if (!L)
+        return;
+      unsigned Depth = L->getLength();
+      if (const auto *VarD = dyn_cast<VarDecl>(VD);
+          VarD && RangeVars.contains(VarD) &&
+          VarD->getType()->isReferenceType() && Depth > 0)
+        --Depth; // peel the alias reference of the range variable
+      if (Depth > 1 && Seen.insert(VD).second)
         MultiLevel.push_back(VD);
     };
     // Parameters (including ones never used in the body).
