@@ -156,15 +156,18 @@ out**.
   struct is kept in a file-local static so it never appears as a member inside a
   safe-model region.
 * **`render.cpp::present()`** -- the single `fwrite`/`fflush` to stdout.
-* **`main.cpp`** -- `main(int argc, char **argv)` is entirely outside the model:
-  `char **argv` is, by definition, multi-level indirection (the C runtime
-  boundary), and arg parsing uses `<cstdlib>`/`<cstdio>`. main parses argv into
-  value types and hands off to the in-model runners. `nowNanos()` (a `<chrono>`
-  wrapper) and the result-printing `printf`s also live here.
+* **`main.cpp`** -- the file is fully in the model, including `main(int argc,
+  char **argv)`: the `char **argv` signature is exempt from the
+  single-indirection rule (language-mandated), so argv is iterated in-model. The
+  only opt-outs are un-annotated C library calls (`chrono`, `printf`/`fprintf`,
+  `strcmp`, `atoi`), each wrapped behind a small annotated shim (`argIs`,
+  `parseInt`, `printUsage`, `printBenchResult`, ...) whose body carries the
+  localized `ignored` pragma. main's arg parsing, dispatch, and bench arithmetic
+  are all checked.
 
 That is the complete list. Everything else -- physics, collision, the grid, the
-pool, splitting, scoring, the framebuffer rasterizer, the HUD -- is inside the
-soundness-error model.
+pool, splitting, scoring, the framebuffer rasterizer, the HUD, and now argument
+handling -- is inside the soundness-error model.
 
 ## Ergonomic friction (true positives / library-annotation gaps)
 
@@ -301,7 +304,11 @@ confirmed both the fixes and that nothing had been silently relying on a hole:
   **fixed**, `Grid::cell()` returns a view bound to `this`;
 * and a hole *closed*: `lifetimebound` validations entered the soundness group
   and correctly rejected returning a borrow through a raw `T*` member, which
-  pushed `SlotMap` onto `std::vector` backing (and simplified it).
+  pushed `SlotMap` onto `std::vector` backing (and simplified it);
+* `main(int argc, char **argv)` -- **exempted**: `char **argv` no longer trips
+  the single-indirection rule, so the whole of `main.cpp` (arg parsing included)
+  now compiles in-model, with only the un-annotated C library calls behind
+  annotated shims.
 
 **Remaining friction is at the standard-library boundary.** The main one left is
 iterator-pair STL APIs (`assign(first,last)`, the `<algorithm>` `(first,last)`

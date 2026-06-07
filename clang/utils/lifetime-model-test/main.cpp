@@ -1,11 +1,13 @@
 // main.cpp - entry point, argument parsing, and the two run modes.
 //
-// `main` itself is intentionally OUTSIDE the safe-model region: its `char**
-// argv` is, by definition, multi-level indirection (the C runtime boundary),
-// and argument parsing talks to <cstdlib>/<cstdio>. main parses argv into plain
-// value types and hands off to the in-model runners below. This is the one
-// structurally unavoidable opt-out -- everything reachable from runGame /
-// runBench is fully inside the model.
+// The entire file is inside the safe programming model. `main(int argc, char
+// **argv)` is too: the `char **argv` signature is exempt from the
+// single-indirection rule (it is language-mandated), so argv can be iterated
+// directly in-model. The only opt-outs are a handful of un-annotated C library
+// calls (chrono, printf/fprintf, strcmp, atoi), each wrapped behind a small
+// annotated shim whose body carries a localized
+// `#pragma clang diagnostic ignored`. main's own logic -- arg parsing, dispatch,
+// the bench arithmetic -- is fully checked.
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +18,9 @@
 #include "terminal.h"
 #include "world.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+
 namespace ast {
 
 struct BenchResult {
@@ -24,26 +29,16 @@ struct BenchResult {
   double seconds = 0.0;
 };
 
-// Monotonic clock in nanoseconds. Defined outside the model region (chrono's
-// duration arithmetic is library glue we don't want to annotate); the in-model
-// bench loop just consumes the int64 it returns.
+// Monotonic clock in nanoseconds. <chrono>'s duration arithmetic passes
+// durations through un-annotated reference parameters, so the call is opted out;
+// callers just consume the returned int64.
 std::int64_t nowNanos() {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
   auto now = std::chrono::steady_clock::now().time_since_epoch();
   return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+#pragma clang diagnostic pop
 }
-
-BenchResult runBench(std::int32_t frames, std::int32_t targetAsteroids);
-void runInteractive();
-
-} // namespace ast
-
-// ---------------------------------------------------------------------------
-// In-model runners.
-// ---------------------------------------------------------------------------
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
-
-namespace ast {
 
 // Headless throughput benchmark: keep ~targetAsteroids alive, fly the ship
 // around (no firing, so the population is stable), and measure how fast the
@@ -104,19 +99,65 @@ void runInteractive() {
 
 } // namespace ast
 
-#pragma clang diagnostic pop
-
 // ---------------------------------------------------------------------------
-// Entry point (outside the model: argv is char**).
+// Library shims: each exposes an annotated, in-model signature and confines the
+// un-annotated C-library call to a localized opt-out. argv strings reach them as
+// `[[clang::noescape]] const char*`, so call sites stay in the model.
 // ---------------------------------------------------------------------------
 namespace {
-void printUsage() {
-  std::printf("ASCII Asteroids - lifetime safe-model test\n"
-              "  (no args)            play interactively (WASD/arrows + space, q to quit)\n"
-              "  --bench N            headless: simulate N frames, report throughput\n"
-              "  --asteroids M        target asteroid population for --bench (default 300)\n"
-              "  --help               this message\n");
+
+bool argIs(const char *arg [[clang::noescape]],
+           const char *want [[clang::noescape]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  return std::strcmp(arg, want) == 0;
+#pragma clang diagnostic pop
 }
+
+std::int32_t parseInt(const char *s [[clang::noescape]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  return std::atoi(s);
+#pragma clang diagnostic pop
+}
+
+void printUsage() {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  std::printf(
+      "ASCII Asteroids - lifetime safe-model test\n"
+      "  (no args)            play interactively (WASD/arrows + space, q to quit)\n"
+      "  --bench N            headless: simulate N frames, report throughput\n"
+      "  --asteroids M        target asteroid population for --bench (default 300)\n"
+      "  --help               this message\n");
+#pragma clang diagnostic pop
+}
+
+void printUnknownArg(const char *arg [[clang::noescape]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  std::fprintf(stderr, "unknown argument: %s\n", arg);
+#pragma clang diagnostic pop
+}
+
+// Derived stats are computed in-model; only the printf calls are opted out.
+void printBenchResult(ast::BenchResult r, std::int32_t asteroids) {
+  const double fps = r.seconds > 0.0 ? r.frames / r.seconds : 0.0;
+  const double msPerFrame = r.frames > 0 ? r.seconds * 1000.0 / r.frames : 0.0;
+  const double astPerSec =
+      r.seconds > 0.0 ? static_cast<double>(r.asteroidSteps) / r.seconds : 0.0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+  std::printf("frames           : %lld\n", static_cast<long long>(r.frames));
+  std::printf("target asteroids : %d\n", asteroids);
+  std::printf("wall time        : %.3f s\n", r.seconds);
+  std::printf("frames / second  : %.1f\n", fps);
+  std::printf("ms / frame       : %.4f\n", msPerFrame);
+  std::printf("asteroid-updates : %lld (%.2f M/s)\n",
+              static_cast<long long>(r.asteroidSteps), astPerSec * 1e-6);
+#pragma clang diagnostic pop
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -124,16 +165,16 @@ int main(int argc, char **argv) {
   std::int32_t asteroids = 300;
 
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--bench") == 0) {
-      benchFrames = (i + 1 < argc) ? std::atoi(argv[++i]) : 2000;
-    } else if (std::strcmp(argv[i], "--asteroids") == 0) {
+    if (argIs(argv[i], "--bench")) {
+      benchFrames = (i + 1 < argc) ? parseInt(argv[++i]) : 2000;
+    } else if (argIs(argv[i], "--asteroids")) {
       if (i + 1 < argc)
-        asteroids = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--help") == 0) {
+        asteroids = parseInt(argv[++i]);
+    } else if (argIs(argv[i], "--help")) {
       printUsage();
       return 0;
     } else {
-      std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
+      printUnknownArg(argv[i]);
       printUsage();
       return 2;
     }
@@ -147,21 +188,12 @@ int main(int argc, char **argv) {
     asteroids = static_cast<std::int32_t>(ast::World::kMaxAsteroids);
 
   if (benchFrames > 0) {
-    const ast::BenchResult r = ast::runBench(benchFrames, asteroids);
-    const double fps = r.seconds > 0.0 ? r.frames / r.seconds : 0.0;
-    const double msPerFrame = r.frames > 0 ? r.seconds * 1000.0 / r.frames : 0.0;
-    const double astPerSec =
-        r.seconds > 0.0 ? static_cast<double>(r.asteroidSteps) / r.seconds : 0.0;
-    std::printf("frames           : %lld\n", static_cast<long long>(r.frames));
-    std::printf("target asteroids : %d\n", asteroids);
-    std::printf("wall time        : %.3f s\n", r.seconds);
-    std::printf("frames / second  : %.1f\n", fps);
-    std::printf("ms / frame       : %.4f\n", msPerFrame);
-    std::printf("asteroid-updates : %lld (%.2f M/s)\n",
-                static_cast<long long>(r.asteroidSteps), astPerSec * 1e-6);
+    printBenchResult(ast::runBench(benchFrames, asteroids), asteroids);
     return 0;
   }
 
   ast::runInteractive();
   return 0;
 }
+
+#pragma clang diagnostic pop

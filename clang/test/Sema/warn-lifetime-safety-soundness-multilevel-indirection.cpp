@@ -31,3 +31,15 @@ void locals() {
   (void)pp;
   (void)vp;
 }
+
+// main's 'argv'/'envp' are 'char**' (a character pointer-chain) by language
+// mandate, so they are exempt from the single-indirection rule -- using them
+// (e.g. 'argv[0][0]') is fine too. The same type in any other function is still
+// flagged.
+int main(int argc, char **argv, char **envp) { // no-warning
+  return argc + argv[0][0] + envp[0][0];
+}
+
+void not_main(char **argv) { // expected-warning {{parameter 'argv' uses more than one level of indirection}}
+  (void)argv;
+}

@@ -43,6 +43,19 @@ static bool causingFactDominatesExpiry(LivenessKind K) {
 
 namespace {
 
+/// Returns true if peeling all pointer (and array) levels of \p T yields a
+/// character type -- i.e. T is `char**`, `char*[]`, etc. Used to exempt main's
+/// `argv`/`envp` parameters, whose multi-level type is mandated by the
+/// language.
+static bool isCharacterPointerChain(QualType T, const ASTContext &Ctx) {
+  T = Ctx.getBaseElementType(T);
+  if (!T->isPointerType())
+    return false;
+  while (T->isPointerType())
+    T = T->getPointeeType();
+  return T->isAnyCharacterType();
+}
+
 /// Collects the compiler-introduced range variables ('auto&& __range = ...') of
 /// every range-based for statement reachable from \p S.
 static void collectRangeForRangeVars(const Stmt *S,
@@ -579,6 +592,14 @@ public:
     auto Consider = [&](const ValueDecl *VD, OriginList *L) {
       if (!L)
         return;
+      // main's 'argv'/'envp' are 'char**' (a character pointer-chain) by
+      // language mandate; exempt them from the single-indirection rule.
+      // (Checked here so it applies whether the parameter is reached as a
+      // parameter or via the tracked-decl map below.)
+      if (const auto *P = dyn_cast<ParmVarDecl>(VD))
+        if (const auto *Fn = dyn_cast<FunctionDecl>(P->getDeclContext());
+            Fn && Fn->isMain() && isCharacterPointerChain(P->getType(), AST))
+          return;
       unsigned Depth = L->getLength();
       if (const auto *VarD = dyn_cast<VarDecl>(VD);
           VarD && RangeVars.contains(VarD) &&
