@@ -173,6 +173,8 @@ private:
   /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
   /// duplicate warnings when several live origins hold the same borrow.
   llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
+  /// Field-store expressions already reported as self-referential.
+  llvm::DenseSet<const Expr *> ReportedSelfRefStores;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
   /// after the precise warnings are finalized.
   llvm::SmallVector<std::pair<LoanID, const Expr *>> PendingAssumedInval;
@@ -225,6 +227,8 @@ public:
           checkLostLoan(UF);
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
+        else if (const auto *FSF = F->getAs<FieldStoreFact>())
+          checkSelfReferentialStore(FSF);
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
@@ -586,6 +590,46 @@ public:
     case UntrackedConstructReason::ViewOnMutableGlobal:
       SemaHelper->reportViewOnMutableGlobal(E);
       break;
+    }
+  }
+
+  /// Soundness check: a self-referential object. A view/pointer member is bound
+  /// to a borrow of a MEMBER of the same object (e.g. `this->view = this->str;`,
+  /// possibly laundered through a lifetimebound call). Mutating or moving the
+  /// object invalidates the view, which the analysis cannot track once the
+  /// object is passed elsewhere.
+  ///
+  /// The stored value must (a) borrow the very object that holds the member --
+  /// it shares that object's identity loan, which pins it to the same instance
+  /// -- AND (b) borrow one of that object's members (a field-rooted loan).
+  /// Requiring (b) avoids flagging a lifetimebound-`this` accessor whose result
+  /// borrows the object's identity but not a member (it carries only the object
+  /// loan, no field loan).
+  void checkSelfReferentialStore(const FieldStoreFact *FSF) {
+    if (!SemaHelper)
+      return;
+    LoanSet Stored = LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF);
+    if (Stored.isEmpty())
+      return;
+    LoanSet Container = LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF);
+    for (LoanID CL : Container) {
+      const AccessPath &CAP = FactMgr.getLoanMgr().getLoan(CL)->getAccessPath();
+      const CXXRecordDecl *RD = invalidatedObjectRecord(CAP);
+      if (!RD)
+        continue;
+      bool SharesObject = false, BorrowsMember = false;
+      for (LoanID SL : Stored) {
+        const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
+        if (L->getAccessPath() == CAP)
+          SharesObject = true; // same instance
+        if (isFieldBorrowOf(L, RD))
+          BorrowsMember = true; // borrows a member of it
+      }
+      if (SharesObject && BorrowsMember &&
+          ReportedSelfRefStores.insert(FSF->getStoreExpr()).second) {
+        SemaHelper->reportSelfReferentialBorrow(FSF->getStoreExpr());
+        return;
+      }
     }
   }
 

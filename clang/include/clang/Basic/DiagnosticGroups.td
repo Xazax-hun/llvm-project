@@ -815,6 +815,19 @@ the safe programming model.
   }];
 }
 
+def LifetimeSafetySelfReferential
+    : DiagGroup<"lifetime-safety-self-referential"> {
+  code Documentation = [{
+Warns when a view/pointer data member is bound to a sibling member of the same
+object (e.g. a std::string_view member pointing into a std::string member of the
+same struct). The object becomes self-referential: mutating or moving it
+invalidates the view, and the view-to-member relationship is invisible once the
+object is passed to another function (and, for an annotated owner/pointer type,
+the members are opaque). The construct is rejected under the safe programming
+model.
+  }];
+}
+
 def LifetimeSafetyGlobalCapture
     : DiagGroup<"lifetime-safety-global-capture"> {
   code Documentation = [{
@@ -851,6 +864,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,
                                          LifetimeSafetyConstSubversion,
+                                         LifetimeSafetySelfReferential,
                                          LifetimeSafetyGlobalCapture,
                                          // An annotation that cannot be verified
                                          // (a [[noescape]] parameter that

@@ -60,6 +60,10 @@ public:
     /// A construct the analysis cannot fully model. Drives the "safe
     /// programming model" soundness warnings and carries no dataflow state.
     UntrackedConstruct,
+    /// A borrow stored into a view/pointer data member. Used by the checker to
+    /// detect self-referential objects (the stored value borrows the same
+    /// object that holds the member). Carries no dataflow state.
+    FieldStore,
   };
 
 private:
@@ -433,6 +437,37 @@ public:
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &) const override;
+};
+
+/// A borrow stored into a view/pointer data member `obj.field = ...`. Records
+/// the stored value's origin and the origin of the destination's enclosing
+/// object, so the checker can flag a self-referential object: one where the
+/// stored value borrows the same object that holds the member (they share an
+/// object-identity loan). Carries no dataflow state.
+class FieldStoreFact : public Fact {
+  /// The destination member expression (`obj.field`), for diagnostics.
+  const Expr *StoreExpr;
+  /// The origin whose loans are the value being stored into the member.
+  OriginID StoredOrigin;
+  /// The origin of the member's enclosing object (`obj` / `this`).
+  OriginID ContainerOrigin;
+
+public:
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::FieldStore;
+  }
+
+  FieldStoreFact(const Expr *StoreExpr, OriginID StoredOrigin,
+                 OriginID ContainerOrigin)
+      : Fact(Kind::FieldStore), StoreExpr(StoreExpr), StoredOrigin(StoredOrigin),
+        ContainerOrigin(ContainerOrigin) {}
+
+  const Expr *getStoreExpr() const { return StoreExpr; }
+  OriginID getStoredOrigin() const { return StoredOrigin; }
+  OriginID getContainerOrigin() const { return ContainerOrigin; }
+
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &OM) const override;
 };
 
 class FactManager {

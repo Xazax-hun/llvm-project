@@ -254,6 +254,12 @@ public:
   // mutated elsewhere -- invalidating the view -- which the intra-procedural
   // analysis cannot track.
   virtual void reportViewOnMutableGlobal(const Expr *E) {}
+
+  // Reports a self-referential borrow: a view/pointer member bound to a sibling
+  // member of the same object (e.g. 'this->view = this->str;'). Mutating or
+  // moving the object invalidates the view, which the intra-procedural analysis
+  // cannot track across calls.
+  virtual void reportSelfReferentialBorrow(const Expr *E) {}
 };
 
 /// The main entry point for the analysis.

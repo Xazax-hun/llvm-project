@@ -147,6 +147,15 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   OS << ")\n";
 }
 
+void FieldStoreFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                          const OriginManager &OM) const {
+  OS << "FieldStore (Stored: ";
+  OM.dump(getStoredOrigin(), OS);
+  OS << ", Container: ";
+  OM.dump(getContainerOrigin(), OS);
+  OS << ")\n";
+}
+
 llvm::StringMap<ProgramPoint> FactManager::getTestPoints() const {
   llvm::StringMap<ProgramPoint> AnnotationToPointMap;
   for (const auto &BlockFacts : BlockToFacts) {

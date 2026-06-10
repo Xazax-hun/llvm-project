@@ -551,6 +551,7 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
                                       const Expr *LHSExpr,
                                       const Expr *RHSExpr) {
   LHSExpr = LHSExpr->IgnoreParenImpCasts();
+
   OriginNode *LHSNode = nullptr;
   QualType LHSType;
   UseFact *LHSUseFact = nullptr;
@@ -626,6 +627,30 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // of killing (see above).
   flow(LHSNode->getPointeeChild(), RHSNode, /*Kill=*/!MergeIntoSharedElement);
   killAndFlowOrigin(*TargetExpr, *LHSExpr);
+
+  // Soundness: record a store into a view/pointer member so the checker can
+  // detect a self-referential object -- one where the stored value borrows the
+  // same object that holds the member (e.g. `this->view = this->str;`). The
+  // detection is loan-based (the checker intersects the stored value's loans
+  // with the enclosing object's), so it sees borrows laundered through function
+  // calls and is independent of the assignment's syntactic shape.
+  if (const auto *ME_LHS = dyn_cast<MemberExpr>(LHSExpr))
+    if (const auto *LF = dyn_cast<FieldDecl>(ME_LHS->getMemberDecl());
+        LF && (isGslPointerType(LF->getType()) ||
+               LF->getType()->isPointerOrReferenceType())) {
+      // Use the static type of the *receiver object* as the enclosing object,
+      // not the type that declares the member. When the member lives in a base
+      // class, `ME_LHS->getBase()` is the receiver implicitly cast to that base
+      // (`(Base*)this`); stripping the implicit derived-to-base cast recovers
+      // the most-derived receiver (`this` of type `Derived*`), so a view in a
+      // base subobject bound to a member of the derived class is recognized as
+      // self-referential too -- the membership walk then sees the derived
+      // class's fields.
+      const Expr *Base = ME_LHS->getBase()->IgnoreImpCasts();
+      if (OriginNode *Container = getOriginNode(*Base))
+        CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
+            ME_LHS, RHSNode->getOriginID(), Container->getOriginID()));
+    }
 }
 
 void FactsGenerator::handlePointerArithmetic(const BinaryOperator *BO) {
@@ -1281,6 +1306,19 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
           Dest->getOriginID(), CapturedOriginNode->getOriginID(),
           /*KillDest=*/false));
+
+      // Soundness: capturing the argument into the receiver object (`this`) is a
+      // store into that object. If the argument borrows a member of the
+      // receiver, the object becomes self-referential -- the same hazard as
+      // `this->view = this->member;`. Emit a FieldStore so the checker's
+      // (loan-based) self-referential detection sees it, using the most-derived
+      // receiver (strip the implicit derived-to-base cast on the implicit object
+      // argument) so a capture into a base-subobject view is keyed on the
+      // derived class's fields too.
+      if (CapturingArgIdx == LifetimeCaptureByAttr::This)
+        if (OriginNode *Recv = getOriginNode(*Args[0]->IgnoreImpCasts()))
+          CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
+              Args[I], CapturedOriginNode->getOriginID(), Recv->getOriginID()));
     }
   }
 }

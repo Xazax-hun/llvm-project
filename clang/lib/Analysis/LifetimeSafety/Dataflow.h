@@ -184,6 +184,8 @@ private:
       return D->transfer(In, *F->getAs<KillOriginFact>());
     case Fact::Kind::UntrackedConstruct:
       return D->transfer(In, *F->getAs<UntrackedConstructFact>());
+    case Fact::Kind::FieldStore:
+      return D->transfer(In, *F->getAs<FieldStoreFact>());
     }
     llvm_unreachable("Unknown fact kind");
   }
@@ -199,6 +201,7 @@ public:
   Lattice transfer(Lattice In, const InvalidateOriginFact &) { return In; }
   Lattice transfer(Lattice In, const KillOriginFact &) { return In; }
   Lattice transfer(Lattice In, const UntrackedConstructFact &) { return In; }
+  Lattice transfer(Lattice In, const FieldStoreFact &) { return In; }
 };
 } // namespace clang::lifetimes::internal
 #endif // LLVM_CLANG_ANALYSIS_ANALYSES_LIFETIMESAFETY_DATAFLOW_H

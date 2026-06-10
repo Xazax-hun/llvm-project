@@ -11204,6 +11204,12 @@ def warn_lifetime_safety_view_on_mutable_global
               "lifetime safety cannot track">,
       InGroup<LifetimeSafetyViewOnMutableGlobal>,
       DefaultIgnore;
+def warn_lifetime_safety_self_referential
+    : Warning<"%0 member is bound to a sibling member of the same object, making "
+              "the object self-referential; mutating or moving the object can "
+              "invalidate this view, which lifetime safety cannot track">,
+      InGroup<LifetimeSafetySelfReferential>,
+      DefaultIgnore;
 def warn_lifetime_safety_mutable_field
     : Warning<"'mutable' field %0 can be modified by a const member function; "
               "lifetime safety assumes const member functions do not invalidate "
