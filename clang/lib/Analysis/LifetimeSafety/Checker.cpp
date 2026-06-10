@@ -389,37 +389,90 @@ public:
     LoanSet DirectlyInvalidatedLoans =
         LoanPropagation.getLoans(InvalidatedOrigin, IOF);
     const FieldDecl *MutatedField = IOF->getMutatedField();
-    auto IsInvalidated = [&](const Loan *L) {
-      // A field mutation (`s.buf.append(...)`) invalidates only borrows of that
-      // specific field -- not the enclosing object (whose loan the receiver
-      // origin also carries) nor its sibling fields.
+    auto LoanAP = [&](LoanID L) -> const AccessPath & {
+      return FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
+    };
+    // Exact match: the loan directly borrows the invalidated storage. For a
+    // field mutation (`s.buf.append(...)`) this is the specific field; for a
+    // container mutation it is the receiver's loans.
+    auto IsExactInvalidated = [&](LoanID L) {
       if (MutatedField)
-        return L->getAccessPath().getAsValueDecl() == MutatedField;
-      for (LoanID InvalidID : DirectlyInvalidatedLoans) {
-        const Loan *InvalidL = FactMgr.getLoanMgr().getLoan(InvalidID);
-        if (InvalidL->getAccessPath() == L->getAccessPath())
+        return LoanAP(L).getAsValueDecl() == MutatedField;
+      for (LoanID InvalidID : DirectlyInvalidatedLoans)
+        if (LoanAP(InvalidID) == LoanAP(L))
           return true;
-      }
       return false;
+    };
+    // True if origin `OID` is a borrow *into* an object of record `ObjRD` (a
+    // view, or a raw pointer/reference whose pointee is some sub-buffer), as
+    // opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
+    // which a field mutation does not dangle).
+    auto OriginBorrowsInto = [&](OriginID OID, const CXXRecordDecl *ObjRD) {
+      const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+      if (!Ty)
+        return false;
+      QualType QT(Ty, 0);
+      if (isGslPointerType(QT))
+        return true; // a view (string_view/span/iterator)
+      if (!QT->isPointerType() && !QT->isReferenceType())
+        return false;
+      const CXXRecordDecl *PointeeRD =
+          QT->getPointeeType()->getAsCXXRecordDecl();
+      return !PointeeRD ||
+             PointeeRD->getCanonicalDecl() != ObjRD->getCanonicalDecl();
     };
     // For each live origin, check if it holds an invalidated loan and report.
     LivenessMap Origins = LiveOrigins.getLiveOriginsAt(IOF);
     for (auto &[OID, LiveInfo] : Origins) {
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
-      for (LoanID LiveLoanID : HeldLoans)
-        if (IsInvalidated(FactMgr.getLoanMgr().getLoan(LiveLoanID))) {
-          bool CurDomination = causingFactDominatesExpiry(LiveInfo.Kind);
-          bool LastDomination =
-              FinalWarningsMap.lookup(LiveLoanID).CausingFactDominatesExpiry;
-          if (!LastDomination) {
-            FinalWarningsMap[LiveLoanID] = {
-                /*ExpiryLoc=*/{},
-                /*CausingFact=*/LiveInfo.CausingFact,
-                /*MovedExpr=*/nullptr,
-                /*InvalidatedByExpr=*/IOF->getInvalidationExpr(),
-                /*CausingFactDominatesExpiry=*/CurDomination};
-          }
+      llvm::SmallVector<LoanID, 2> Invalidated;
+      for (LoanID L : HeldLoans)
+        if (IsExactInvalidated(L))
+          Invalidated.push_back(L);
+
+      // Conservative case for a field mutation: an *imprecise* borrow into the
+      // object is also invalidated. Such a borrow (a view, or a raw
+      // pointer/reference into the object) holds the enclosing object's loan
+      // but no precise field loan -- e.g. one produced by a lifetimebound
+      // accessor (`v = doc.getView()`, `p = doc.data()`), where we do not know
+      // which subobject it borrows, so any owner-field mutation of the object
+      // may invalidate it. A borrow that directly named a field carries that
+      // field's loan and is matched exactly above (so a sibling-field mutation
+      // does not reach it); a pointer *at* the whole object is excluded.
+      if (MutatedField && Invalidated.empty()) {
+        bool HoldsFieldLoan = false;
+        LoanID ObjectLoan;
+        const CXXRecordDecl *ObjRD = nullptr;
+        for (LoanID L : HeldLoans) {
+          const AccessPath &AP = LoanAP(L);
+          if (const ValueDecl *VD = AP.getAsValueDecl(); VD && isa<FieldDecl>(VD))
+            HoldsFieldLoan = true;
+          if (!ObjRD)
+            if (const CXXRecordDecl *RD = invalidatedObjectRecord(AP)) {
+              llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+              if (recordReachesField(RD, MutatedField, Visited)) {
+                ObjectLoan = L;
+                ObjRD = RD;
+              }
+            }
         }
+        if (ObjRD && !HoldsFieldLoan && OriginBorrowsInto(OID, ObjRD))
+          Invalidated.push_back(ObjectLoan);
+      }
+
+      for (LoanID LiveLoanID : Invalidated) {
+        bool CurDomination = causingFactDominatesExpiry(LiveInfo.Kind);
+        bool LastDomination =
+            FinalWarningsMap.lookup(LiveLoanID).CausingFactDominatesExpiry;
+        if (!LastDomination) {
+          FinalWarningsMap[LiveLoanID] = {
+              /*ExpiryLoc=*/{},
+              /*CausingFact=*/LiveInfo.CausingFact,
+              /*MovedExpr=*/nullptr,
+              /*InvalidatedByExpr=*/IOF->getInvalidationExpr(),
+              /*CausingFactDominatesExpiry=*/CurDomination};
+        }
+      }
     }
   }
 
