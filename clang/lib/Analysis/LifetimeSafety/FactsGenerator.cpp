@@ -685,11 +685,31 @@ void FactsGenerator::VisitCXXFunctionalCastExpr(
 void FactsGenerator::VisitInitListExpr(const InitListExpr *ILE) {
   if (!hasOrigins(ILE))
     return;
+  // Aggregate initialization of an array of pointer-like elements
+  // (`int* arr[] = {&x, &y}`). All elements share the array's single
+  // element-origin (indices are not disambiguated), so merge every element
+  // initializer's loans into the list origin. A borrow stored into any element
+  // is then visible through every element access.
+  if (ILE->getType()->isArrayType()) {
+    OriginNode *ListNode = getOriginNode(*ILE);
+    if (!ListNode)
+      return;
+    bool First = true;
+    for (const Expr *Init : ILE->inits()) {
+      OriginNode *InitNode = getRValueOrigins(Init, getOriginNode(*Init));
+      if (!InitNode)
+        continue;
+      // Kill on the first element to establish the set, merge the rest.
+      flow(ListNode, InitNode, /*Kill=*/First);
+      First = false;
+    }
+    return;
+  }
   // For list initialization with a single element of the same type, like
   // `View{other}`, the origin of the list itself is the origin of its single
   // element.
   //
-  // TODO: Handle aggregate (record/array) list initialization.
+  // TODO: Handle aggregate (record) list initialization.
   if (ILE->getNumInits() == 1 &&
       ILE->getType().getCanonicalType() ==
           ILE->getInit(0)->getType().getCanonicalType())

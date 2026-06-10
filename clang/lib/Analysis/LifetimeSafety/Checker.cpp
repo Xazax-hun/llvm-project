@@ -459,6 +459,14 @@ public:
     const OriginNode *OL = UF->getUsedOrigins();
     if (!OL)
       return;
+    // An unknown-ownership user type (e.g. `struct Holder { int *p; };`) is
+    // opaque: it is already reported via UnknownOwnership, and its value
+    // legitimately carries no tracked loan. Reporting a "lost loan" on it would
+    // be a spurious second diagnostic for the same modeling gap.
+    if (const Type *Ty = FactMgr.getOriginMgr().getOrigin(OL->getOriginID()).Ty;
+        Ty && isUnknownOwnershipType(QualType(Ty, 0),
+                                     FactMgr.getUnknownOwnershipCache()))
+      return;
     if (!LoanPropagation.getLoans(OL->getOriginID(), UF).isEmpty())
       return;
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)

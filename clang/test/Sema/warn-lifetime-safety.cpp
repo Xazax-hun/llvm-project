@@ -2892,14 +2892,18 @@ void new_array_braces() {
   (void)p[0];            // expected-note {{later used here}}
 }
 
-// FIXME: https://github.com/llvm/llvm-project/issues/187471
+// A heap array of pointers initialized with addresses of locals: the elements
+// dangle once the locals expire, even though the array storage outlives them.
+// All elements share the array's single element-origin, so each borrow is
+// reported.
 void new_pointer_array_from_dead_objects() {
   MyObj **arr;
   {
     MyObj a, b;
-    arr = new MyObj *[2]{&a, &b};
-  }
-  (void)arr[0]->id;
+    arr = new MyObj *[2]{&a, &b}; // expected-warning {{local variable 'a' does not live long enough}} \
+                                  // expected-warning {{local variable 'b' does not live long enough}}
+  }                               // expected-note 2 {{destroyed here}}
+  (void)arr[0]->id;               // expected-note 2 {{later used here}}
   (void)arr[1]->id;
 }
 
@@ -2907,14 +2911,14 @@ struct PointerArrayFieldHolder {
   MyObj **Ptrs;
 };
 
-// FIXME: https://github.com/llvm/llvm-project/issues/187471
 void pointer_array_field_sensitivity() {
   PointerArrayFieldHolder h;
   {
     MyObj a, b;
-    h.Ptrs = new MyObj *[2]{&a, &b};
-  }
-  (void)h.Ptrs[0]->id;
+    h.Ptrs = new MyObj *[2]{&a, &b}; // expected-warning {{local variable 'a' does not live long enough}} \
+                                     // expected-warning {{local variable 'b' does not live long enough}}
+  }                                  // expected-note 2 {{destroyed here}}
+  (void)h.Ptrs[0]->id;               // expected-note 2 {{later used here}}
 }
 
 //===----------------------------------------------------------------------===//
