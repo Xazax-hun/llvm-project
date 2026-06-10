@@ -114,6 +114,56 @@ static const Loan *createLoan(FactManager &FactMgr, const CXXNewExpr *NE) {
   return FactMgr.getLoanMgr().createLoan(Path, NE);
 }
 
+/// Returns true if `QT` is a mutable [[gsl::Owner]] (peeling arrays): a borrow
+/// of such a field can be invalidated by reallocating it. A `const` owner can
+/// never be reallocated, so it is excluded.
+static bool isMutableOwnerType(QualType QT) {
+  QT = QT.getNonReferenceType();
+  while (QT->isArrayType())
+    QT = QT->getAsArrayTypeUnsafe()->getElementType();
+  return isGslOwnerType(QT) && !QT.isConstQualified();
+}
+
+/// Returns true if `RD` has a reachable mutable owner data member -- directly,
+/// transitively (a field whose own record contains one), or through a base
+/// class. A non-const member call on such an object may reallocate that owner,
+/// invalidating a view into it. `Visited` cuts cycles.
+static bool recordContainsMutableOwner(
+    const CXXRecordDecl *RD, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (!Visited.insert(RD->getCanonicalDecl()).second)
+    return false;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (recordContainsMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
+      return true;
+  for (const FieldDecl *FD : RD->fields()) {
+    if (isMutableOwnerType(FD->getType()))
+      return true;
+    // Recurse into a non-owner record field (e.g. an aggregate sub-object that
+    // itself holds an owner). Owners are leaves -- we never descend into them.
+    QualType FT = FD->getType().getNonReferenceType();
+    while (FT->isArrayType())
+      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    if (!isGslOwnerType(FT) &&
+        recordContainsMutableOwner(FT->getAsCXXRecordDecl(), Visited))
+      return true;
+  }
+  return false;
+}
+
+/// Used by the safe model to treat a non-const member call on an object as
+/// invalidating views into its (possibly transitive / inherited) owner fields.
+static bool recordHasGslOwnerField(QualType QT) {
+  QT = QT.getNonReferenceType();
+  // The implicit object argument of a member call is the `this` pointer
+  // (type `S*`); peel it to reach the record.
+  if (QT->isPointerType())
+    QT = QT->getPointeeType();
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+  return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Visited);
+}
+
 void FactsGenerator::run() {
   llvm::TimeTraceScope TimeProfile("FactGenerator");
   const CFG &Cfg = *AC.getCFG();
@@ -336,11 +386,30 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
   OriginNode *Src = getOriginNode(*ME->getBase());
   if (doesDeclHaveStorage(FD)) {
     assert(Src && "Base expression should be a pointer/reference type");
+
+    // Safe-model soundness: a borrow of an OWNER field (e.g. `this->buf` where
+    // `buf` is a std::string/std::vector) borrows the field's heap buffer.
+    // Issue a field-rooted loan -- mirroring the storage loan a *local* owner
+    // gets in VisitDeclRefExpr -- so a later mutation of the field, whether
+    // directly (`buf.append(...)`) or via a non-const method on the containing
+    // object, can invalidate views into it.
+    //
+    // The MemberExpr origin must end up holding BOTH this field loan and the
+    // base's loans (notably `$this`, which lifetimebound-`this` verification of
+    // borrow-returning accessors relies on). Since IssueFact *replaces* an
+    // origin's loan set, issue the field loan first (the MemberExpr origin is
+    // fresh) and then *merge* the base flow (Kill=false) rather than replacing.
+    bool OwnerField = isMutableOwnerType(FD->getType());
+    if (OwnerField) {
+      const Loan *L = FactMgr.getLoanMgr().createLoan(AccessPath(FD), ME);
+      CurrentBlockFacts.push_back(
+          FactMgr.createFact<IssueFact>(L->getID(), Dst->getOriginID()));
+    }
     // The field's glvalue (outermost origin) holds the same loans as the base
     // expression.
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         Dst->getOriginID(), Src->getOriginID(),
-        /*Kill=*/true));
+        /*Kill=*/!OwnerField));
   }
 
   // Only narrow when the field is in the base's tree; otherwise the
@@ -1007,16 +1076,27 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
   if (!isInvalidationMethod(*MD))
     return;
 
-  // Heuristics to turn-down false positives. Skip member field expressions for
-  // now. This is not a perfect filter and will still surface some false
-  // positives (e.g. `auto& r = s.v`).
-  if (!isa<DeclRefExpr>(Args[0]->IgnoreImpCasts()))
+  // Accept a direct variable receiver (`v.clear()`) or an owner-field receiver
+  // (`this->buf.append(...)` / `obj.buf.append(...)`). For an owner field the
+  // borrow carries a field-rooted loan (see VisitMemberExpr), so invalidating
+  // it is precise -- but scoped to that field via MutatedField, since the
+  // receiver origin also carries the enclosing object's loan. Other receivers
+  // (e.g. `s.v` where `v` is a view, or a temporary) are skipped to avoid
+  // false positives.
+  const Expr *Recv = Args[0]->IgnoreImpCasts();
+  const FieldDecl *MutatedField = nullptr;
+  if (const auto *ME = dyn_cast<MemberExpr>(Recv))
+    if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
+        FD && isMutableOwnerType(FD->getType()))
+      MutatedField = FD;
+  if (!isa<DeclRefExpr>(Recv) && !MutatedField)
     return;
 
   OriginNode *ThisNode = getOriginNode(*Args[0]);
   if (ThisNode)
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-        ThisNode->getOriginID(), Call));
+        ThisNode->getOriginID(), Call, /*Assumed=*/false,
+        /*Deallocation=*/false, MutatedField));
 }
 
 // Soundness: the analysis conservatively assumes that operations it cannot
@@ -1045,7 +1125,25 @@ void FactsGenerator::handleAssumedInvalidatingCall(
           L->getOriginID(), Call, /*Assumed=*/true));
   }
 
-  // (2) Passing an owner to a non-const pointer/reference parameter. The
+  // (1b) Non-const member call on an object that is not itself an owner but
+  // CONTAINS owner fields (e.g. a `struct S { std::string buf; ... };`). The
+  // call may reallocate one of those fields, invalidating views into it. Emit
+  // an assumed invalidation of the receiver; the checker treats invalidating an
+  // object as invalidating views into its owner fields (matched via the
+  // enclosing-object loan those views carry).
+  //
+  // Unlike case (1), this is NOT gated on whether the method returns a borrow
+  // of `this` (lifetimebound / GSL accessor): a method can both hand out a
+  // borrow into one field AND reallocate another, so returning-a-borrow says
+  // nothing about whether the call mutates. A const method cannot mutate and is
+  // excluded by `!isConst()`.
+  if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
+      !Args.empty() && !isGslOwnerType(Args[0]->getType()) &&
+      recordHasGslOwnerField(Args[0]->getType())) {
+    if (OriginNode *L = getOriginNode(*Args[0]))
+      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+          L->getOriginID(), Call, /*Assumed=*/true));
+  }
   // implicit object argument (I == 0 for instance methods) is intentionally
   // skipped here -- it is handled by case (1) above.
   for (unsigned I = 0; I < Args.size(); ++I) {

@@ -79,6 +79,57 @@ struct PendingWarning {
   bool CausingFactDominatesExpiry;
 };
 
+/// If `AP` names an object -- the implicit `this`, or a variable/parameter of
+/// record type -- returns that record; otherwise null. The safe model treats
+/// invalidating an object (e.g. a non-const member call) as also invalidating
+/// borrows into its (possibly transitive / inherited) owner fields.
+static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
+  if (const CXXMethodDecl *MD = AP.getAsPlaceholderThis())
+    return MD->getParent();
+  if (const ValueDecl *VD = AP.getAsValueDecl())
+    if (!isa<FieldDecl>(VD))
+      return VD->getType().getNonReferenceType()->getAsCXXRecordDecl();
+  return nullptr;
+}
+
+/// True if `Field` is reachable as a (possibly transitive / inherited) data
+/// member of `RD`. `Visited` cuts cycles.
+static bool recordReachesField(const CXXRecordDecl *RD, const FieldDecl *Field,
+                               llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (!Visited.insert(RD->getCanonicalDecl()).second)
+    return false;
+  if (Field->getParent()->getCanonicalDecl() == RD->getCanonicalDecl())
+    return true;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (recordReachesField(B.getType()->getAsCXXRecordDecl(), Field, Visited))
+      return true;
+  for (const FieldDecl *FD : RD->fields()) {
+    QualType FT = FD->getType().getNonReferenceType();
+    while (FT->isArrayType())
+      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    if (recordReachesField(FT->getAsCXXRecordDecl(), Field, Visited))
+      return true;
+  }
+  return false;
+}
+
+/// True if loan `L` is a field-rooted borrow whose field is a (possibly
+/// transitive / inherited) member of `RD`. Field loans are FieldDecl-rooted and
+/// instance-insensitive, so this can match a field of a *different* instance of
+/// the same type -- a deliberate over-approximation under the safe model.
+static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
+  if (!RD)
+    return false;
+  if (const ValueDecl *VD = L->getAccessPath().getAsValueDecl())
+    if (const auto *FD = dyn_cast<FieldDecl>(VD)) {
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+      return recordReachesField(RD, FD, Visited);
+    }
+  return false;
+}
+
 using AnnotationTarget =
     llvm::PointerUnion<const ParmVarDecl *, const CXXMethodDecl *>;
 using EscapingTarget = LifetimeSafetySemaHelper::EscapingTarget;
@@ -331,7 +382,13 @@ public:
     /// Get loans directly pointing to the invalidated container
     LoanSet DirectlyInvalidatedLoans =
         LoanPropagation.getLoans(InvalidatedOrigin, IOF);
+    const FieldDecl *MutatedField = IOF->getMutatedField();
     auto IsInvalidated = [&](const Loan *L) {
+      // A field mutation (`s.buf.append(...)`) invalidates only borrows of that
+      // specific field -- not the enclosing object (whose loan the receiver
+      // origin also carries) nor its sibling fields.
+      if (MutatedField)
+        return L->getAccessPath().getAsValueDecl() == MutatedField;
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const Loan *InvalidL = FactMgr.getLoanMgr().getLoan(InvalidID);
         if (InvalidL->getAccessPath() == L->getAccessPath())
@@ -401,10 +458,18 @@ public:
     if (DirectlyInvalidatedLoans.isEmpty())
       return;
     auto IsInvalidated = [&](const Loan *L) {
-      for (LoanID InvalidID : DirectlyInvalidatedLoans)
-        if (FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath() ==
-            L->getAccessPath())
+      for (LoanID InvalidID : DirectlyInvalidatedLoans) {
+        const AccessPath &AP =
+            FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
+        if (AP == L->getAccessPath())
           return true;
+        // Invalidating an object also invalidates borrows into its owner fields
+        // (a non-const member call may reallocate one). Same-instance borrows
+        // also carry the object loan and match above; this additionally covers
+        // transitive/inherited fields and the cross-instance case.
+        if (isFieldBorrowOf(L, invalidatedObjectRecord(AP)))
+          return true;
+      }
       return false;
     };
     for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
@@ -412,12 +477,19 @@ public:
         const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
         if (!IsInvalidated(L))
           continue;
-        // Record each invalidated borrow at most once per operation.
-        if (!ReportedAssumedInval
-                 .insert({LiveLoanID.Value, IOF->getInvalidationExpr()})
-                 .second)
+        // Only a loan with a reportable anchor (an issuing expression or a
+        // placeholder parameter) can produce a diagnostic; skip e.g. the `$this`
+        // placeholder loan, which carries neither.
+        if (!L->getIssuingExpr() &&
+            !L->getAccessPath().getAsPlaceholderParam())
           continue;
-        PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationExpr()});
+        // Report each invalidated view (origin) at most once per operation: a
+        // multi-level field borrow (`o.inner.s`) carries both the field loan
+        // and the enclosing-object loan, but it is a single captured value.
+        if (ReportedAssumedInval.insert({LiveLoanID.Value, IOF->getInvalidationExpr()})
+                .second)
+          PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationExpr()});
+        break;
       }
     }
   }

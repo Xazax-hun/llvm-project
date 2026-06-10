@@ -446,14 +446,13 @@ struct S {
   std::vector<std::string> strings1;
   std::vector<std::string> strings2;
 };
-// FIXME: Make Paths more precise to reason at field granularity.
-//        Currently we only detect invalidations to direct declarations and not members.
+// Field-rooted loans let a known mutator on an owner field invalidate borrows
+// into *that* field (and not its siblings).
 void Invalidate1Use1IsInvalid() {
-  // FIXME: Detect this.
   S s;
-  auto it = s.strings1.begin();
-  s.strings1.push_back("1");
-  *it;
+  auto it = s.strings1.begin(); // expected-warning {{object whose reference is captured is later invalidated}}
+  s.strings1.push_back("1");    // expected-note {{invalidated here}}
+  *it;                          // expected-note {{later used here}}
 }
 void Invalidate2Use1IsOk() {
     S s;

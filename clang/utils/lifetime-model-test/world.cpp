@@ -124,31 +124,40 @@ void World::collideBulletsAsteroids() {
   const float w = config_.width;
   const float h = config_.height;
   for (std::size_t bi = 0; bi < bullets_.size(); ++bi) {
-    Bullet &b = bullets_[bi];
-    if (b.life <= 0.0f)
+    // Read-only scan, then mutate. We copy the bullet position out by value and
+    // hold no borrow into bullets_ across the mutation: the safe model treats a
+    // non-const member call (destroyAsteroid) as invalidating views into *any*
+    // of the object's owner fields, so a `Bullet&` kept across it -- even into a
+    // different field than the one mutated -- is rejected.
+    if (bullets_[bi].life <= 0.0f)
       continue;
-    const std::int32_t cx = grid_.cellX(b.pos.x);
-    const std::int32_t cy = grid_.cellY(b.pos.y);
-    bool hit = false;
-    for (std::int32_t dy = -1; dy <= 1 && !hit; ++dy) {
-      for (std::int32_t dx = -1; dx <= 1 && !hit; ++dx) {
-        // `entries` is a view into the grid (bound to grid_); we never mutate
-        // grid_ during the scan, only asteroids_, so it stays valid. Range-for
-        // over a view is now handled by the safe model.
+    const Vec2 bpos = bullets_[bi].pos;
+    const std::int32_t cx = grid_.cellX(bpos.x);
+    const std::int32_t cy = grid_.cellY(bpos.y);
+    bool found = false;
+    std::uint32_t hitSlot = 0;
+    for (std::int32_t dy = -1; dy <= 1 && !found; ++dy) {
+      for (std::int32_t dx = -1; dx <= 1 && !found; ++dx) {
+        // `entries` is a view into the grid (bound to grid_); the scan never
+        // mutates anything, so it stays valid throughout.
         std::span<const std::uint32_t> entries = grid_.cell(cx + dx, cy + dy);
         for (std::uint32_t slot : entries) {
           if (!asteroids_.aliveAt(slot))
             continue;
           const Asteroid &a = asteroids_.at(slot);
-          Vec2 d = toroidalDelta(b.pos, a.pos, w, h);
+          Vec2 d = toroidalDelta(bpos, a.pos, w, h);
           if (length2(d) <= a.radius * a.radius) {
-            b.life = 0.0f;
-            destroyAsteroid(slot); // invalidates `a`; not used afterwards
-            hit = true;
+            hitSlot = slot;
+            found = true;
             break;
           }
         }
       }
+    }
+    if (found) {
+      // Mutate: re-access bullets_ fresh; no borrow into an owner is live here.
+      bullets_[bi].life = 0.0f;
+      destroyAsteroid(hitSlot);
     }
   }
 }
