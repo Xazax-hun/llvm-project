@@ -248,6 +248,12 @@ public:
   // indirection (e.g. std::vector<int*>); per-element borrows are not tracked.
   virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
   virtual void reportOwnerOfIndirection(const Expr *E) {}
+
+  // Reports a view (gsl::Pointer) constructed from a mutable global/static owner
+  // (e.g. 'std::string_view sv = some_global_string;'). The global can be
+  // mutated elsewhere -- invalidating the view -- which the intra-procedural
+  // analysis cannot track.
+  virtual void reportViewOnMutableGlobal(const Expr *E) {}
 };
 
 /// The main entry point for the analysis.

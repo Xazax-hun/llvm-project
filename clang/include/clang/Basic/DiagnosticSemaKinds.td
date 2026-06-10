@@ -11198,6 +11198,12 @@ def warn_lifetime_safety_owner_of_indirection
               "elements">,
       InGroup<LifetimeSafetyOwnerOfIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_view_on_mutable_global
+    : Warning<"%0 view is created from a mutable global or static object; it can "
+              "be invalidated by a mutation of that object elsewhere, which "
+              "lifetime safety cannot track">,
+      InGroup<LifetimeSafetyViewOnMutableGlobal>,
+      DefaultIgnore;
 def warn_lifetime_safety_mutable_field
     : Warning<"'mutable' field %0 can be modified by a const member function; "
               "lifetime safety assumes const member functions do not invalidate "

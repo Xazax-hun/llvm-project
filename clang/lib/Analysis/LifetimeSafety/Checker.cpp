@@ -503,6 +503,9 @@ public:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportException(UCF->getConstructLoc());
       break;
+    case UntrackedConstructReason::ViewOnMutableGlobal:
+      SemaHelper->reportViewOnMutableGlobal(E);
+      break;
     }
   }
 

@@ -379,6 +379,12 @@ enum class UntrackedConstructReason : uint8_t {
   /// A value of a [[gsl::Owner]] container whose element type is an indirection
   /// (e.g. std::vector<int*>). Per-element borrows are not tracked.
   OwnerOfIndirection,
+  /// A view (gsl::Pointer) constructed from a mutable global/static owner (e.g.
+  /// 'std::string_view sv = some_global_string;'). The global can be mutated
+  /// from anywhere -- including other functions or translation units the
+  /// intra-procedural analysis cannot see -- invalidating the view, so the
+  /// borrow cannot be tracked.
+  ViewOnMutableGlobal,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

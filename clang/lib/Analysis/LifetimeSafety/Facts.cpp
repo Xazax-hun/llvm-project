@@ -132,6 +132,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::OwnerOfIndirection:
     OS << "OwnerOfIndirection";
     break;
+  case UntrackedConstructReason::ViewOnMutableGlobal:
+    OS << "ViewOnMutableGlobal";
+    break;
   }
   OS << ")\n";
 }

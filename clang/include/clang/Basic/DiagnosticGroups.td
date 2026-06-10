@@ -794,6 +794,17 @@ such a container is rejected under the safe programming model.
   }];
 }
 
+def LifetimeSafetyViewOnMutableGlobal
+    : DiagGroup<"lifetime-safety-view-on-mutable-global"> {
+  code Documentation = [{
+Warns when a view (a [[gsl::Pointer]] such as std::string_view or std::span) is
+created from a mutable global or static object. The object can be mutated from
+anywhere -- including other functions or translation units the intra-procedural
+analysis cannot see -- which may invalidate the view, so the borrow cannot be
+tracked. The construct is rejected under the safe programming model.
+  }];
+}
+
 def LifetimeSafetyConstSubversion
     : DiagGroup<"lifetime-safety-const-subversion"> {
   code Documentation = [{
@@ -838,6 +849,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
                                          LifetimeSafetyOwnerOfIndirection,
+                                         LifetimeSafetyViewOnMutableGlobal,
                                          LifetimeSafetyConstSubversion,
                                          LifetimeSafetyGlobalCapture,
                                          // An annotation that cannot be verified
