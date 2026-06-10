@@ -1121,20 +1121,24 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
   if (!isInvalidationMethod(*MD))
     return;
 
-  // Accept a direct variable receiver (`v.clear()`) or an owner-field receiver
-  // (`this->buf.append(...)` / `obj.buf.append(...)`). For an owner field the
-  // borrow carries a field-rooted loan (see VisitMemberExpr), so invalidating
-  // it is precise -- but scoped to that field via MutatedField, since the
-  // receiver origin also carries the enclosing object's loan. Other receivers
-  // (e.g. `s.v` where `v` is a view, or a temporary) are skipped to avoid
-  // false positives.
+  // Accept a direct variable receiver (`v.clear()`); an owner-field receiver
+  // (`this->buf.append(...)`), scoped via MutatedField since the receiver origin
+  // also carries the enclosing object's loan; or any other owner-typed lvalue or
+  // pointer-to-owner, e.g. a smart-/raw-pointer dereference or arrow
+  // (`(*p).append(...)`, `p->append(...)`) whose origin carries the borrow the
+  // mutation invalidates. A non-owner, non-variable receiver (e.g. a view
+  // member) is skipped to avoid false positives.
   const Expr *Recv = Args[0]->IgnoreImpCasts();
   const FieldDecl *MutatedField = nullptr;
   if (const auto *ME = dyn_cast<MemberExpr>(Recv))
     if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
         FD && isMutableOwnerType(FD->getType()))
       MutatedField = FD;
-  if (!isa<DeclRefExpr>(Recv) && !MutatedField)
+  QualType RecvTy = Recv->getType();
+  bool OwnerReceiver =
+      isMutableOwnerType(RecvTy) ||
+      (RecvTy->isPointerType() && isMutableOwnerType(RecvTy->getPointeeType()));
+  if (!isa<DeclRefExpr>(Recv) && !MutatedField && !OwnerReceiver)
     return;
 
   OriginNode *ThisNode = getOriginNode(*Args[0]);

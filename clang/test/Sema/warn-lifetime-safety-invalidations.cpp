@@ -336,11 +336,10 @@ void IteratorInvalidatedThroughPointerParameter(std::vector<int> *v) { // expect
 }
 
 void ParenthesizedContainerInvalidatesIterator() {
-  // FIXME: Support invalidation through non-DRE lvalue expressions.
   std::vector<int> v;
-  auto it = v.begin();
-  (v).push_back(42);
-  (void)it;
+  auto it = v.begin(); // expected-warning {{object whose reference is captured is later invalidated}}
+  (v).push_back(42);   // expected-note {{invalidated here}}
+  (void)it;            // expected-note {{later used here}}
 }
 
 } // namespace InvalidatingThroughContainerAliases
@@ -461,18 +460,16 @@ void Invalidate2Use1IsOk() {
     *it;
 }
 void ConditionalContainerInvalidatesIterator(bool flag) {
-    // FIXME: Support invalidation through conditional lvalue expressions.
     std::vector<int> v1, v2;
-    auto it = v1.begin();
-    (flag ? v1 : v2).push_back(42);
-    (void)it;
+    auto it = v1.begin();           // expected-warning {{object whose reference is captured is later invalidated}}
+    (flag ? v1 : v2).push_back(42); // expected-note {{invalidated here}}
+    (void)it;                       // expected-note {{later used here}}
 }
 void ConditionalFieldInvalidatesIterator(bool flag) {
-    // FIXME: Support conditional invalidation through field expressions.
     S s;
-    auto it = s.strings1.begin();
-    (flag ? s.strings1 : s.strings2).push_back("1");
-    *it;
+    auto it = s.strings1.begin();                    // expected-warning 2 {{object whose reference is captured is later invalidated}}
+    (flag ? s.strings1 : s.strings2).push_back("1"); // expected-note 2 {{invalidated here}}
+    *it;                                             // expected-note 2 {{later used here}}
 }
 // FIXME: Requires field-sensitive AccessPaths to fix.
 void Invalidate1Use2ViaRefIsOk() {
