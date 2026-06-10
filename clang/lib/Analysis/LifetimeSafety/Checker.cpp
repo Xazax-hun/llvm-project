@@ -229,6 +229,8 @@ public:
           recordUntrackedConstruct(UCF);
         else if (const auto *FSF = F->getAs<FieldStoreFact>())
           checkSelfReferentialStore(FSF);
+        else if (const auto *AOF = F->getAs<ArgOverlapFact>())
+          checkArgumentOverlap(AOF);
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
@@ -629,6 +631,39 @@ public:
           ReportedSelfRefStores.insert(FSF->getStoreExpr()).second) {
         SemaHelper->reportSelfReferentialBorrow(FSF->getStoreExpr());
         return;
+      }
+    }
+  }
+
+  /// Soundness check: overlapping (aliasing) call arguments. The call may mutate
+  /// the argument behind `MutatingOrigin` (an owner passed by non-const
+  /// reference/pointer, or a mutating method receiver) while `BorrowOrigin` is
+  /// another argument that borrows it. If their loans alias, the callee may
+  /// reallocate the owner and use the now-dangling co-argument, which no
+  /// annotation expresses. Reported through the assumed-invalidation pipeline.
+  void checkArgumentOverlap(const ArgOverlapFact *AOF) {
+    if (!SemaHelper)
+      return;
+    LoanSet Mutating = LoanPropagation.getLoans(AOF->getMutatingOrigin(), AOF);
+    if (Mutating.isEmpty())
+      return;
+    for (OriginID BO : AOF->getBorrowOrigins()) {
+      for (LoanID BL : LoanPropagation.getLoans(BO, AOF)) {
+        const AccessPath &BAP =
+            FactMgr.getLoanMgr().getLoan(BL)->getAccessPath();
+        bool Aliases = false;
+        for (LoanID ML : Mutating)
+          if (FactMgr.getLoanMgr().getLoan(ML)->getAccessPath() == BAP) {
+            Aliases = true;
+            break;
+          }
+        if (!Aliases)
+          continue;
+        // The borrowing argument aliases the mutated one. Reuse the
+        // assumed-invalidation reporting (the operation is the call).
+        if (ReportedAssumedInval.insert({BL.Value, AOF->getOperationExpr()})
+                .second)
+          PendingAssumedInval.push_back({BL, AOF->getOperationExpr()});
       }
     }
   }

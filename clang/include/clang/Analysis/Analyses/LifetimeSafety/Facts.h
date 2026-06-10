@@ -64,6 +64,10 @@ public:
     /// detect self-referential objects (the stored value borrows the same
     /// object that holds the member). Carries no dataflow state.
     FieldStore,
+    /// A pair of call arguments where one may be mutated by the call and the
+    /// other borrows it. Used by the checker to detect overlapping (aliasing)
+    /// arguments. Carries no dataflow state.
+    ArgumentOverlap,
   };
 
 private:
@@ -470,6 +474,40 @@ public:
             const OriginManager &OM) const override;
 };
 
+/// One argument to a call that the call may mutate (`MutatingOrigin` -- an owner
+/// passed by non-const reference/pointer, or the receiver of a mutating method),
+/// together with the other borrow-holding arguments to the same call
+/// (`BorrowOrigins`). The checker flags any of those that alias the mutated one
+/// (shares a loan): the call may reallocate the owner and invalidate the
+/// co-argument's borrow, which no lifetime annotation expresses. Carries no
+/// dataflow state.
+class ArgOverlapFact : public Fact {
+  /// The call expression, for diagnostics.
+  const Expr *OperationExpr;
+  /// The argument the call may mutate.
+  OriginID MutatingOrigin;
+  /// The other borrow-holding arguments to the same call (allocated in the
+  /// FactManager's allocator).
+  llvm::ArrayRef<OriginID> BorrowOrigins;
+
+public:
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::ArgumentOverlap;
+  }
+
+  ArgOverlapFact(const Expr *OperationExpr, OriginID MutatingOrigin,
+                 llvm::ArrayRef<OriginID> BorrowOrigins)
+      : Fact(Kind::ArgumentOverlap), OperationExpr(OperationExpr),
+        MutatingOrigin(MutatingOrigin), BorrowOrigins(BorrowOrigins) {}
+
+  const Expr *getOperationExpr() const { return OperationExpr; }
+  OriginID getMutatingOrigin() const { return MutatingOrigin; }
+  llvm::ArrayRef<OriginID> getBorrowOrigins() const { return BorrowOrigins; }
+
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &OM) const override;
+};
+
 class FactManager {
 public:
   FactManager(const AnalysisDeclContext &AC, const CFG &Cfg) : OriginMgr(AC) {
@@ -491,6 +529,12 @@ public:
     FactType *Res = new (Mem) FactType(std::forward<Args>(args)...);
     Res->setID(NextFactID++);
     return Res;
+  }
+
+  /// Copies `Elts` into the fact allocator so a fact can hold a stable
+  /// reference to a variable-length list.
+  template <typename T> llvm::ArrayRef<T> copyToFactStorage(ArrayRef<T> Elts) {
+    return Elts.copy(FactAllocator);
   }
 
   void dump(const CFG &Cfg, AnalysisDeclContext &AC) const;

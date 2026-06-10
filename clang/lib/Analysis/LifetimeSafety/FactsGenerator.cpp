@@ -164,6 +164,26 @@ static bool recordHasGslOwnerField(QualType QT) {
   return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Visited);
 }
 
+/// Returns true if a parameter of type `PT` lets the call mutate the owner the
+/// argument refers to: a non-const pointer/reference to an owner (or to a record
+/// that transitively contains a mutable owner field), or a gsl::Pointer that
+/// exposes mutable access to a non-const owner pointee. Shared by the assumed-
+/// invalidation and argument-overlap checks.
+static bool paramMayMutateOwner(QualType PT) {
+  if (PT->isPointerType() || PT->isReferenceType()) {
+    QualType Pointee = PT->getPointeeType();
+    if (Pointee.isConstQualified())
+      return false;
+    if (isGslOwnerType(Pointee))
+      return true;
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+    return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited);
+  }
+  if (isGslPointerType(PT.getNonReferenceType()))
+    return pointsToMutableOwner(PT.getNonReferenceType());
+  return false;
+}
+
 void FactsGenerator::run() {
   llvm::TimeTraceScope TimeProfile("FactGenerator");
   const CFG &Cfg = *AC.getCFG();
@@ -1183,21 +1203,7 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     }
     if (!PVD)
       continue;
-    QualType PT = PVD->getType();
-    // The parameter is assumed to mutate the owner the argument refers to if it
-    // is a non-const pointer/reference to an owner, or a gsl::Pointer (e.g.
-    // std::span) that exposes mutable access to a non-const owner pointee.
-    bool MutatesOwner = false;
-    if (PT->isPointerType()) {
-      QualType Pointee = PT->getPointeeType();
-      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
-    } else if (isGslPointerType(PT.getNonReferenceType())) {
-      MutatesOwner = pointsToMutableOwner(PT.getNonReferenceType());
-    } else if (PT->isReferenceType()) {
-      QualType Pointee = PT->getPointeeType();
-      MutatesOwner = !Pointee.isConstQualified() && isGslOwnerType(Pointee);
-    }
-    if (!MutatesOwner)
+    if (!paramMayMutateOwner(PVD->getType()))
       continue;
     if (OriginNode *L = getOriginNode(*Args[I]))
       CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
@@ -1215,6 +1221,67 @@ void FactsGenerator::handleDestructiveCall(const Expr *Call,
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
         ArgNode->getOriginID(), Call, /*Assumed=*/false,
         /*Deallocation=*/true));
+}
+
+// Soundness: detect overlapping (aliasing) call arguments. No lifetime
+// annotation expresses that two arguments must not alias, so passing an owner
+// the call may mutate together with a view that borrows it (`f(s, v)` with
+// `string_view v = s;`) is a silent hazard: the callee may reallocate the owner
+// and then use the dangling view, in an order the caller cannot see. For each
+// argument the call may mutate, pair it with every other borrow-holding
+// argument; the checker reports the pair when their loans actually alias.
+void FactsGenerator::handleArgumentOverlap(const Expr *Call,
+                                           const FunctionDecl *FD,
+                                           ArrayRef<const Expr *> Args) {
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  bool IsInstance =
+      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+
+  // Whether the call may mutate the storage argument `I` refers to.
+  auto IsMutatingArg = [&](unsigned I) -> bool {
+    if (IsInstance && I == 0)
+      // The receiver of any non-const instance method may be mutated. Whether
+      // the method also returns a borrow (lifetimebound / a GSL accessor) is
+      // orthogonal -- such a method can still reallocate the receiver -- so it
+      // is not excluded here.
+      return !Method->isConst();
+    const ParmVarDecl *PVD = nullptr;
+    if (IsInstance) {
+      if (I - 1 < Method->getNumParams())
+        PVD = Method->getParamDecl(I - 1);
+    } else if (I < FD->getNumParams()) {
+      PVD = FD->getParamDecl(I);
+    }
+    return PVD && paramMayMutateOwner(PVD->getType());
+  };
+
+  for (unsigned M = 0; M < Args.size(); ++M) {
+    if (!IsMutatingArg(M))
+      continue;
+    OriginNode *MutNode = getOriginNode(*Args[M]);
+    if (!MutNode)
+      continue;
+    // Collect the other borrow-holding arguments into a single fact for this
+    // mutated owner (rather than one fact per pair).
+    llvm::SmallVector<OriginID, 4> Borrows;
+    for (unsigned B = 0; B < Args.size(); ++B) {
+      if (B == M)
+        continue;
+      // Only a view/pointer co-argument can hold a borrow that aliases the
+      // mutated owner's storage.
+      QualType BT = Args[B]->getType().getNonReferenceType();
+      if (!isGslPointerType(BT) && !BT->isPointerOrReferenceType())
+        continue;
+      if (OriginNode *BorrowNode =
+              getRValueOrigins(Args[B], getOriginNode(*Args[B])))
+        Borrows.push_back(BorrowNode->getOriginID());
+    }
+    if (Borrows.empty())
+      continue;
+    CurrentBlockFacts.push_back(FactMgr.createFact<ArgOverlapFact>(
+        Call, MutNode->getOriginID(),
+        FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(Borrows))));
+  }
 }
 
 void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
@@ -1484,6 +1551,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
+  handleArgumentOverlap(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);
   handleImplicitObjectFieldUses(Call, FD);
   handleLifetimeCaptureBy(FD, Args);

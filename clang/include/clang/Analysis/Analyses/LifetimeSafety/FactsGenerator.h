@@ -156,6 +156,11 @@ private:
   void handleDestructiveCall(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);
 
+  // Detect overlapping (aliasing) call arguments: one argument the call may
+  // mutate, and another that borrows it.
+  void handleArgumentOverlap(const Expr *Call, const FunctionDecl *FD,
+                             ArrayRef<const Expr *> Args);
+
   template <typename Destination, typename Source>
   void flowOrigin(const Destination &D, const Source &S) {
     flow(getOriginNode(D), getOriginNode(S), /*Kill=*/false);

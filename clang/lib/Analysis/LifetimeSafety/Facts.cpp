@@ -156,6 +156,21 @@ void FieldStoreFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   OS << ")\n";
 }
 
+void ArgOverlapFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                          const OriginManager &OM) const {
+  OS << "ArgOverlap (Mutating: ";
+  OM.dump(getMutatingOrigin(), OS);
+  OS << ", Borrows: [";
+  bool First = true;
+  for (OriginID B : getBorrowOrigins()) {
+    if (!First)
+      OS << ", ";
+    First = false;
+    OM.dump(B, OS);
+  }
+  OS << "])\n";
+}
+
 llvm::StringMap<ProgramPoint> FactManager::getTestPoints() const {
   llvm::StringMap<ProgramPoint> AnnotationToPointMap;
   for (const auto &BlockFacts : BlockToFacts) {
