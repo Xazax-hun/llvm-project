@@ -14,7 +14,9 @@ using std::vector;
 //===----------------------------------------------------------------------===//
 
 struct [[gsl::Owner(int)]] MyBuf {
-  int *data() [[clang::lifetimebound]]; // Accessor (annotated): not invalidating.
+  int *data() [[clang::lifetimebound]]; // User accessor: NOT recognized as
+                                        // non-invalidating (only std accessors
+                                        // are), so assumed to invalidate.
   void touch();                         // Non-const, non-accessor.
   void look() const;
 };
@@ -33,12 +35,25 @@ void const_member_silent() {
   (void)p;
 }
 
-void accessor_silent() {
+// A non-const method on a user owner is not on the std non-invalidating
+// allow-list, so it is conservatively assumed to invalidate -- even a
+// lifetimebound accessor (we cannot tell a user mutator from a user accessor).
+void user_accessor_warns() {
   MyBuf b;
-  int *p = b.data();
-  int *q = b.data(); // no-warning (lifetimebound accessor does not invalidate)
+  int *p = b.data(); // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int *q = b.data(); // expected-note {{assumed to be invalidated by this operation}}
   (void)p;
   (void)q;
+}
+
+// A recognized std accessor (operator[]) does NOT invalidate: a borrow held
+// across another such access stays valid.
+void std_accessor_silent() {
+  vector<int> v;
+  int &a = v[0];
+  int &b = v[0]; // no-warning (std operator[] is on the allow-list)
+  (void)a;
+  (void)b;
 }
 
 //===----------------------------------------------------------------------===//
@@ -99,15 +114,15 @@ void mutate_span(MutSpan<Str> s);
 void read_span(ConstSpan<Str> s);
 
 void mutable_owner_span_warns(Str *base) { // expected-warning {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  Str *p = &base[0];
   MutSpan<Str> s(base);
-  int *p = base[0].data();
   mutate_span(s); // expected-note {{assumed to be invalidated by this operation}}
   (void)p;
 }
 
 void const_owner_span_silent(Str *base) {
+  Str *p = &base[0];
   ConstSpan<Str> s(base);
-  int *p = base[0].data();
   read_span(s); // no-warning
   (void)p;
 }

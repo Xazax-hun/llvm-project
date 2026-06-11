@@ -184,6 +184,34 @@ static bool paramMayMutateOwner(QualType PT) {
   return false;
 }
 
+/// Returns true if `MD` is a known non-invalidating accessor of a standard
+/// library type -- one that returns a borrow into the container (or smart
+/// pointer pointee) without reallocating it. Non-const member calls on an owner
+/// are otherwise conservatively assumed to invalidate; this allow-list keeps the
+/// common read accessors (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...)
+/// from being treated as mutating. Restricted to the std namespace: a user
+/// type's accessors are not recognized and are treated conservatively.
+static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
+  if (!isInStlNamespace(MD.getParent()))
+    return false;
+  switch (MD.getOverloadedOperator()) {
+  case OO_Subscript: // operator[]
+  case OO_Star:      // operator* (smart pointers, iterators)
+  case OO_Arrow:     // operator->
+    return true;
+  default:
+    break;
+  }
+  if (!MD.getIdentifier())
+    return false;
+  static const llvm::StringSet<> Accessors = {
+      "at",     "data",   "c_str", "front",  "back",  "begin",
+      "end",    "cbegin", "cend",  "rbegin", "rend",  "crbegin",
+      "crend",  "find",   "get",   "top",    "lower_bound",
+      "upper_bound", "equal_range"};
+  return Accessors.contains(MD.getName());
+}
+
 void FactsGenerator::run() {
   llvm::TimeTraceScope TimeProfile("FactGenerator");
   const CFG &Cfg = *AC.getCFG();
@@ -1161,40 +1189,27 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
-  // (1) Non-const member call on an owner receiver. Known container mutators
-  // are handled precisely elsewhere; borrow-returning accessors (recognized GSL
-  // accessors or methods that are lifetimebound on 'this') do not invalidate.
-  if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
-      !Args.empty() && isGslOwnerType(Args[0]->getType()) &&
-      !shouldTrackImplicitObjectArg(*Args[0], Method,
-                                    /*RunningUnderLifetimeSafety=*/true) &&
-      !implicitObjectParamIsLifetimeBound(Method)) {
-    if (OriginNode *L = getOriginNode(*Args[0]))
-      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-          L->getOriginID(), Call, /*Assumed=*/true));
-  }
-
-  // (1b) Non-const member call on an object that is not itself an owner but
-  // CONTAINS owner fields (e.g. a `struct S { std::string buf; ... };`). The
-  // call may reallocate one of those fields, invalidating views into it. Emit
-  // an assumed invalidation of the receiver; the checker treats invalidating an
-  // object as invalidating views into its owner fields (matched via the
-  // enclosing-object loan those views carry).
+  // (1) Non-const member call whose receiver is an owner, or a non-owner object
+  // that CONTAINS owner fields (e.g. `struct S { std::string buf; };`). The call
+  // may reallocate the owner (or one of its owner fields), invalidating borrows
+  // into it. Known container mutators are handled precisely elsewhere.
   //
-  // Unlike case (1), this is NOT gated on whether the method returns a borrow
-  // of `this` (lifetimebound / GSL accessor): a method can both hand out a
-  // borrow into one field AND reallocate another, so returning-a-borrow says
-  // nothing about whether the call mutates. A const method cannot mutate and is
-  // excluded by `!isConst()`.
+  // A non-const call is conservatively assumed to invalidate -- returning a
+  // borrow (lifetimebound / accessor) is orthogonal to mutating -- EXCEPT a
+  // recognized non-invalidating accessor of a standard-library owner (`v[i]`,
+  // `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...). A const method cannot mutate
+  // (`!isConst()`).
   if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
-      !Args.empty() && !isGslOwnerType(Args[0]->getType()) &&
-      recordHasGslOwnerField(Args[0]->getType())) {
-    if (OriginNode *L = getOriginNode(*Args[0]))
-      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-          L->getOriginID(), Call, /*Assumed=*/true));
+      !Args.empty()) {
+    bool OwnerReceiver = isGslOwnerType(Args[0]->getType());
+    if ((OwnerReceiver || recordHasGslOwnerField(Args[0]->getType())) &&
+        !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
+      if (OriginNode *L = getOriginNode(*Args[0]))
+        CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+            L->getOriginID(), Call, /*Assumed=*/true));
   }
-  // implicit object argument (I == 0 for instance methods) is intentionally
-  // skipped here -- it is handled by case (1) above.
+  // The implicit object argument (I == 0 for instance methods) is intentionally
+  // skipped below -- it is handled by case (1) above.
   for (unsigned I = 0; I < Args.size(); ++I) {
     const ParmVarDecl *PVD = nullptr;
     if (IsInstance) {
