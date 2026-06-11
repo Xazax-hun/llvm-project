@@ -166,6 +166,10 @@ private:
   void handleConstSubversion(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);
 
+  // Detect a call to a closure (lambda) that captures an owner by reference:
+  // the call may mutate the captured owner, invalidating borrows into it.
+  void handleLambdaCallInvalidation(const Expr *Call, const FunctionDecl *FD);
+
   template <typename Destination, typename Source>
   void flowOrigin(const Destination &D, const Source &S) {
     flow(getOriginNode(D), getOriginNode(S), /*Kill=*/false);

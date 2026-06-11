@@ -127,3 +127,33 @@ void const_owner_span_silent(Str *base) {
   (void)p;
 }
 
+
+//===----------------------------------------------------------------------===//
+// Case 3: calling a lambda that captures an owner by reference. A by-reference
+// capture gives the closure non-const access to the owner, so calling it is
+// assumed to mutate the owner (like passing it to a non-const ref parameter).
+//===----------------------------------------------------------------------===//
+
+void lambda_ref_capture_warns() {
+  vector<int> v;
+  int &r = v[0]; // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  auto grow = [&v]() { v.push_back(1); };
+  grow(); // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+void lambda_by_value_silent() {
+  vector<int> v;
+  int &r = v[0];
+  auto grow = [v]() mutable { v.push_back(1); }; // by value: a copy
+  grow();                                        // no-warning
+  (void)r;
+}
+
+void lambda_no_capture_silent() {
+  vector<int> v;
+  int &r = v[0];
+  auto noop = []() {};
+  noop(); // no-warning
+  (void)r;
+}

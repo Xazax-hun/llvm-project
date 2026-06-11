@@ -756,10 +756,11 @@ def LifetimeSafetyAssumedInvalidation
 Warns when a borrow into an owner may be invalidated by an operation the
 analysis conservatively assumes mutates the owner: a non-const member call
 (other than a recognized standard-library accessor such as 'operator[]', 'at' or
-'data'), passing the owner to a non-const pointer/reference parameter, or passing
-an owner together with a value that aliases it -- a view that borrows it, or the
-same owner bound to two reference/pointer parameters -- so the callee may mutate
-it through one handle while another still refers to it.
+'data'), passing the owner to a non-const pointer/reference parameter, calling a
+lambda that captures the owner by reference, or passing an owner together with a
+value that aliases it -- a view that borrows it, or the same owner bound to two
+reference/pointer parameters -- so the callee may mutate it through one handle
+while another still refers to it.
   }];
 }
 

@@ -191,6 +191,17 @@ public:
   /// can refer to a single level of an existing OriginNode.
   OriginNode *createSingleOriginNode(OriginID OID);
 
+  /// Creates a fresh, detached single-level origin (not tied to any declaration
+  /// or expression), for synthesizing a loan that has no AST anchor -- e.g. a
+  /// borrow into a variable captured by reference into a lambda, which has no
+  /// DeclRefExpr at the call site. The origin has a null type, like a synthetic
+  /// lvalue origin.
+  OriginNode *createDetachedOrigin() {
+    OriginID NewID = getNextOriginID();
+    AllOrigins.emplace_back(NewID, static_cast<const Expr *>(nullptr), nullptr);
+    return createSingleOriginNode(NewID);
+  }
+
   /// Returns the OriginNode for the implicit 'this' parameter if the current
   /// declaration is an instance method.
   std::optional<OriginNode *> getThisOrigins() const { return ThisOrigins; }

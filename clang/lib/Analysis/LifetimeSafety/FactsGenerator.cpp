@@ -1652,6 +1652,40 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
         UntrackedConstructReason::ConstMethodIndirectMutation, Call));
 }
 
+void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
+                                                  const FunctionDecl *FD) {
+  // A call to a closure's `operator()`. A lambda that captures a variable by
+  // reference holds non-const access to it (the reference is not const even
+  // though `operator()` is const by default), so calling the closure is, for an
+  // owner captured by reference, equivalent to passing that owner to a non-const
+  // reference parameter: it may reallocate the owner and invalidate borrows into
+  // it. By-value captures are independent copies and are not flagged.
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  if (!Method)
+    return;
+  const CXXRecordDecl *Closure = Method->getParent();
+  if (!Closure || !Closure->isLambda())
+    return;
+  for (const LambdaCapture &Cap : Closure->captures()) {
+    if (Cap.getCaptureKind() != LCK_ByRef || !Cap.capturesVariable())
+      continue;
+    const auto *VD = dyn_cast<VarDecl>(Cap.getCapturedVar());
+    if (!VD || !(isMutableOwnerType(VD->getType()) ||
+                 recordHasGslOwnerField(VD->getType())))
+      continue;
+    // The captured owner has no DeclRefExpr at the call site, so synthesize a
+    // borrow of it (a loan rooted at the variable) in a fresh origin and
+    // invalidate that -- mirroring how passing the owner to a non-const
+    // reference parameter invalidates the argument's loan.
+    const Loan *L = FactMgr.getLoanMgr().createLoan(AccessPath(VD), Call);
+    OriginNode *N = FactMgr.getOriginMgr().createDetachedOrigin();
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<IssueFact>(L->getID(), N->getOriginID()));
+    CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+        N->getOriginID(), Call, /*Assumed=*/true));
+  }
+}
+
 // Soundness: an ownership-transferring move of an owner (std::move/forward of
 // a gsl::Owner, or std::unique_ptr::release) is not modeled, so it silences the
 // analysis for the moved-from object. Moving a pointer-like value is a harmless
@@ -1713,6 +1747,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleConstSubversion(Call, FD, Args);
+  handleLambdaCallInvalidation(Call, FD);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);
