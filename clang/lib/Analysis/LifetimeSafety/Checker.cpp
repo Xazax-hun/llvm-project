@@ -173,6 +173,9 @@ private:
   /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
   /// duplicate warnings when several live origins hold the same borrow.
   llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
+  /// (aliased storage, call) pairs already reported as an argument overlap, to
+  /// avoid a duplicate when two aliasing reference arguments are symmetric.
+  llvm::DenseSet<std::pair<const void *, const Expr *>> ReportedArgOverlap;
   /// Field-store expressions already reported as self-referential.
   llvm::DenseSet<const Expr *> ReportedSelfRefStores;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
@@ -712,8 +715,15 @@ public:
           }
         if (!Aliases)
           continue;
-        // The borrowing argument aliases the mutated one. Reuse the
-        // assumed-invalidation reporting (the operation is the call).
+        // The borrowing argument aliases the mutated one. Two aliasing
+        // reference arguments produce symmetric facts (a->[b] and b->[a]); they
+        // describe the same hazard, so de-duplicate by (aliased storage, call).
+        const void *Storage = BAP.getAsValueDecl();
+        if (Storage &&
+            !ReportedArgOverlap.insert({Storage, AOF->getOperationExpr()})
+                 .second)
+          continue;
+        // Reuse the assumed-invalidation reporting (the operation is the call).
         if (ReportedAssumedInval.insert({BL.Value, AOF->getOperationExpr()})
                 .second)
           PendingAssumedInval.push_back({BL, AOF->getOperationExpr()});

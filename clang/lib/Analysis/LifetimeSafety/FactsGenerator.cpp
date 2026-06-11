@@ -1274,25 +1274,49 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
     return PVD && paramMayMutateOwner(PVD->getType());
   };
 
+  // The parameter type that argument `I` binds to (null for the implicit object
+  // or a trailing variadic argument).
+  auto ParamType = [&](unsigned I) -> QualType {
+    if (IsInstance) {
+      if (I == 0)
+        return QualType();
+      if (I - 1 < Method->getNumParams())
+        return Method->getParamDecl(I - 1)->getType();
+    } else if (I < FD->getNumParams()) {
+      return FD->getParamDecl(I)->getType();
+    }
+    return QualType();
+  };
+
   for (unsigned M = 0; M < Args.size(); ++M) {
     if (!IsMutatingArg(M))
       continue;
     OriginNode *MutNode = getOriginNode(*Args[M]);
     if (!MutNode)
       continue;
-    // Collect the other borrow-holding arguments into a single fact for this
-    // mutated owner (rather than one fact per pair).
+    // Collect the other arguments that could alias the mutated owner into a
+    // single fact for it (rather than one fact per pair).
     llvm::SmallVector<OriginID, 4> Borrows;
     for (unsigned B = 0; B < Args.size(); ++B) {
       if (B == M)
         continue;
-      // Only a view/pointer co-argument can hold a borrow that aliases the
-      // mutated owner's storage.
+      // A co-argument can alias the mutated owner's storage if it is a
+      // view/pointer value that borrows it, OR if the callee receives it by
+      // reference/pointer to an owner (another handle to the same object, e.g.
+      // `f(string& a, string& b)` called `f(s, s)`).
       QualType BT = Args[B]->getType().getNonReferenceType();
-      if (!isGslPointerType(BT) && !BT->isPointerOrReferenceType())
-        continue;
-      if (OriginNode *BorrowNode =
-              getRValueOrigins(Args[B], getOriginNode(*Args[B])))
+      QualType BParam = ParamType(B);
+      bool ByOwnerHandle =
+          !BParam.isNull() &&
+          (BParam->isReferenceType() || BParam->isPointerType()) &&
+          isGslOwnerType(BParam->getPointeeType());
+      OriginNode *BorrowNode = nullptr;
+      if (ByOwnerHandle)
+        // The handle aliases the owner's own storage.
+        BorrowNode = getOriginNode(*Args[B]);
+      else if (isGslPointerType(BT) || BT->isPointerOrReferenceType())
+        BorrowNode = getRValueOrigins(Args[B], getOriginNode(*Args[B]));
+      if (BorrowNode)
         Borrows.push_back(BorrowNode->getOriginID());
     }
     if (Borrows.empty())
