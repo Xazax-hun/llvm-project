@@ -1,3 +1,4 @@
+
 //===- Checker.cpp - C++ Lifetime Safety Checker ----------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -162,6 +163,8 @@ private:
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
   llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
+  /// Source locations already reported as borrowing from a mutable global.
+  llvm::DenseSet<SourceLocation> ReportedMutableGlobalLocs;
   /// Expressions already reported as an untracked construct, to avoid duplicate
   /// soundness warnings when a construct is visited more than once.
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
@@ -224,10 +227,14 @@ public:
               checkNakedDeallocation(IOF);
           }
         }
-        else if (const auto *OEF = F->getAs<OriginEscapesFact>())
+        else if (const auto *OEF = F->getAs<OriginEscapesFact>()) {
           checkAnnotations(OEF);
-        else if (const auto *UF = F->getAs<UseFact>())
+          checkBorrowFromMutableGlobal(OEF);
+        }
+        else if (const auto *UF = F->getAs<UseFact>()) {
           checkLostLoan(UF);
+          checkBorrowFromMutableGlobal(UF);
+        }
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
         else if (const auto *FSF = F->getAs<FieldStoreFact>())
@@ -606,6 +613,78 @@ public:
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;
     SemaHelper->reportLostLoan(UseExpr);
+  }
+
+  /// Soundness: a pointer/reference/view that borrows *into* a mutable global or
+  /// static owner (e.g. `int *p = &g[0];`, `p = g.data();`, `string_view sv =
+  /// g_str;`, `string_view sv = g_table[i];`) can be invalidated by a mutation
+  /// of that owner from anywhere -- another function or translation unit the
+  /// intra-procedural analysis cannot see. The borrow surfaces as a loan rooted
+  /// at the global owner regardless of how it was reached (direct, element, or
+  /// accessor), so this loan-based pass covers the raw pointer/reference forms
+  /// and the GSL view forms uniformly. A pointer *at* the object (`&g`) is not a
+  /// borrow into its contents and stays valid, so it is excluded.
+  void flagBorrowFromMutableGlobal(OriginID OID, ProgramPoint PP,
+                                   const Expr *Anchor) {
+    if (!SemaHelper || !Anchor)
+      return;
+    // A raw pointer/reference value, or a gsl::Pointer view.
+    const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+    if (!Ty)
+      return;
+
+    QualType ValueTy(Ty, 0);
+    if (!ValueTy->isPointerType() && !ValueTy->isReferenceType() &&
+        !isGslPointerType(ValueTy))
+      return;
+    for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
+      const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
+      if (!VD || !VD->hasGlobalStorage() || VD->getType().isConstQualified() ||
+          !isGslOwnerType(VD->getType()))
+        continue;
+      // The loan must be a borrow *into* the owner's contents, not the value of
+      // the owner itself: `&g[0]`/`g.data()` borrow into `g`, whereas `&g` is a
+      // pointer at the object whose storage is stable. The pointee type differs
+      // from the global's own type in the former. (A gsl::Pointer view always
+      // views the contents, never "is" the owner, so its non-pointer value type
+      // has a null pointee and naturally falls through this guard.)
+      QualType Pointee = ValueTy->getPointeeType();
+      if (!Pointee.isNull() &&
+          Pointee.getCanonicalType().getUnqualifiedType() ==
+              VD->getType().getCanonicalType().getUnqualifiedType())
+        continue; // pointer/reference AT the object, not into it
+      if (!ReportedMutableGlobalLocs.insert(Anchor->getExprLoc()).second)
+        return;
+      SemaHelper->reportViewOnMutableGlobal(Anchor);
+      return;
+    }
+  }
+
+  void checkBorrowFromMutableGlobal(const UseFact *UF) {
+    if (UF->isImplicit())
+      return;
+    // Only a genuine (non-implicit) use of the borrowing value. The implicit
+    // owner->view conversion at a view's construction is itself a use whose
+    // expression is implicit-wrapped; skip it so the borrow is reported at the
+    // real use, not twice (once at construction, once at the use).
+    const Expr *Use = UF->getUseExpr();
+    if (!Use || Use->IgnoreImplicit() != Use)
+      return;
+    if (const OriginNode *OL = UF->getUsedOrigins())
+      flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use);
+  }
+
+  /// The escape (return) form: `int *f() { return &g[0]; }`, or a view return
+  /// `std::string_view f() { return g_table[i]; }`. A view return is wrapped in
+  /// an implicit owner->view conversion, so strip to the underlying borrow
+  /// expression for a stable, precise report location.
+  void checkBorrowFromMutableGlobal(const OriginEscapesFact *OEF) {
+    if (const auto *RE = dyn_cast<ReturnEscapeFact>(OEF)) {
+      const Expr *Ret = RE->getReturnExpr();
+      flagBorrowFromMutableGlobal(OEF->getEscapedOriginID(), OEF,
+                                  Ret ? Ret->IgnoreImplicit() : nullptr);
+    }
   }
 
   /// Translates a fact recording an unmodeled construct into the corresponding

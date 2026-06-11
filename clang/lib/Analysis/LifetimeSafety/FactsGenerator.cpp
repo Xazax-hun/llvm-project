@@ -1786,21 +1786,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         ArgNode = getRValueOrigins(Args[I], ArgNode);
       }
       if (isGslOwnerType(Args[I]->getType())) {
-        // Soundness: a view borrowing a mutable global/static owner can be
-        // invalidated by mutating that owner from anywhere (another function or
-        // translation unit), which the intra-procedural analysis cannot see. A
-        // const owner cannot be mutated, so it is safe.
-        if (const auto *DRE =
-                dyn_cast<DeclRefExpr>(Args[I]->IgnoreParenImpCasts()))
-          if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
-              VD && VD->hasGlobalStorage() &&
-              !VD->getType().isConstQualified())
-            CurrentBlockFacts.push_back(
-                FactMgr.createFact<UntrackedConstructFact>(
-                    UntrackedConstructReason::ViewOnMutableGlobal, Call));
         // The constructed gsl::Pointer borrows from the Owner's storage, not
         // from what the Owner itself borrows, so only the outermost origin is
         // needed.
+        //
+        // Soundness: a view borrowing a mutable global/static owner -- whether
+        // the owner itself (`g_str`) or its contents (`g_table[i]`) -- can be
+        // invalidated by mutating that owner from anywhere the intra-procedural
+        // analysis cannot see. That is detected loan-based in the checker
+        // (LifetimeChecker::flagBorrowFromMutableGlobal): the borrow surfaces as
+        // a loan rooted at the global owner regardless of how it was reached.
         CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
             CallNode->getOriginID(), ArgNode->getOriginID(), KillSrc));
         KillSrc = false;

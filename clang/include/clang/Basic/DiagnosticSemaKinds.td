@@ -11199,7 +11199,7 @@ def warn_lifetime_safety_owner_of_indirection
       InGroup<LifetimeSafetyOwnerOfIndirection>,
       DefaultIgnore;
 def warn_lifetime_safety_view_on_mutable_global
-    : Warning<"%0 view is created from a mutable global or static object; it can "
+    : Warning<"%0 borrows from a mutable global or static object; it can "
               "be invalidated by a mutation of that object elsewhere, which "
               "lifetime safety cannot track">,
       InGroup<LifetimeSafetyViewOnMutableGlobal>,
