@@ -280,6 +280,11 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
     else if (isGslOwnerOfIndirection(VD->getType()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::OwnerOfIndirection, VD));
+    // Likewise a local gsl::Pointer view whose pointee is an indirection (e.g.
+    // std::span<int*>); the inner pointees are not tracked.
+    else if (isGslPointerOfIndirection(VD->getType()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::PointerOfIndirection, VD));
     // An array of pointer-like elements shares one element-origin across all
     // elements. Seed it with a non-expiring "uninitialized" loan so the origin
     // is never empty: a borrow stored into an element later merges in beside
@@ -1699,6 +1704,12 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
            isGslOwnerOfIndirection(Call->getType()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::OwnerOfIndirection, Call));
+  // Likewise a call returning a gsl::Pointer view of indirections
+  // (e.g. std::span<int*>); the inner pointees are not tracked.
+  else if (!isa<CXXConstructorDecl>(FD) &&
+           isGslPointerOfIndirection(Call->getType()))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::PointerOfIndirection, Call));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleConstSubversion(Call, FD, Args);

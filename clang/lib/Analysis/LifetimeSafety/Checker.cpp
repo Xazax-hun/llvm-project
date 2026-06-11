@@ -720,6 +720,12 @@ public:
       else
         SemaHelper->reportOwnerOfIndirection(E);
       break;
+    case UntrackedConstructReason::PointerOfIndirection:
+      if (D)
+        SemaHelper->reportPointerOfIndirection(D);
+      else
+        SemaHelper->reportPointerOfIndirection(E);
+      break;
     case UntrackedConstructReason::Exception:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportException(UCF->getConstructLoc());
@@ -840,6 +846,13 @@ public:
       if (isGslOwnerOfIndirection(PVD->getType().getNonReferenceType())) {
         if (ReportedUntrackedDecls.insert(PVD).second)
           SemaHelper->reportOwnerOfIndirection(PVD);
+        continue;
+      }
+      // Likewise a gsl::Pointer view parameter whose pointee is an indirection
+      // (e.g. std::span<int*>); the inner pointees are not tracked.
+      if (isGslPointerOfIndirection(PVD->getType().getNonReferenceType())) {
+        if (ReportedUntrackedDecls.insert(PVD).second)
+          SemaHelper->reportPointerOfIndirection(PVD);
         continue;
       }
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))

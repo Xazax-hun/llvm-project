@@ -249,6 +249,12 @@ public:
   virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
   virtual void reportOwnerOfIndirection(const Expr *E) {}
 
+  // Reports a value of a [[gsl::Pointer]] view whose pointee/element type is
+  // itself an indirection (e.g. std::span<int*>); the inner pointees are not
+  // tracked.
+  virtual void reportPointerOfIndirection(const ValueDecl *VD) {}
+  virtual void reportPointerOfIndirection(const Expr *E) {}
+
   // Reports a view (gsl::Pointer) constructed from a mutable global/static owner
   // (e.g. 'std::string_view sv = some_global_string;'). The global can be
   // mutated elsewhere -- invalidating the view -- which the intra-procedural

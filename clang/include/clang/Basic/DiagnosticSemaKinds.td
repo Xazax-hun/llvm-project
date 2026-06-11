@@ -11198,6 +11198,12 @@ def warn_lifetime_safety_owner_of_indirection
               "elements">,
       InGroup<LifetimeSafetyOwnerOfIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_pointer_of_indirection
+    : Warning<"type %0 is a view whose pointee type is itself a pointer or "
+              "reference; lifetime safety cannot track borrows held one level "
+              "below the view">,
+      InGroup<LifetimeSafetyPointerOfIndirection>,
+      DefaultIgnore;
 def warn_lifetime_safety_view_on_mutable_global
     : Warning<"%0 borrows from a mutable global or static object; it can "
               "be invalidated by a mutation of that object elsewhere, which "

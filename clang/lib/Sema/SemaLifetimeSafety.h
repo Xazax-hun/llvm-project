@@ -65,6 +65,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_unknown_ownership,
       diag::warn_lifetime_safety_exception,
       diag::warn_lifetime_safety_owner_of_indirection,
+      diag::warn_lifetime_safety_pointer_of_indirection,
       diag::warn_lifetime_safety_view_on_mutable_global,
       diag::warn_lifetime_safety_const_indirect_mutation,
       diag::warn_lifetime_safety_self_referential};
@@ -528,6 +529,15 @@ public:
   }
   void reportOwnerOfIndirection(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_owner_of_indirection)
+        << E->getType() << E->getSourceRange();
+  }
+  void reportPointerOfIndirection(const ValueDecl *VD) override {
+    S.Diag(VD->getLocation(),
+           diag::warn_lifetime_safety_pointer_of_indirection)
+        << VD->getType() << VD->getSourceRange();
+  }
+  void reportPointerOfIndirection(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_pointer_of_indirection)
         << E->getType() << E->getSourceRange();
   }
   void reportViewOnMutableGlobal(const Expr *E) override {

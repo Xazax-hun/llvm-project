@@ -93,6 +93,16 @@ bool isGslOwnerType(const CXXRecordDecl *RD);
 // owner template arguments (e.g. std::vector<std::vector<int*>>).
 bool isGslOwnerOfIndirection(QualType QT);
 
+// Returns true if the given gsl::Pointer (view) type has a pointee/element type
+// that is itself an indirection (pointer, reference, gsl::Pointer, or a
+// container of indirections), e.g. std::span<int*>. Such a view hands out
+// borrows one level deeper than it tracks; those inner pointees are not modeled,
+// so the safe programming model rejects it -- the gsl::Pointer analogue of
+// isGslOwnerOfIndirection. The pointee is determined via a value_type/
+// element_type typedef, else operator*/operator-> return type, else a sole
+// template argument.
+bool isGslPointerOfIndirection(QualType QT);
+
 // Returns true if the given gsl::Pointer type can mutate the (non-const) owner
 // it points to, i.e. it (or a base class) exposes operator*/operator[]
 // returning a reference to a non-const gsl::Owner, or operator-> returning a

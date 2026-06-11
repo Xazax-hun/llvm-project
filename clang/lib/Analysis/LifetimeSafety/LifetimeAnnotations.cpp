@@ -336,6 +336,60 @@ bool isGslOwnerOfIndirection(QualType QT) {
   return false;
 }
 
+/// The type a gsl::Pointer view dereferences to (its pointee / element type).
+/// Tries, in order: a `value_type`/`element_type` member typedef (std views and
+/// iterators), the return type of `operator*`/`operator->` (a custom view that
+/// lacks the typedef), and finally -- only for a single-type-argument
+/// specialization -- that sole template argument. Returns a null QualType if the
+/// pointee cannot be determined.
+static QualType gslPointerPointeeType(QualType QT) {
+  const auto *RD = QT->getAsCXXRecordDecl();
+  if (!RD)
+    return QualType();
+  if (const auto *Def = RD->getDefinition())
+    RD = Def;
+  // (1) value_type / element_type member typedef.
+  for (const Decl *D : RD->decls())
+    if (const auto *TND = dyn_cast<TypedefNameDecl>(D))
+      if (TND->getName() == "value_type" || TND->getName() == "element_type")
+        return TND->getUnderlyingType();
+  // (2) operator* / operator-> return type (the actual dereference result). For
+  // operator-> (returns a pointer to the pointee) strip one pointer level.
+  for (const CXXMethodDecl *M : RD->methods()) {
+    OverloadedOperatorKind OO = M->getOverloadedOperator();
+    if (OO == OO_Star)
+      return M->getReturnType().getNonReferenceType();
+    if (OO == OO_Arrow && M->getReturnType()->isPointerType())
+      return M->getReturnType()->getPointeeType();
+  }
+  // (3) Fallback: a sole type template argument.
+  if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+    QualType Sole;
+    for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray()) {
+      if (Arg.getKind() != TemplateArgument::Type)
+        continue;
+      if (!Sole.isNull())
+        return QualType(); // more than one type arg: ambiguous, give up
+      Sole = Arg.getAsType();
+    }
+    return Sole;
+  }
+  return QualType();
+}
+
+bool isGslPointerOfIndirection(QualType QT) {
+  if (!isGslPointerType(QT))
+    return false;
+  QualType Pointee = gslPointerPointeeType(QT);
+  if (Pointee.isNull())
+    return false;
+  // A view whose pointee is itself an indirection (e.g. std::span<int*>) hands
+  // out borrows one level deeper than the view tracks; those inner pointees are
+  // not modeled. Recurse so a view-of-views is caught too.
+  return isPointerLikeType(Pointee) || Pointee->isReferenceType() ||
+         isGslOwnerOfIndirection(Pointee) || isGslPointerOfIndirection(Pointee);
+}
+
 bool isUnknownOwnershipType(QualType QT,
                             llvm::DenseMap<const Type *, bool> &Cache) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();

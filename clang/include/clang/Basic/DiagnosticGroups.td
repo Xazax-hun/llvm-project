@@ -798,6 +798,17 @@ such a container is rejected under the safe programming model.
   }];
 }
 
+def LifetimeSafetyPointerOfIndirection
+    : DiagGroup<"lifetime-safety-pointer-of-indirection"> {
+  code Documentation = [{
+Warns on a value of a [[gsl::Pointer]] view whose pointee/element type is itself
+an indirection (a pointer, reference, or [[gsl::Pointer]]), e.g. std::span<int*>.
+Such a view hands out borrows one level deeper than it tracks; those inner
+pointees are not modeled, so the view is rejected under the safe programming
+model. This is the gsl::Pointer analogue of -Wlifetime-safety-owner-of-indirection.
+  }];
+}
+
 def LifetimeSafetyViewOnMutableGlobal
     : DiagGroup<"lifetime-safety-view-on-mutable-global"> {
   code Documentation = [{
@@ -868,6 +879,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
                                          LifetimeSafetyOwnerOfIndirection,
+                                         LifetimeSafetyPointerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,
                                          LifetimeSafetyConstSubversion,
                                          LifetimeSafetySelfReferential,
