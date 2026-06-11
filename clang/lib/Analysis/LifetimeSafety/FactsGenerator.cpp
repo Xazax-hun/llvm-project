@@ -1052,6 +1052,22 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   const VarDecl *LifetimeEndsVD = LifetimeEnds.getVarDecl();
   if (!LifetimeEndsVD)
     return;
+  // A non-trivial destructor running at scope exit may read a borrow the object
+  // holds (e.g. a [[gsl::Pointer]] whose ~T() dereferences its captured view).
+  // The analysis is intra-procedural and does not see the out-of-line destructor
+  // body, so model the destruction as a *use* of the object: this keeps the
+  // borrow live up to the destruction point, so that a borrowed-from object
+  // destroyed earlier (reverse-declaration-order) is reported at its expiry.
+  // Owners are excluded -- their destruction frees their own storage (already
+  // modeled by the ExpireFact) rather than dereferencing a borrow into another
+  // object. A trivial destructor cannot read the borrow.
+  QualType VDTy = LifetimeEndsVD->getType();
+  if (const CXXRecordDecl *RD = VDTy->getAsCXXRecordDecl();
+      RD && RD->hasDefinition() && RD->hasNonTrivialDestructor() &&
+      !isGslOwnerType(VDTy) && hasOrigins(VDTy))
+    if (OriginNode *Node = getOriginNode(*LifetimeEndsVD))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
+          LifetimeEnds.getTriggerStmt()->getEndLoc(), Node));
   // Expire the origin when its variable's lifetime ends to ensure liveness
   // doesn't persist through loop back-edges.
   std::optional<OriginID> ExpiredOID;

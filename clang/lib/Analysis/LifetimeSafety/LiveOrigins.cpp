@@ -56,7 +56,10 @@ struct Lattice {
 
 static SourceLocation GetFactLoc(CausingFactType F) {
   if (const auto *UF = F.dyn_cast<const UseFact *>())
-    return UF->getUseExpr()->getExprLoc();
+    // An implicit use (a non-trivial destructor reading a borrow at scope exit)
+    // has no source expression; use its explicit location instead.
+    return UF->isImplicit() ? UF->getImplicitLoc()
+                            : UF->getUseExpr()->getExprLoc();
   if (const auto *OEF = F.dyn_cast<const OriginEscapesFact *>()) {
     if (auto *ReturnEsc = dyn_cast<ReturnEscapeFact>(OEF))
       return ReturnEsc->getReturnExpr()->getExprLoc();

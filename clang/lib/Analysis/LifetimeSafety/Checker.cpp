@@ -195,7 +195,8 @@ private:
   static SourceLocation
   GetFactLoc(llvm::PointerUnion<const UseFact *, const OriginEscapesFact *> F) {
     if (const auto *UF = F.dyn_cast<const UseFact *>())
-      return UF->getUseExpr()->getExprLoc();
+      return UF->isImplicit() ? UF->getImplicitLoc()
+                              : UF->getUseExpr()->getExprLoc();
     if (const auto *OEF = F.dyn_cast<const OriginEscapesFact *>()) {
       if (auto *ReturnEsc = dyn_cast<ReturnEscapeFact>(OEF))
         return ReturnEsc->getReturnExpr()->getExprLoc();
@@ -588,7 +589,7 @@ public:
   /// untracked). Reports it so that, with the warning enabled as an error, the
   /// analysis never silently fails to account for a borrow.
   void checkLostLoan(const UseFact *UF) {
-    if (!SemaHelper || UF->isWritten())
+    if (!SemaHelper || UF->isWritten() || UF->isImplicit())
       return;
     const Expr *UseExpr = UF->getUseExpr();
     // Skip implicit nodes (e.g. an lvalue-to-rvalue cast) that duplicate an
@@ -668,8 +669,10 @@ public:
     // owner->view conversion at a view's construction is itself a use whose
     // expression is implicit-wrapped; skip it so the borrow is reported at the
     // real use, not twice (once at construction, once at the use).
+    if (UF->isImplicit())
+      return;
     const Expr *Use = UF->getUseExpr();
-    if (!Use || Use->IgnoreImplicit() != Use)
+    if (!Use)
       return;
     if (const OriginNode *OL = UF->getUsedOrigins())
       flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use);
@@ -958,7 +961,21 @@ public:
       SourceLocation ExpiryLoc = Warning.ExpiryLoc;
 
       if (const auto *UF = CausingFact.dyn_cast<const UseFact *>()) {
-        if (Warning.InvalidatedByExpr) {
+        // An implicit use (a non-trivial destructor reading a borrow at scope
+        // exit) has no source expression; anchor diagnostics at its location.
+        if (UF->isImplicit()) {
+          if (Warning.InvalidatedByExpr) {
+            if (IssueExpr)
+              SemaHelper->reportUseAfterInvalidation(
+                  IssueExpr, UF->getImplicitLoc(), Warning.InvalidatedByExpr);
+            else if (InvalidatedPVD)
+              SemaHelper->reportUseAfterInvalidation(
+                  InvalidatedPVD, UF->getImplicitLoc(),
+                  Warning.InvalidatedByExpr);
+          } else
+            SemaHelper->reportUseAfterScope(IssueExpr, UF->getImplicitLoc(),
+                                            MovedExpr, ExpiryLoc);
+        } else if (Warning.InvalidatedByExpr) {
           if (IssueExpr)
             // Use-after-invalidation of an object on stack.
             SemaHelper->reportUseAfterInvalidation(IssueExpr, UF->getUseExpr(),

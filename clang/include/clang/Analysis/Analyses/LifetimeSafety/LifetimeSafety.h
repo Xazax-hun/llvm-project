@@ -71,6 +71,12 @@ public:
   virtual void reportUseAfterScope(const Expr *IssueExpr, const Expr *UseExpr,
                                    const Expr *MovedExpr,
                                    SourceLocation FreeLoc) {}
+  // Variant for an implicit use (a non-trivial destructor reading a borrow at
+  // scope exit) that has no source expression; `UseLoc` anchors the "used here"
+  // note.
+  virtual void reportUseAfterScope(const Expr *IssueExpr, SourceLocation UseLoc,
+                                   const Expr *MovedExpr,
+                                   SourceLocation FreeLoc) {}
 
   virtual void reportUseAfterReturn(const Expr *IssueExpr,
                                     const Expr *ReturnExpr,
@@ -93,6 +99,14 @@ public:
                                           const Expr *InvalidationExpr) {}
   virtual void reportUseAfterInvalidation(const ParmVarDecl *PVD,
                                           const Expr *UseExpr,
+                                          const Expr *InvalidationExpr) {}
+  // Variants for an implicit use (a non-trivial destructor) with no source
+  // expression; `UseLoc` anchors the "used here" note.
+  virtual void reportUseAfterInvalidation(const Expr *IssueExpr,
+                                          SourceLocation UseLoc,
+                                          const Expr *InvalidationExpr) {}
+  virtual void reportUseAfterInvalidation(const ParmVarDecl *PVD,
+                                          SourceLocation UseLoc,
                                           const Expr *InvalidationExpr) {}
   virtual void reportInvalidatedField(const Expr *IssueExpr,
                                       const FieldDecl *Field,

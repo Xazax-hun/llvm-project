@@ -251,16 +251,29 @@ class UseFact : public Fact {
   // True if this use is a write operation (e.g., left-hand side of assignment).
   // Write operations are exempted from use-after-free checks.
   bool IsWritten = false;
+  // For an implicit use that has no source expression (e.g. an object's
+  // non-trivial destructor reading a borrow it holds, at scope exit): the
+  // location to anchor the diagnostic at. Invalid for ordinary uses, which use
+  // `UseExpr`'s location instead.
+  SourceLocation ImplicitLoc;
 
 public:
   static bool classof(const Fact *F) { return F->getKind() == Kind::Use; }
 
   UseFact(const Expr *UseExpr, const OriginNode *ONode)
       : Fact(Kind::Use), UseExpr(UseExpr), ONode(ONode) {}
+  UseFact(SourceLocation ImplicitLoc, const OriginNode *ONode)
+      : Fact(Kind::Use), UseExpr(nullptr), ONode(ONode),
+        ImplicitLoc(ImplicitLoc) {}
 
   const OriginNode *getUsedOrigins() const { return ONode; }
   void setUsedOrigins(const OriginNode *NewONode) { ONode = NewONode; }
   const Expr *getUseExpr() const { return UseExpr; }
+  /// True if this is an implicit use with no source expression (a non-trivial
+  /// destructor reading a borrow at scope exit); use getImplicitLoc() to anchor
+  /// diagnostics.
+  bool isImplicit() const { return UseExpr == nullptr; }
+  SourceLocation getImplicitLoc() const { return ImplicitLoc; }
   void markAsWritten() { IsWritten = true; }
   bool isWritten() const { return IsWritten; }
 
