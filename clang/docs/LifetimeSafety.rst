@@ -537,12 +537,13 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-unannotated-indirection``: Warns on a parameter that can hold a borrow but carries none of ``[[clang::lifetimebound]]``, ``[[clang::noescape]]`` or ``[[clang::lifetime_capture_by]]`` (both at the definition and at call sites). Also warns on an instance member function (including a conversion operator) that returns an indirection without marking its implicit object ``[[clang::lifetimebound]]`` (or the function ``[[clang::lifetime_immortal]]``). Finally, warns when a borrow escapes to global or static storage that the relevant annotation does not describe: a borrow of the implicit object (``this``) or one of its fields, or a parameter whose ``[[clang::lifetimebound]]``/``[[clang::lifetime_capture_by]]`` annotation describes a return/capture relationship rather than a global capture.
   * ``-Wlifetime-safety-multilevel-indirection``: Warns on declarations that use more than one level of indirection (e.g. ``int **``).
   * ``-Wlifetime-safety-move-silencing``: Warns when an owner is moved (e.g. ``std::move`` or ``std::unique_ptr::release``), an ownership transfer the analysis does not model.
-  * ``-Wlifetime-safety-assumed-invalidation``: Warns when a borrow into an owner may be invalidated by an operation conservatively assumed to mutate it (a non-const member call, or passing the owner to a non-const pointer/reference parameter or mutable view).
+  * ``-Wlifetime-safety-assumed-invalidation``: Warns when a borrow into an owner may be invalidated by an operation conservatively assumed to mutate it: a non-const member call (other than a recognized standard-library accessor such as ``operator[]``, ``at`` or ``data``), passing the owner to a non-const pointer/reference parameter or mutable view, or passing an owner together with a value that aliases it -- a view that borrows it, or the same owner bound to two reference/pointer parameters -- so the callee may mutate it through one handle while another still refers to it.
   * ``-Wlifetime-safety-naked-delete``: Warns on a ``delete``/``free`` of a pointer whose allocation the analysis did not see (deallocations inside destructors are exempt).
   * ``-Wlifetime-safety-unknown-ownership``: Warns on a value of a user-defined type that can hold a borrow but is annotated neither ``[[gsl::Owner]]`` nor ``[[gsl::Pointer]]``.
   * ``-Wlifetime-safety-exception``: Warns on a ``throw`` or a ``try``/``catch``. Exception control flow (stack unwinding, running destructors and resuming in a handler) is not modeled, so a borrow that dangles only along an exception path can be missed.
   * ``-Wlifetime-safety-owner-of-indirection``: Warns on a value of a ``[[gsl::Owner]]`` container whose element type is an indirection (e.g. ``std::vector<int*>``); the analysis does not track borrows held by individual elements.
-  * ``-Wlifetime-safety-const-subversion``: Warns on a ``mutable`` data member or a ``const_cast``. The analysis assumes a const member function does not invalidate borrows into the object; either construct can subvert that assumption.
+  * ``-Wlifetime-safety-view-on-mutable-global``: Warns when a view (a ``[[gsl::Pointer]]`` such as ``std::string_view`` or ``std::span``) is created from a mutable global or static object, which can be mutated from anywhere the intra-procedural analysis cannot see, invalidating the view.
+  * ``-Wlifetime-safety-const-subversion``: Warns on a ``mutable`` data member, a ``const_cast``, or a const member function that mutates an owner through a pointer member, smart or raw (``const`` does not propagate through a pointer) -- including when the pointee is not itself an owner but transitively contains one (e.g. a pimpl ``Impl`` holding a ``std::vector``). The analysis assumes a const member function does not invalidate borrows into the object; each of these can subvert that assumption.
   * ``-Wlifetime-safety-self-referential``: Warns when a view/pointer data member is bound to a sibling member of the same object (e.g. a ``std::string_view`` member pointing into a ``std::string`` member of the same struct), including across the base/derived boundary -- a view member in a base subobject bound to a member of the derived class, or captured into the receiver via ``[[clang::lifetime_capture_by(this)]]``. The object becomes self-referential: mutating or moving it invalidates the view, and that relationship is invisible once the object is passed elsewhere. (The base/derived case is especially dangerous: destruction order destroys the derived members before the base destructor runs.)
   * ``-Wlifetime-safety-global-capture``: Warns on a parameter annotated ``[[clang::lifetime_capture_by(global)]]``. The analysis cannot track a borrow captured into global or static storage (it does not know where it is stored), so such a capture may dangle undetected; the construct is rejected.
 
@@ -571,8 +572,13 @@ catch a lifetime mistake. The model requires, among other things, that every
 indirection be annotated, that only a single level of indirection be used, that
 user-defined types declare their ownership with ``[[gsl::Owner]]`` or
 ``[[gsl::Pointer]]``, that containers not store indirections (e.g. no
-``std::vector<int*>``), that ``mutable`` fields and ``const_cast`` not be used
-(so const member functions can be assumed not to invalidate borrows), and that
+``std::vector<int*>``), that const member functions not be subverted -- no
+``mutable`` fields, no ``const_cast``, and no mutation of an owner through the
+pointee of a pointer member (smart or raw) -- (so const member functions can be
+assumed not to invalidate borrows), that a call not be passed an owner together with an
+aliasing handle to it (a view of it, or the same owner as two reference
+parameters), that a view/pointer member not be bound to a sibling member of the
+same object, that views not be formed over mutable global state, and that
 exceptions not be used (their unwinding control flow is not modeled).
 
 Opting in is done with the standard diagnostic pragmas, which apply to a region

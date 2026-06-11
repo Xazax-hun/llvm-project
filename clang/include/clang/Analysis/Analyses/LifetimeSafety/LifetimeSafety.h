@@ -255,6 +255,12 @@ public:
   // analysis cannot track.
   virtual void reportViewOnMutableGlobal(const Expr *E) {}
 
+  // Reports a `const` member function that mutates an owner reached through the
+  // pointee of an owning smart-pointer data member. `const` does not protect the
+  // pointee, so this can invalidate borrows the analysis assumes a const member
+  // function leaves intact.
+  virtual void reportConstMethodIndirectMutation(const Expr *E) {}
+
   // Reports a self-referential borrow: a view/pointer member bound to a sibling
   // member of the same object (e.g. 'this->view = this->str;'). Mutating or
   // moving the object invalidates the view, which the intra-procedural analysis

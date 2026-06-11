@@ -36,3 +36,117 @@ struct OptOut {
   mutable int *cache; // no-warning
 #pragma clang diagnostic pop
 };
+
+//===----------------------------------------------------------------------===//
+// A const member function can also subvert const by mutating an owner through
+// the pointee of an owning smart-pointer member: 'const' does not propagate
+// through a smart pointer, so the dereference yields mutable access.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Owner(char)]] Buf {
+  void mutate();    // non-const mutator
+  int read() const; // const accessor
+};
+
+void take_mut(Buf &);
+void take_const(const Buf &);
+void take_val(Buf);
+
+// An owning smart pointer: const operator*/operator-> handing out a non-const
+// pointee, exactly like std::unique_ptr.
+template <class T> struct [[gsl::Owner]] Ptr {
+  T &operator*() const;
+  T *operator->() const;
+};
+
+struct Doc {
+  Ptr<Buf> buf;
+
+  // Mutating uses through the smart pointer in a const method: subversion.
+  void via_method() const {
+    buf->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_func_ref() const {
+    take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_binding() const {
+    Buf &r = *buf; // expected-warning {{const member function mutates an owner through a pointer member}}
+    r.mutate();
+  }
+
+  // Read-only (const) uses are fine.
+  void read_method() const { (void)buf->read(); }                    // no-warning
+  void read_func() const { take_const(*buf); }                       // no-warning
+  void read_binding() const { const Buf &r = *buf; (void)r.read(); } // no-warning
+  void copy_out() const { take_val(*buf); }                          // no-warning
+
+  // A non-const method already has mutable access; nothing is subverted.
+  void non_const() { buf->mutate(); } // no-warning
+};
+
+// The pimpl idiom is not flagged: the pointee is a plain class, not an owner, so
+// mutating it cannot dangle a view.
+struct Impl {
+  void doStuff(); // non-const
+};
+struct Widget {
+  Ptr<Impl> pimpl;
+  void run() const { pimpl->doStuff(); } // no-warning
+};
+
+// But if the pimpl's pointee *transitively contains* a mutable owner, a const
+// method reaching it through the smart pointer gets mutable access to that
+// owner -- exactly the subversion: a sibling const accessor can hand out a
+// borrow into the owner that this const method then invalidates.
+struct OwnerImpl {
+  Buf b; // a gsl::Owner field
+};
+struct OwnerFacade {
+  Ptr<OwnerImpl> pimpl;
+  // Reaches the owner through the smart pointer in a const method (the field
+  // access on the dereferenced pointee is not const-consumed).
+  void grow() const {
+    pimpl->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+};
+
+
+//===----------------------------------------------------------------------===//
+// `const` does not propagate through a RAW pointer either: a const method that
+// mutates an owner through a raw-pointer member is the same subversion.
+//===----------------------------------------------------------------------===//
+
+struct RawDoc {
+  Buf *buf;
+
+  void arrow_mut() const {
+    buf->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void deref_func() const {
+    take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void deref_binding() const {
+    Buf &r = *buf; // expected-warning {{const member function mutates an owner through a pointer member}}
+    r.mutate();
+  }
+  void paren_deref() const {
+    (*buf).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+
+  // Read-only / copy uses are fine.
+  void read_method() const { (void)buf->read(); }                    // no-warning
+  void read_func() const { take_const(*buf); }                       // no-warning
+  void read_binding() const { const Buf &r = *buf; (void)r.read(); } // no-warning
+  void copy_out() const { take_val(*buf); }                          // no-warning
+
+  // A non-const method already has mutable access; nothing is subverted.
+  void non_const() { buf->mutate(); } // no-warning
+};
+
+// Pimpl with a raw pointer to a plain (non-owner) class: not flagged.
+struct RawWidget {
+  Impl *pimpl;
+  void run() const { pimpl->doStuff(); } // no-warning
+};
+
+

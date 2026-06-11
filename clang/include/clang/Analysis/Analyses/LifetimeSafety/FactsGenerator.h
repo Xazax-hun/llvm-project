@@ -161,6 +161,11 @@ private:
   void handleArgumentOverlap(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);
 
+  // Detect a const member function mutating an owner reached through the pointee
+  // of an owning smart-pointer data member (a const-subversion).
+  void handleConstSubversion(const Expr *Call, const FunctionDecl *FD,
+                             ArrayRef<const Expr *> Args);
+
   template <typename Destination, typename Source>
   void flowOrigin(const Destination &D, const Source &S) {
     flow(getOriginNode(D), getOriginNode(S), /*Kill=*/false);

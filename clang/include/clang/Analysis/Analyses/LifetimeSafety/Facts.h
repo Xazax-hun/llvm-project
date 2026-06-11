@@ -400,6 +400,14 @@ enum class UntrackedConstructReason : uint8_t {
   /// intra-procedural analysis cannot see -- invalidating the view, so the
   /// borrow cannot be tracked.
   ViewOnMutableGlobal,
+  /// A `const` member function that mutates an owner reached through the pointee
+  /// of an owning smart-pointer data member (e.g. `void f() const {
+  /// uptr_->append(...); }` where `uptr_` is `std::unique_ptr<std::string>`).
+  /// `const` does not propagate through a smart pointer, so the pointee is
+  /// mutable; this subverts the analysis's assumption that a const member
+  /// function does not invalidate borrows into the object (it can dangle a view
+  /// returned by a sibling accessor).
+  ConstMethodIndirectMutation,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

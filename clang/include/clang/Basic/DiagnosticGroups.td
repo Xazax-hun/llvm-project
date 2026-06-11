@@ -754,8 +754,12 @@ def LifetimeSafetyAssumedInvalidation
     : DiagGroup<"lifetime-safety-assumed-invalidation"> {
   code Documentation = [{
 Warns when a borrow into an owner may be invalidated by an operation the
-analysis conservatively assumes mutates the owner: a non-const member call, or
-passing the owner to a non-const pointer/reference parameter.
+analysis conservatively assumes mutates the owner: a non-const member call
+(other than a recognized standard-library accessor such as 'operator[]', 'at' or
+'data'), passing the owner to a non-const pointer/reference parameter, or passing
+an owner together with a value that aliases it -- a view that borrows it, or the
+same owner bound to two reference/pointer parameters -- so the callee may mutate
+it through one handle while another still refers to it.
   }];
 }
 
@@ -808,9 +812,11 @@ tracked. The construct is rejected under the safe programming model.
 def LifetimeSafetyConstSubversion
     : DiagGroup<"lifetime-safety-const-subversion"> {
   code Documentation = [{
-Warns on a 'mutable' data member or a 'const_cast'. The analysis assumes a
-const member function does not invalidate borrows into the object; a 'mutable'
-field or a 'const_cast' can subvert that assumption, so both are rejected under
+Warns on a 'mutable' data member, a 'const_cast', or a const member function
+that mutates an owner through the pointee of a pointer data member, smart or raw
+('const' does not propagate through a pointer, so the pointee stays mutable).
+The analysis assumes a const member function does not invalidate borrows into
+the object; each of these can subvert that assumption, so all are rejected under
 the safe programming model.
   }];
 }

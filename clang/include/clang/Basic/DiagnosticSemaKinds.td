@@ -11222,6 +11222,13 @@ def warn_lifetime_safety_const_cast
               "invalidate borrows into the object">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
+def warn_lifetime_safety_const_indirect_mutation
+    : Warning<"this const member function mutates an owner through a "
+              "pointer member; 'const' does not protect the pointee, so "
+              "lifetime safety can no longer assume const member functions do "
+              "not invalidate borrows into the object">,
+      InGroup<LifetimeSafetyConstSubversion>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

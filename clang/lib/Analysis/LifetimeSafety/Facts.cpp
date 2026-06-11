@@ -143,6 +143,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::ViewOnMutableGlobal:
     OS << "ViewOnMutableGlobal";
     break;
+  case UntrackedConstructReason::ConstMethodIndirectMutation:
+    OS << "ConstMethodIndirectMutation";
+    break;
   }
   OS << ")\n";
 }

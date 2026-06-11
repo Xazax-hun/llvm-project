@@ -14,6 +14,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/OperationKinds.h"
+#include "clang/AST/ParentMap.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
@@ -560,6 +561,9 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   }
 }
 
+// Defined below; declared here for use in VisitUnaryOperator.
+static bool isConstConsumed(const Expr *E, ParentMap &PM);
+
 void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   switch (UO->getOpcode()) {
   case UO_AddrOf: {
@@ -574,6 +578,22 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   case UO_Deref: {
     const Expr *SubExpr = UO->getSubExpr();
     killAndFlowOrigin(*UO, *SubExpr);
+    // Const-subversion: in a const member function, `*this->rawptr` where
+    // `rawptr` is a raw pointer to an owner yields mutable access to the pointee
+    // (`const` does not propagate through a raw pointer). Flag unless the
+    // dereference is consumed const-ly (a const reference/argument, a copy, or a
+    // const member call). Mirrors the smart-pointer handling in
+    // handleConstSubversion; the `ptr->method()` arrow form is handled there.
+    if (const auto *EnclMD = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
+        EnclMD && EnclMD->isConst())
+      if (const auto *ME = dyn_cast<MemberExpr>(SubExpr->IgnoreParenImpCasts());
+          ME && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts()))
+        if (const auto *FieldD = dyn_cast<FieldDecl>(ME->getMemberDecl());
+            FieldD && FieldD->getType()->isPointerType() &&
+            isGslOwnerType(FieldD->getType()->getPointeeType()) &&
+            !isConstConsumed(UO, AC.getParentMap()))
+          CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+              UntrackedConstructReason::ConstMethodIndirectMutation, UO));
     return;
   }
   default:
@@ -1539,6 +1559,94 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   }
 }
 
+/// Returns true if the glvalue `E` is consumed in a way that cannot mutate the
+/// object it denotes: through a const-qualifying conversion (a const reference
+/// binding or const-ref argument, which Clang models as a NoOp cast to a
+/// const-qualified type), a by-value copy, or as the object of a const member
+/// call. Used to tell a read-only use of a smart-pointer dereference from a
+/// mutating one.
+static bool isConstConsumed(const Expr *E, ParentMap &PM) {
+  const Stmt *P = PM.getParentIgnoreParens(E);
+  if (!P)
+    return false;
+  if (const auto *CE = dyn_cast<CastExpr>(P)) {
+    // `operator->` yields a pointer, so a const consumer casts to `const T *`
+    // (pointer-to-const); `operator*` yields an lvalue, cast to `const T`. Strip
+    // one level of pointer so both are recognized.
+    QualType T = CE->getType().getNonReferenceType();
+    if (T->isPointerType())
+      T = T->getPointeeType();
+    return T.isConstQualified();
+  }
+  // A copy / temporary materialization yields an independent object.
+  if (isa<CXXConstructExpr>(P) || isa<MaterializeTemporaryExpr>(P))
+    return true;
+  // The object of a member call: safe iff the callee is a const method.
+  if (const auto *ME = dyn_cast<MemberExpr>(P))
+    if (const auto *M = dyn_cast<CXXMethodDecl>(ME->getMemberDecl()))
+      return M->isConst();
+  return false;
+}
+
+void FactsGenerator::handleConstSubversion(const Expr *Call,
+                                           const FunctionDecl *FD,
+                                           ArrayRef<const Expr *> Args) {
+  // Only inside a const member function: `const` is what the analysis trusts.
+  const auto *Enclosing = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
+  if (!Enclosing || !Enclosing->isConst())
+    return;
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  if (!Method || Args.empty())
+    return;
+  // The receiver, after stripping the load of the pointer member, should be
+  // `this->m`.
+  const auto *ME = dyn_cast<MemberExpr>(Args[0]->IgnoreParenImpCasts());
+  const FieldDecl *FieldD =
+      ME && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts())
+          ? dyn_cast<FieldDecl>(ME->getMemberDecl())
+          : nullptr;
+
+  // (1) Smart-pointer dereference: `operator->`/`operator*` on an owning
+  // smart-pointer data member of `this`. `const` does not propagate through the
+  // smart pointer, so the pointee is mutable even though the member (and `this`)
+  // are const.
+  OverloadedOperatorKind OO = Method->getOverloadedOperator();
+  if (OO == OO_Arrow || OO == OO_Star) {
+    if (!FieldD || !isGslOwnerType(FieldD->getType())) // owning smart pointer
+      return;
+    // The pointee must be an owner -- or transitively contain a mutable owner
+    // field -- i.e. something a sibling accessor can hand out a borrow into
+    // (e.g. std::string -> string_view, or a pimpl `Impl` holding a
+    // std::vector). A plain pimpl whose `Impl` holds no owner is excluded: a
+    // const method that mutates such an *pimpl cannot dangle a view.
+    QualType Pointee = Call->getType();
+    if (Pointee->isPointerType())
+      Pointee = Pointee->getPointeeType();
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+    if (!isGslOwnerType(Pointee) &&
+        !recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited))
+      return;
+    // Safe iff the dereference result is consumed const-ly. Otherwise the const
+    // member function obtained mutable access to the owner -- a const subversion
+    // (it can invalidate a borrow a sibling accessor handed out).
+    if (!isConstConsumed(Call, AC.getParentMap()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::ConstMethodIndirectMutation, Call));
+    return;
+  }
+
+  // (2) Raw-pointer arrow: `this->rawptr->nonConstMethod()`. `const` does not
+  // propagate through a raw pointer either, so the pointee is mutable. The
+  // receiver is the loaded pointer member; a non-const call on the owner pointee
+  // is a mutation. (Const-method calls are read-only; the `*ptr` deref forms go
+  // through VisitUnaryOperator.)
+  if (Method->isInstance() && !Method->isConst() && !isa<CXXConstructorDecl>(FD) &&
+      FieldD && FieldD->getType()->isPointerType() &&
+      isGslOwnerType(FieldD->getType()->getPointeeType()))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::ConstMethodIndirectMutation, Call));
+}
+
 // Soundness: an ownership-transferring move of an owner (std::move/forward of
 // a gsl::Owner, or std::unique_ptr::release) is not modeled, so it silences the
 // analysis for the moved-from object. Moving a pointer-like value is a harmless
@@ -1593,6 +1701,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         UntrackedConstructReason::OwnerOfIndirection, Call));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
+  handleConstSubversion(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);

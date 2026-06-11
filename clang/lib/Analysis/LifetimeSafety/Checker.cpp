@@ -648,6 +648,9 @@ public:
     case UntrackedConstructReason::ViewOnMutableGlobal:
       SemaHelper->reportViewOnMutableGlobal(E);
       break;
+    case UntrackedConstructReason::ConstMethodIndirectMutation:
+      SemaHelper->reportConstMethodIndirectMutation(E);
+      break;
     }
   }
 
