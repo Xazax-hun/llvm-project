@@ -1671,36 +1671,34 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
 }
 
 void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
-                                                  const FunctionDecl *FD) {
-  // A call to a closure's `operator()`. A lambda that captures a variable by
-  // reference holds non-const access to it (the reference is not const even
-  // though `operator()` is const by default), so calling the closure is, for an
-  // owner captured by reference, equivalent to passing that owner to a non-const
-  // reference parameter: it may reallocate the owner and invalidate borrows into
-  // it. By-value captures are independent copies and are not flagged.
-  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  if (!Method)
-    return;
-  const CXXRecordDecl *Closure = Method->getParent();
-  if (!Closure || !Closure->isLambda())
-    return;
-  for (const LambdaCapture &Cap : Closure->captures()) {
-    if (Cap.getCaptureKind() != LCK_ByRef || !Cap.capturesVariable())
+                                                  const FunctionDecl *FD,
+                                                  ArrayRef<const Expr *> Args) {
+  // A call may invoke a callable it receives -- for `closure()` the closure is
+  // the receiver (argument 0 of operator()); for `run(closure)` it is a passed
+  // argument that the callee may invoke. Invoking a callable can mutate whatever
+  // it holds non-const access to: the variables it captured by reference (the
+  // reference is not const even though operator() is). A
+  // [[clang::noescape]] parameter does not prevent that -- it only promises the
+  // borrow is not stored beyond the call.
+  //
+  // The callable's value already carries the loans of its by-reference captures:
+  // VisitLambdaExpr flows each capture's origin into the closure, and
+  // std::function construction/assignment flows the stored closure's origins
+  // onward. So rather than match the lambda literal syntactically (which misses
+  // a closure laundered through a std::function variable, a `?:`, a wrapper,
+  // ...), invalidate the loans the callable argument's value origin holds and
+  // let the checker connect them to any live borrow. The invocation may happen
+  // in a callee we cannot see, so this is done at the call site, where a borrow
+  // into the captured owner may be live.
+  (void)FD;
+  for (const Expr *Arg : Args) {
+    const CXXRecordDecl *RD =
+        Arg->getType().getNonReferenceType()->getAsCXXRecordDecl();
+    if (!RD || !(RD->isLambda() || isStdCallableWrapperType(RD)))
       continue;
-    const auto *VD = dyn_cast<VarDecl>(Cap.getCapturedVar());
-    if (!VD || !(isMutableOwnerType(VD->getType()) ||
-                 recordHasGslOwnerField(VD->getType())))
-      continue;
-    // The captured owner has no DeclRefExpr at the call site, so synthesize a
-    // borrow of it (a loan rooted at the variable) in a fresh origin and
-    // invalidate that -- mirroring how passing the owner to a non-const
-    // reference parameter invalidates the argument's loan.
-    const Loan *L = FactMgr.getLoanMgr().createLoan(AccessPath(VD), Call);
-    OriginNode *N = FactMgr.getOriginMgr().createDetachedOrigin();
-    CurrentBlockFacts.push_back(
-        FactMgr.createFact<IssueFact>(L->getID(), N->getOriginID()));
-    CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-        N->getOriginID(), Call, /*Assumed=*/true));
+    if (OriginNode *N = getRValueOrigins(Arg, getOriginNode(*Arg)))
+      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+          N->getOriginID(), Call, /*Assumed=*/true));
   }
 }
 
@@ -1765,7 +1763,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleConstSubversion(Call, FD, Args);
-  handleLambdaCallInvalidation(Call, FD);
+  handleLambdaCallInvalidation(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);
