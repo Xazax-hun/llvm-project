@@ -241,6 +241,7 @@ public:
         else if (const auto *OEF = F->getAs<OriginEscapesFact>()) {
           checkAnnotations(OEF);
           checkBorrowFromMutableGlobal(OEF);
+          checkEscapedLostLoan(OEF);
         }
         else if (const auto *UF = F->getAs<UseFact>()) {
           checkLostLoan(UF);
@@ -292,7 +293,8 @@ public:
     // trust the promise and may keep the result past that object's lifetime.
     if (isa<ReturnEscapeFact>(OEF) && FD->hasAttr<LifetimeImmortalAttr>()) {
       for (LoanID LID : EscapedLoans) {
-        const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+        const Loan *EL = FactMgr.getLoanMgr().getLoan(LID);
+        const AccessPath &AP = EL->getAccessPath();
         switch (AP.getKind()) {
         case AccessPath::Kind::Immortal:
         case AccessPath::Kind::NewAllocation:
@@ -302,8 +304,12 @@ public:
           // be a local laundered through a borrow-returning call (e.g.
           // string_view::substr yields an Unknown loan even when it views a
           // local). An immortal function must return only provably-immortal
-          // storage, so an unverifiable borrow is a violation too.
-          ImmortalReturnsUntracked = true;
+          // storage, so an unverifiable borrow is a violation too. But an Unknown
+          // loan from a *construct* expression is a default/empty view
+          // (`return {};`) that borrows nothing -- that is genuinely immortal, so
+          // only a call-issued untracked borrow is a violation.
+          if (isa_and_present<CallExpr>(EL->getIssuingExpr()))
+            ImmortalReturnsUntracked = true;
           continue;
         case AccessPath::Kind::PlaceholderThis:
           ImmortalViolationSubject = std::max(ImmortalViolationSubject, 2);
@@ -677,6 +683,49 @@ public:
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;
     SemaHelper->reportLostLoan(UseExpr);
+  }
+
+  /// Soundness: like checkLostLoan, but for an origin that *escapes* the function
+  /// (via return, or a store to a field/global) carrying an Unknown loan -- an
+  /// untracked borrow (e.g. a non-lifetimebound view returned by
+  /// std::string_view::substr). checkLostLoan only fires on a local *use*; an
+  /// Unknown loan that is returned or stored without a local use would otherwise
+  /// leave the function silently, defeating the annotation checks downstream
+  /// (e.g. a [[clang::noescape]] parameter laundered through substr escapes via
+  /// return without a noescape violation). An immortal return is reported more
+  /// specifically as an immortal violation (see checkAnnotations), so it is
+  /// excluded here to avoid a duplicate.
+  void checkEscapedLostLoan(const OriginEscapesFact *OEF) {
+    if (!SemaHelper)
+      return;
+    if (isa<ReturnEscapeFact>(OEF) && FD && FD->hasAttr<LifetimeImmortalAttr>())
+      return;
+    for (LoanID LID : LoanPropagation.getLoans(OEF->getEscapedOriginID(), OEF)) {
+      const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
+      if (!L->getAccessPath().isUnknown())
+        continue;
+      // Only an Unknown loan from a borrow-returning *call* whose result was not
+      // tracked (e.g. std::string_view::substr) -- that is a borrow the analysis
+      // lost. An Unknown loan issued by a construct expression is a default/empty
+      // view (`return {};`), which borrows nothing and is safe to escape; do not
+      // flag it.
+      const Expr *Issuing = L->getIssuingExpr();
+      if (!isa_and_present<CallExpr>(Issuing))
+        continue;
+      // Anchor at the underlying borrow expression: the return operand (stripped
+      // of the implicit owner->view conversion) when returning, else the call
+      // that issued the untracked loan.
+      const Expr *Anchor = Issuing;
+      if (const auto *RE = dyn_cast<ReturnEscapeFact>(OEF))
+        if (const Expr *Ret = RE->getReturnExpr())
+          Anchor = Ret->IgnoreImplicit();
+      if (!Anchor)
+        continue;
+      if (!ReportedLostLoanLocs.insert(Anchor->getExprLoc()).second)
+        return;
+      SemaHelper->reportLostLoan(Anchor);
+      return;
+    }
   }
 
   /// Soundness: a pointer/reference/view that borrows *into* a mutable global or

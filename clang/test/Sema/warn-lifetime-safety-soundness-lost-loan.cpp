@@ -108,3 +108,36 @@ int index_int_to_ptr(unsigned long n) {
 int cstyle_int_to_ptr(unsigned long n) {
   return *(int *)(n); // expected-warning {{lifetime safety cannot track this value here}}
 }
+
+//===----------------------------------------------------------------------===//
+// Escaping (returned / stored) untracked borrows. checkLostLoan fires on a
+// local *use*; an untracked (Unknown) loan that leaves the function via return
+// or a store -- without a local use -- is caught here too, so it cannot defeat
+// the downstream annotation checks (e.g. a [[clang::noescape]] parameter
+// laundered through an unmodeled call escapes via return). Only an Unknown loan
+// from a borrow-returning *call* counts; a default/empty construction
+// (`return {};`, `nullptr`) borrows nothing and stays silent.
+//===----------------------------------------------------------------------===//
+
+// The result of an unmodeled call is returned directly (no local use).
+int *return_unmodeled() {
+  return make(); // expected-warning {{lifetime safety cannot track this value here; no borrow information flows into it, so a borrow was likely lost to an unmodeled construct}}
+}
+
+// Stored into a field.
+struct Holder {
+  int *p;
+  void set() { p = make(); } // expected-warning {{lifetime safety cannot track this value here}}
+};
+
+// Stored into global storage.
+int *g_ptr;
+void store_global() {
+  g_ptr = make(); // expected-warning {{lifetime safety cannot track this value here}}
+}
+
+// Negatives: nothing is borrowed, so escaping is safe.
+int *return_null() { return nullptr; }                 // no-warning
+int *return_tracked() { static int g; return &g; }     // no-warning
+int *return_immortal_call() { return get_immortal(); } // no-warning
+
