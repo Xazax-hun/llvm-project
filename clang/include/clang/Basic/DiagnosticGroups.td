@@ -833,6 +833,18 @@ the safe programming model.
   }];
 }
 
+def LifetimeSafetyOwnerCapture
+    : DiagGroup<"lifetime-safety-owner-capture"> {
+  code Documentation = [{
+Warns on '[[clang::lifetime_capture_by(this)]]' applied to a parameter of a
+[[gsl::Owner]] type. An owner is meant to own its contents, not to capture a
+borrow into its members; a borrow captured into an owner cannot be tracked once
+the owner is passed elsewhere (its members are opaque), so the construct is
+rejected under the safe programming model. Use a [[gsl::Pointer]] (view) type to
+hold a borrow.
+  }];
+}
+
 def LifetimeSafetySelfReferential
     : DiagGroup<"lifetime-safety-self-referential"> {
   code Documentation = [{
@@ -883,6 +895,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyPointerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,
                                          LifetimeSafetyConstSubversion,
+                                         LifetimeSafetyOwnerCapture,
                                          LifetimeSafetySelfReferential,
                                          LifetimeSafetyGlobalCapture,
                                          // An annotation that cannot be verified

@@ -4486,6 +4486,16 @@ void Sema::LazyProcessLifetimeCaptureByParams(FunctionDecl *FD) {
       }
       if (Name == "unknown" || Name == "global")
         DisallowReservedParams(Name);
+      // Lifetime safety (safe programming model): capturing a borrow into the
+      // members of a [[gsl::Owner]] via 'lifetime_capture_by(this)' is not
+      // supported -- an owner owns its contents, and a borrow stashed in its
+      // (opaque) members cannot be tracked once the owner is passed elsewhere.
+      // Use a [[gsl::Pointer]] (view) type to hold a borrow instead.
+      if (Name == "this")
+        if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+            MD && MD->getParent() && MD->getParent()->hasAttr<OwnerAttr>())
+          Diag(CapturedBy->getArgLocs()[I],
+               diag::warn_lifetime_safety_owner_captures_borrow);
       CapturedBy->setParamIdx(I, It->second);
     }
   }

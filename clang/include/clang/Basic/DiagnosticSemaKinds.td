@@ -11228,6 +11228,13 @@ def warn_lifetime_safety_const_cast
               "invalidate borrows into the object">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
+def warn_lifetime_safety_owner_captures_borrow
+    : Warning<"'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not "
+              "supported by lifetime safety: an owner is meant to own its "
+              "contents, and a borrow captured into its members cannot be "
+              "tracked">,
+      InGroup<LifetimeSafetyOwnerCapture>,
+      DefaultIgnore;
 def warn_lifetime_safety_const_indirect_mutation
     : Warning<"this const member function mutates an owner through a "
               "pointer member; 'const' does not protect the pointee, so "
