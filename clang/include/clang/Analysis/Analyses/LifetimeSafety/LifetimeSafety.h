@@ -237,6 +237,11 @@ public:
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}
 
+  // Reports an expression that forms more than one level of indirection (e.g.
+  // '&p' where 'p' is itself a pointer/view), which the analysis cannot fully
+  // model. Mirrors the declaration-level ban for transient expressions.
+  virtual void reportMultiLevelIndirection(const Expr *E) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}

@@ -578,6 +578,16 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     // to propagate any loans held by the sub-expression's origin to the
     // origin of this UnaryOperator expression.
     killAndFlowOrigin(*UO, *SubExpr);
+    // Soundness: taking the address of an indirection (`&p` where `p` is a
+    // pointer or a view) forms a second level of indirection that the analysis
+    // cannot fully model -- the same single-indirection rule the model enforces
+    // on declarations, applied to transient expressions (which can otherwise
+    // build a double indirection no declaration captures, e.g. `*&sv = q` or
+    // `*(c ? &a : &b) = q`). Taking the address of a non-indirection (an owner,
+    // a scalar) stays a single level and is fine.
+    if (isPointerLikeType(SubExpr->getType().getNonReferenceType()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::MultiLevelIndirectionExpr, UO));
     return;
   }
   case UO_Deref: {

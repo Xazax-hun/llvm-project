@@ -531,6 +531,10 @@ public:
            diag::warn_lifetime_safety_multilevel_indirection)
         << getDiagSubjectDescription(VD) << VD->getSourceRange();
   }
+  void reportMultiLevelIndirection(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_multilevel_indirection)
+        << getDiagSubjectDescription(E) << E->getSourceRange();
+  }
 
   void reportMoveSilencing(const Expr *MoveExpr) override {
     S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)

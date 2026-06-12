@@ -802,6 +802,9 @@ public:
     case UntrackedConstructReason::ConstMethodIndirectMutation:
       SemaHelper->reportConstMethodIndirectMutation(E);
       break;
+    case UntrackedConstructReason::MultiLevelIndirectionExpr:
+      SemaHelper->reportMultiLevelIndirection(E);
+      break;
     }
   }
 

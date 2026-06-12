@@ -25,11 +25,24 @@ void params(int **pp,   // expected-warning {{parameter 'pp' uses more than one 
 void locals() {
   int x = 0;
   int *p = &x;        // single level: no warning
-  int **pp = &p;      // expected-warning {{local variable 'pp' uses more than one level of indirection}}
+  int **pp = &p;      // expected-warning {{local variable 'pp' uses more than one level of indirection}} expected-warning {{uses more than one level of indirection}}
   View *vp = nullptr; // expected-warning {{local variable 'vp' uses more than one level of indirection}}
   (void)p;
   (void)pp;
   (void)vp;
+}
+
+// Taking the address of an indirection forms a second level even when no
+// declaration captures it; flagged at the expression.
+void addressof_indirection(int *p, View v) {
+  (void)&p; // expected-warning {{uses more than one level of indirection}}
+  (void)&v; // expected-warning {{uses more than one level of indirection}}
+}
+
+// Taking the address of a non-indirection (a scalar, an owner) stays a single
+// level and is fine.
+void addressof_value(int x) {
+  (void)&x; // no-warning
 }
 
 // main's 'argv'/'envp' are 'char**' (a character pointer-chain) by language

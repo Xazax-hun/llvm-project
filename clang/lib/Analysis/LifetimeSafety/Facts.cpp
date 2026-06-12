@@ -149,6 +149,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::ConstMethodIndirectMutation:
     OS << "ConstMethodIndirectMutation";
     break;
+  case UntrackedConstructReason::MultiLevelIndirectionExpr:
+    OS << "MultiLevelIndirectionExpr";
+    break;
   }
   OS << ")\n";
 }

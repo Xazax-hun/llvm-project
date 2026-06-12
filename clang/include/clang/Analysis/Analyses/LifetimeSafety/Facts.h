@@ -425,6 +425,12 @@ enum class UntrackedConstructReason : uint8_t {
   /// function does not invalidate borrows into the object (it can dangle a view
   /// returned by a sibling accessor).
   ConstMethodIndirectMutation,
+  /// An expression that forms more than one level of indirection, e.g. `&p`
+  /// where `p` is itself a pointer/view (taking the address of an indirection),
+  /// or constructing a view over a pointer/view. The declaration-level
+  /// single-indirection rule is mirrored here for transient expressions, which
+  /// could otherwise build a double indirection no declaration captures.
+  MultiLevelIndirectionExpr,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

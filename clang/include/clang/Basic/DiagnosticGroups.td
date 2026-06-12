@@ -749,8 +749,10 @@ def LifetimeSafetyMultilevelIndirection
     : DiagGroup<"lifetime-safety-multilevel-indirection"> {
   code Documentation = [{
 Warns on declarations that use more than one level of indirection (e.g.
-'int **'), which the lifetime safety analysis cannot fully model. The "safe
-programming model" supports only a single level of indirection.
+'int **'), and on expressions that form one (e.g. '&p' where 'p' is itself a
+pointer or view -- taking the address of an indirection), which the lifetime
+safety analysis cannot fully model. The "safe programming model" supports only a
+single level of indirection.
   }];
 }
 
