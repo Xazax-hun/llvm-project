@@ -150,6 +150,12 @@ public:
   virtual void
   reportLifetimeboundViolation(const CXXMethodDecl *MDWithLifetimebound) {}
 
+  // Reports a [[clang::lifetime_immortal]] function whose body returns a borrow
+  // of non-immortal storage. `Subject` selects the borrowed entity: 0 = a
+  // local/temporary, 1 = a parameter, 2 = the implicit this parameter.
+  virtual void reportImmortalViolation(const FunctionDecl *FD,
+                                       unsigned Subject) {}
+
   // Reports a member function definition that has [[clang::lifetimebound]] on
   // the implicit this parameter when the canonical declaration does not.
   virtual void reportMisplacedLifetimebound(WarningScope Scope,

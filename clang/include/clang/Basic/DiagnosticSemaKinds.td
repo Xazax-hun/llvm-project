@@ -11042,6 +11042,15 @@ def warn_lifetime_safety_lifetimebound_violation
     : Warning<"could not verify that the return value can be lifetime bound to %select{an unnamed parameter|'%1'|the implicit this parameter}0">,
       InGroup<LifetimeSafetyLifetimeboundViolation>,
       DefaultIgnore;
+def warn_lifetime_safety_immortal_violation
+    : Warning<"'[[clang::lifetime_immortal]]' function returns a borrow of "
+              "%select{a local or temporary|a parameter|the implicit this "
+              "parameter|an object the analysis cannot prove is immortal}0, "
+              "which is not known to be immortal storage; the unverified "
+              "promise that the result lives forever lets callers keep it past "
+              "the borrowed object's lifetime">,
+      InGroup<LifetimeSafetyImmortalViolation>,
+      DefaultIgnore;
 
 def warn_lifetime_safety_intra_tu_misplaced_lifetimebound
     : Warning<"'lifetimebound' attribute on this definition is not visible to callers before the definition; add it to the declaration instead">,

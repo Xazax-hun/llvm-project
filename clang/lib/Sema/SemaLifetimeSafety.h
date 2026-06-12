@@ -41,6 +41,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_dangling_global_moved,
       diag::warn_lifetime_safety_noescape_escapes,
       diag::warn_lifetime_safety_lifetimebound_violation,
+      diag::warn_lifetime_safety_immortal_violation,
       diag::warn_lifetime_safety_cross_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_intra_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_invalidated_field,
@@ -349,6 +350,13 @@ public:
     S.Diag(Attr->getLocation(),
            diag::warn_lifetime_safety_lifetimebound_violation)
         << 2 << "" << Attr->getRange();
+  }
+
+  void reportImmortalViolation(const FunctionDecl *FD,
+                               unsigned Subject) override {
+    const auto *Attr = FD->getAttr<LifetimeImmortalAttr>();
+    SourceLocation Loc = Attr ? Attr->getLocation() : FD->getLocation();
+    S.Diag(Loc, diag::warn_lifetime_safety_immortal_violation) << Subject;
   }
 
   void reportMisplacedLifetimebound(WarningScope Scope,

@@ -631,6 +631,17 @@ This warning may produce false-positives diagnostics when it cannot fully model 
   }];
 }
 
+def LifetimeSafetyImmortalViolation
+    : DiagGroup<"lifetime-safety-immortal-violation"> {
+  code Documentation = [{
+Detects a function marked [[clang::lifetime_immortal]] whose body returns a
+borrow of a parameter, the implicit object ('this'), or a local/temporary --
+i.e. storage that is not actually immortal. Unlike [[clang::lifetimebound]],
+the immortal promise is otherwise trusted unverified, so a caller may keep the
+returned borrow past the borrowed object's lifetime; the body is verified here.
+  }];
+}
+
 def LifetimeSafetyCrossTUMisplacedLifetimebound
     : DiagGroup<"lifetime-safety-cross-tu-misplaced-lifetimebound">;
 def LifetimeSafetyIntraTUMisplacedLifetimebound
@@ -688,6 +699,7 @@ Detects misuse of [[clang::noescape]] annotation where the parameter escapes (fo
 def LifetimeSafetyValidations : DiagGroup<"lifetime-safety-validations",
                                           [LifetimeSafetyNoescape,
                                            LifetimeSafetyLifetimeboundViolation,
+                                           LifetimeSafetyImmortalViolation,
                                            LifetimeSafetyMisplacedLifetimebound]> {
   code Documentation = [{
 Verify function implementations adhere to the annotated lifetime contracts through lifetime safety
@@ -906,6 +918,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          // contract the body does not honor.
                                          LifetimeSafetyNoescape,
                                          LifetimeSafetyLifetimeboundViolation,
+                                         LifetimeSafetyImmortalViolation,
                                          // An override that drops a 'noescape'
                                          // its overridden method advertises is a
                                          // soundness hole: callers dispatching

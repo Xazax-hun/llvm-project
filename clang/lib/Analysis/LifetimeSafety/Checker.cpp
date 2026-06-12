@@ -159,6 +159,16 @@ private:
   llvm::DenseMap<const ParmVarDecl *, const VarDecl *>
       AnnotatedParamEscapesToGlobalMap;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
+  /// For a [[clang::lifetime_immortal]] function: the worst offending subject
+  /// its return value borrows (0 = local/temporary, 1 = parameter, 2 = this);
+  /// -1 when none seen. A non-immortal return makes the immortal promise a lie.
+  int ImmortalViolationSubject = -1;
+  /// For a [[clang::lifetime_immortal]] function: whether the return value
+  /// carries an untracked (Unknown) loan the analysis cannot prove is immortal
+  /// (e.g. a local borrow laundered through a borrow-returning call such as
+  /// string_view::substr). Reported (subject 3) only when no concrete offending
+  /// subject above was found, so a precise local/param/this report is preferred.
+  bool ImmortalReturnsUntracked = false;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
@@ -275,6 +285,47 @@ public:
   void checkAnnotations(const OriginEscapesFact *OEF) {
     OriginID EscapedOID = OEF->getEscapedOriginID();
     LoanSet EscapedLoans = LoanPropagation.getLoans(EscapedOID, OEF);
+    // A [[clang::lifetime_immortal]] function promises its return value lives
+    // forever. Verify the body: a returned borrow must be of genuinely immortal
+    // storage (immortal/heap, or a global/static variable). A borrow of a
+    // parameter, the implicit object, or a local/temporary is a lie -- callers
+    // trust the promise and may keep the result past that object's lifetime.
+    if (isa<ReturnEscapeFact>(OEF) && FD->hasAttr<LifetimeImmortalAttr>()) {
+      for (LoanID LID : EscapedLoans) {
+        const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+        switch (AP.getKind()) {
+        case AccessPath::Kind::Immortal:
+        case AccessPath::Kind::NewAllocation:
+          continue;
+        case AccessPath::Kind::Unknown:
+          // Untracked: the analysis cannot prove this borrow is immortal. It may
+          // be a local laundered through a borrow-returning call (e.g.
+          // string_view::substr yields an Unknown loan even when it views a
+          // local). An immortal function must return only provably-immortal
+          // storage, so an unverifiable borrow is a violation too.
+          ImmortalReturnsUntracked = true;
+          continue;
+        case AccessPath::Kind::PlaceholderThis:
+          ImmortalViolationSubject = std::max(ImmortalViolationSubject, 2);
+          continue;
+        case AccessPath::Kind::PlaceholderParam:
+          ImmortalViolationSubject = std::max(ImmortalViolationSubject, 1);
+          continue;
+        case AccessPath::Kind::ValueDecl: {
+          const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
+          // A global/static variable is immortal; a local/field is not.
+          if (VD && VD->hasGlobalStorage())
+            continue;
+          ImmortalViolationSubject = std::max(ImmortalViolationSubject, 0);
+          continue;
+        }
+        case AccessPath::Kind::MaterializeTemporary:
+        case AccessPath::Kind::Uninitialized:
+          ImmortalViolationSubject = std::max(ImmortalViolationSubject, 0);
+          continue;
+        }
+      }
+    }
     auto CheckParam = [&](const ParmVarDecl *PVD, bool IsMoved) {
       // NoEscape param should not escape.
       if (PVD->hasAttr<NoEscapeAttr>()) {
@@ -1177,6 +1228,11 @@ public:
   void reportLifetimeboundViolations() {
     if (!isa<FunctionDecl>(FD))
       return;
+    if (ImmortalViolationSubject >= 0)
+      SemaHelper->reportImmortalViolation(
+          cast<FunctionDecl>(FD), unsigned(ImmortalViolationSubject));
+    else if (ImmortalReturnsUntracked)
+      SemaHelper->reportImmortalViolation(cast<FunctionDecl>(FD), /*Subject=*/3);
     if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
         MD && getImplicitObjectParamLifetimeBoundAttr(MD) &&
         !VerifiedLiftimeboundEscapes.contains(MD))
