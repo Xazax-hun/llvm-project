@@ -34,16 +34,16 @@ template <class Ptr> struct [[gsl::Pointer]] wrap_iter {
 
 // Reject: pointee/element type is an indirection.
 void local_span_of_ptr() {
-  std::span<int *> s; // expected-warning {{type 'std::span<int *>' is a view whose pointee type is itself a pointer or reference; lifetime safety cannot track borrows held one level below the view}}
+  std::span<int *> s; // expected-warning {{type 'std::span<int *>' is a view whose pointee type holds a borrow (a pointer, reference, or unannotated borrow-holding type); lifetime safety cannot track borrows held one level below the view}}
   (void)s;
 }
 
 void local_span_of_view() {
-  std::span<std::string_view> s; // expected-warning {{is a view whose pointee type is itself a pointer or reference}}
+  std::span<std::string_view> s; // expected-warning {{is a view whose pointee type holds a borrow}}
   (void)s;
 }
 
-void param_span_of_ptr(std::span<int *> s [[clang::noescape]]) { // expected-warning {{is a view whose pointee type is itself a pointer or reference}}
+void param_span_of_ptr(std::span<int *> s [[clang::noescape]]) { // expected-warning {{is a view whose pointee type holds a borrow}}
   (void)s;
 }
 
@@ -86,7 +86,7 @@ template <class T> struct [[gsl::Pointer]] View {
 };
 
 void custom_view_of_ptr() {
-  View<int *> v; // expected-warning {{is a view whose pointee type is itself a pointer or reference}}
+  View<int *> v; // expected-warning {{is a view whose pointee type holds a borrow}}
   (void)v;
 }
 
@@ -94,3 +94,30 @@ void custom_view_of_owner() {
   View<Res> v; // no-warning (pointee is an owner)
   (void)v;
 }
+
+//===----------------------------------------------------------------------===//
+// The pointee can also be declared via the [[gsl::Pointer(T)]] attribute's
+// optional type argument (rather than a typedef / template argument).
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer(int *)]] AttrViewOfPtr {
+  int **pp;
+};
+void attr_view_of_ptr() {
+  AttrViewOfPtr v; // expected-warning {{is a view whose pointee type holds a borrow}}
+  (void)v;
+}
+
+struct [[gsl::Pointer(char)]] AttrViewOfChar {
+  const char *p;
+};
+void attr_view_of_value() {
+  AttrViewOfChar v; // no-warning (pointee is not an indirection)
+  (void)v;
+}
+
+// A pointer-of-indirection used as a DATA MEMBER is rejected at the class
+// definition, mirroring the local/parameter checks.
+struct HasViewOfIndirectionMember {
+  View<int *> v; // expected-warning {{is a view whose pointee type holds a borrow}}
+};

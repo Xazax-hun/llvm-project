@@ -35,7 +35,7 @@ void insertion() {
 // the safe model surfaces it (string concatenation copies, container insertion
 // of a pointer captures).
 void push_back_borrow_still_flagged() {
-  std::vector<int *> v; // expected-warning {{is a container whose element type is a pointer or reference}}
+  std::vector<int *> v; // expected-warning {{is a container whose element type holds a borrow}}
   int x = 5;
   v.push_back(&x); // expected-warning {{argument is bound to a parameter that can hold a borrow but is not annotated}}
 }

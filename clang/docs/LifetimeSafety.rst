@@ -542,8 +542,8 @@ enables only the high-confidence subset of these checks.
   * ``-Wlifetime-safety-naked-delete``: Warns on a ``delete``/``free`` of a pointer whose allocation the analysis did not see (deallocations inside destructors are exempt).
   * ``-Wlifetime-safety-unknown-ownership``: Warns on a value of a user-defined type that can hold a borrow but is annotated neither ``[[gsl::Owner]]`` nor ``[[gsl::Pointer]]``.
   * ``-Wlifetime-safety-exception``: Warns on a ``throw`` or a ``try``/``catch``. Exception control flow (stack unwinding, running destructors and resuming in a handler) is not modeled, so a borrow that dangles only along an exception path can be missed.
-  * ``-Wlifetime-safety-owner-of-indirection``: Warns on a value of a ``[[gsl::Owner]]`` container whose element type is an indirection (e.g. ``std::vector<int*>``); the analysis does not track borrows held by individual elements.
-  * ``-Wlifetime-safety-pointer-of-indirection``: Warns on a value of a ``[[gsl::Pointer]]`` view whose pointee/element type is itself an indirection (e.g. ``std::span<int*>``); the view tracks only its outer level, so a borrow held one level deeper is not modeled.
+  * ``-Wlifetime-safety-owner-of-indirection``: Warns on a value of a ``[[gsl::Owner]]`` container whose element type is an indirection -- a pointer, reference, ``[[gsl::Pointer]]``, or a complete unannotated user type that itself holds a borrow (e.g. ``std::vector<int*>``, or ``std::unique_ptr<Box>`` where ``Box`` has a ``std::string_view`` member). The element type is taken from the container's template arguments or, for a non-template owner, from the ``[[gsl::Owner(T)]]`` attribute's optional type argument ``T`` -- so a self-contradictory ``struct [[gsl::Owner(std::string_view)]]`` (an "owner" of a view) is rejected too. The analysis does not track borrows held by individual elements, and an element type that holds a borrow must itself be annotated ``[[gsl::Owner]]``/``[[gsl::Pointer]]`` before it can be modeled. This is checked for locals, parameters, call results, and **data members** (a borrow stored through such a member, e.g. ``this->views[i] = local``, would otherwise be dropped and dangle silently). (An *incomplete* element type is not flagged: it cannot be shown to hold a borrow, and flagging it would reject the common ``std::unique_ptr<ForwardDeclared>`` pimpl idiom.)
+  * ``-Wlifetime-safety-pointer-of-indirection``: Warns on a value of a ``[[gsl::Pointer]]`` view whose pointee/element type is itself an indirection -- a pointer, reference, ``[[gsl::Pointer]]``, or a complete unannotated borrow-holding user type (e.g. ``std::span<int*>``); the view tracks only its outer level, so a borrow held one level deeper is not modeled. The pointee is taken from the ``[[gsl::Pointer(T)]]`` attribute's optional type argument ``T`` when present, else a ``value_type``/``element_type`` typedef, ``operator*``/``operator->``, or a sole template argument. Checked for locals, parameters, call results, and data members.
   * ``-Wlifetime-safety-view-on-mutable-global``: Warns when a view (a ``[[gsl::Pointer]]`` such as ``std::string_view`` or ``std::span``) or a raw pointer/reference borrows from a mutable global or static owner -- whether the owner itself (``std::string_view sv = g_str;``) or its contents (``g_table[i]``, ``&g_vec[0]``, ``g.data()``) -- which can be mutated from anywhere the intra-procedural analysis cannot see, invalidating the borrow. The check is loan-based: the borrow surfaces as a loan rooted at the global owner regardless of how it was reached, so a ``[[clang::lifetime_immortal]]`` annotation on an accessor does not exempt it (the owner's reallocatable buffer is not immortal). A pointer *at* the object (``&g``) is not a borrow into its contents and stays valid.
   * ``-Wlifetime-safety-const-subversion``: Warns on a ``mutable`` data member, a ``const_cast``, or a const member function that mutates an owner through a pointer member, smart or raw (``const`` does not propagate through a pointer) -- including when the pointee is not itself an owner but transitively contains one (e.g. a pimpl ``Impl`` holding a ``std::vector``). The analysis assumes a const member function does not invalidate borrows into the object; each of these can subvert that assumption.
   * ``-Wlifetime-safety-owner-capture``: Warns on ``[[clang::lifetime_capture_by(this)]]`` applied to a parameter of a ``[[gsl::Owner]]`` type. An owner is meant to own its contents, not to capture a borrow into its (opaque) members, which cannot be tracked once the owner is passed elsewhere; use a ``[[gsl::Pointer]]`` (view) type to hold a borrow.
@@ -741,6 +741,23 @@ leading to false positive warnings if pointers to the object are used afterward.
     // But analysis assumes standard unique_ptr semantics and memory being freed.
     use(p);         // note: later used here
   }
+
+Owner annotations are trusted, not verified
+--------------------------------------------
+The analysis trusts a ``[[gsl::Owner]]`` annotation: it assumes such a type
+genuinely owns and manages its own storage. It does **not** verify that the
+type actually does so. A type annotated ``[[gsl::Owner]]`` that in fact only
+*borrows* its contents (for example, a wrapper that stores a ``std::string_view``
+member but is labelled an owner) will be treated as owning storage, and a borrow
+taken from it will be assumed valid for the owner's lifetime.
+
+A consequence is that the owner-of-indirection check
+(``-Wlifetime-safety-owner-of-indirection``) only rejects an owner whose element
+type is *unannotated*. ``std::unique_ptr<Box>`` where ``Box`` has a view member
+is rejected (``Box`` must declare its ownership), but
+``std::unique_ptr<AnnotatedOwner>`` is accepted on the owner's word, even if
+``AnnotatedOwner`` does not really manage the storage its members refer to.
+Annotate a type ``[[gsl::Owner]]`` only when it truly owns its resources.
 
 Dangling Fields
 ---------------

@@ -912,14 +912,16 @@ public:
       // indirections (e.g. std::vector<int*>); per-element borrows are not
       // tracked. This holds regardless of any annotation, so check before the
       // annotation requirement and see through a reference parameter.
-      if (isGslOwnerOfIndirection(PVD->getType().getNonReferenceType())) {
+      if (isGslOwnerOfIndirection(PVD->getType().getNonReferenceType(),
+                                  FactMgr.getUnknownOwnershipCache())) {
         if (ReportedUntrackedDecls.insert(PVD).second)
           SemaHelper->reportOwnerOfIndirection(PVD);
         continue;
       }
       // Likewise a gsl::Pointer view parameter whose pointee is an indirection
       // (e.g. std::span<int*>); the inner pointees are not tracked.
-      if (isGslPointerOfIndirection(PVD->getType().getNonReferenceType())) {
+      if (isGslPointerOfIndirection(PVD->getType().getNonReferenceType(),
+                                    FactMgr.getUnknownOwnershipCache())) {
         if (ReportedUntrackedDecls.insert(PVD).second)
           SemaHelper->reportPointerOfIndirection(PVD);
         continue;

@@ -96,22 +96,28 @@ bool isGslOwnerType(QualType QT);
 bool isGslOwnerType(const CXXRecordDecl *RD);
 
 // Returns true if QT is a [[gsl::Owner]] class template specialization with a
-// type template argument that is an indirection (pointer, reference, or
-// gsl::Pointer), e.g. std::vector<int*> or std::array<std::string_view, N>.
-// Such a container's elements hold borrows the analysis cannot track per
-// element, so the safe programming model rejects it. The check recurses into
-// owner template arguments (e.g. std::vector<std::vector<int*>>).
-bool isGslOwnerOfIndirection(QualType QT);
+// type template argument that is an indirection: a pointer, reference,
+// gsl::Pointer, or a user type that itself holds a borrow but is unannotated
+// (unknown ownership) -- e.g. std::vector<int*>, std::array<std::string_view,
+// N>, or std::unique_ptr<Box> where Box has a view/pointer member. Such a
+// container's elements hold borrows the analysis cannot track per element, so
+// the safe programming model rejects it. The check recurses into owner template
+// arguments (e.g. std::vector<std::vector<int*>>). \p Cache memoizes the
+// unknown-ownership sub-check by canonical type.
+bool isGslOwnerOfIndirection(QualType QT,
+                             llvm::DenseMap<const Type *, bool> &Cache);
 
 // Returns true if the given gsl::Pointer (view) type has a pointee/element type
-// that is itself an indirection (pointer, reference, gsl::Pointer, or a
-// container of indirections), e.g. std::span<int*>. Such a view hands out
-// borrows one level deeper than it tracks; those inner pointees are not modeled,
-// so the safe programming model rejects it -- the gsl::Pointer analogue of
-// isGslOwnerOfIndirection. The pointee is determined via a value_type/
-// element_type typedef, else operator*/operator-> return type, else a sole
-// template argument.
-bool isGslPointerOfIndirection(QualType QT);
+// that is itself an indirection (pointer, reference, gsl::Pointer, a container
+// of indirections, or an unannotated borrow-holding type), e.g. std::span<int*>.
+// Such a view hands out borrows one level deeper than it tracks; those inner
+// pointees are not modeled, so the safe programming model rejects it -- the
+// gsl::Pointer analogue of isGslOwnerOfIndirection. The pointee is determined
+// via a value_type/element_type typedef, else operator*/operator-> return type,
+// else a sole template argument. \p Cache memoizes the unknown-ownership
+// sub-check by canonical type.
+bool isGslPointerOfIndirection(QualType QT,
+                               llvm::DenseMap<const Type *, bool> &Cache);
 
 // Returns true if the given gsl::Pointer type can mutate the (non-const) owner
 // it points to, i.e. it (or a base class) exposes operator*/operator[]

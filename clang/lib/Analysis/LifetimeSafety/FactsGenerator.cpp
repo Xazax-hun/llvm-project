@@ -277,12 +277,14 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
           UntrackedConstructReason::UnknownOwnership, VD));
     // Soundness: a local gsl::Owner container whose elements are indirections
     // (e.g. std::vector<int*>); per-element borrows are not tracked.
-    else if (isGslOwnerOfIndirection(VD->getType()))
+    else if (isGslOwnerOfIndirection(VD->getType(),
+                                     FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::OwnerOfIndirection, VD));
     // Likewise a local gsl::Pointer view whose pointee is an indirection (e.g.
     // std::span<int*>); the inner pointees are not tracked.
-    else if (isGslPointerOfIndirection(VD->getType()))
+    else if (isGslPointerOfIndirection(VD->getType(),
+                                       FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::PointerOfIndirection, VD));
     // An array of pointer-like elements shares one element-origin across all
@@ -1751,13 +1753,15 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // Likewise a call returning a gsl::Owner container of indirections
   // (e.g. std::vector<int*>); per-element borrows are not tracked.
   else if (!isa<CXXConstructorDecl>(FD) &&
-           isGslOwnerOfIndirection(Call->getType()))
+           isGslOwnerOfIndirection(Call->getType(),
+                                   FactMgr.getUnknownOwnershipCache()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::OwnerOfIndirection, Call));
   // Likewise a call returning a gsl::Pointer view of indirections
   // (e.g. std::span<int*>); the inner pointees are not tracked.
   else if (!isa<CXXConstructorDecl>(FD) &&
-           isGslPointerOfIndirection(Call->getType()))
+           isGslPointerOfIndirection(Call->getType(),
+                                     FactMgr.getUnknownOwnershipCache()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::PointerOfIndirection, Call));
   handleInvalidatingCall(Call, FD, Args);

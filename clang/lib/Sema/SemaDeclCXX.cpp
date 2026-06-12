@@ -7122,6 +7122,34 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
         Diag(F->getLocation(), diag::warn_lifetime_safety_mutable_field)
             << F << F->getSourceRange();
 
+  // Lifetime safety (safe programming model): a data member whose type is an
+  // owner-of-indirection (e.g. std::vector<std::string_view>, or
+  // std::unique_ptr<T> where T holds a borrow) or a view-of-indirection is not
+  // modeled per element/pointee. A borrow stored through such a member (e.g.
+  // `this->views[i] = local` or `this->box->view = local`) lands on a transient
+  // element/pointee origin that is not tied to the object, so the borrow is
+  // dropped and a later read of the member dangles silently. Reject such members
+  // -- mirroring the check applied to locals, parameters, and call results -- so
+  // the element/pointee type must be annotated or restructured.
+  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
+      (!getDiagnostics().isIgnored(
+           diag::warn_lifetime_safety_owner_of_indirection,
+           Record->getLocation()) ||
+       !getDiagnostics().isIgnored(
+           diag::warn_lifetime_safety_pointer_of_indirection,
+           Record->getLocation()))) {
+    llvm::DenseMap<const Type *, bool> Cache;
+    for (const auto *F : Record->fields()) {
+      QualType FT = F->getType();
+      if (lifetimes::isGslOwnerOfIndirection(FT, Cache))
+        Diag(F->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
+            << FT << F->getSourceRange();
+      else if (lifetimes::isGslPointerOfIndirection(FT, Cache))
+        Diag(F->getLocation(), diag::warn_lifetime_safety_pointer_of_indirection)
+            << FT << F->getSourceRange();
+    }
+  }
+
   if (Record->getIdentifier()) {
     // C++ [class.mem]p13:
     //   If T is the name of a class, then each of the following shall have a

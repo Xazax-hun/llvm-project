@@ -11202,15 +11202,15 @@ def warn_lifetime_safety_exception
       InGroup<LifetimeSafetyException>,
       DefaultIgnore;
 def warn_lifetime_safety_owner_of_indirection
-    : Warning<"type %0 is a container whose element type is a pointer or "
-              "reference; lifetime safety cannot track borrows held by its "
-              "elements">,
+    : Warning<"type %0 is a container whose element type holds a borrow (a "
+              "pointer, reference, or unannotated borrow-holding type); "
+              "lifetime safety cannot track borrows held by its elements">,
       InGroup<LifetimeSafetyOwnerOfIndirection>,
       DefaultIgnore;
 def warn_lifetime_safety_pointer_of_indirection
-    : Warning<"type %0 is a view whose pointee type is itself a pointer or "
-              "reference; lifetime safety cannot track borrows held one level "
-              "below the view">,
+    : Warning<"type %0 is a view whose pointee type holds a borrow (a pointer, "
+              "reference, or unannotated borrow-holding type); lifetime safety "
+              "cannot track borrows held one level below the view">,
       InGroup<LifetimeSafetyPointerOfIndirection>,
       DefaultIgnore;
 def warn_lifetime_safety_view_on_mutable_global

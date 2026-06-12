@@ -353,9 +353,46 @@ bool isGslOwnerType(const CXXRecordDecl *RD) {
   return isRecordWithAttr<OwnerAttr>(RD);
 }
 
-bool isGslOwnerOfIndirection(QualType QT) {
+/// The declared deref/owned type written in a [[gsl::Owner(T)]] /
+/// [[gsl::Pointer(T)]] attribute's optional type argument, or a null QualType
+/// when the argument is absent. Mirrors isRecordWithAttr's fallback to the
+/// primary template for a specialization that did not re-declare the attribute.
+template <typename AttrT> static QualType gslAttrDerefType(QualType QT) {
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD)
+    return QualType();
+  const AttrT *A = RD->getAttr<AttrT>();
+  if (!A)
+    if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
+      A = CTSD->getSpecializedTemplate()->getTemplatedDecl()->getAttr<AttrT>();
+  if (!A || !A->getDerefTypeLoc())
+    return QualType();
+  return A->getDerefType();
+}
+
+bool isGslOwnerOfIndirection(QualType QT,
+                             llvm::DenseMap<const Type *, bool> &Cache) {
   if (!isGslOwnerType(QT))
     return false;
+  // An indirection element only counts when its record is *complete* here: an
+  // incomplete arg (commonly an uninstantiated deleter / allocator, e.g. the
+  // default_delete in unique_ptr<T>, or a forward-declared pimpl element) cannot
+  // be shown to hold a borrow, and isUnknownOwnershipType conservatively reports
+  // incomplete types as unknown -- which would spuriously flag those.
+  auto IsIndirection = [&](QualType T) {
+    if (isPointerLikeType(T) || T->isReferenceType() ||
+        isGslOwnerOfIndirection(T, Cache))
+      return true;
+    const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+    return RD && RD->hasDefinition() && isUnknownOwnershipType(T, Cache);
+  };
+  // A [[gsl::Owner(T)]] whose declared owned type T is itself an indirection
+  // (e.g. struct [[gsl::Owner(std::string_view)]] S) holds a borrow it cannot
+  // track per element -- and the annotation is self-contradictory (an owner of
+  // a view). Treat it like a container of indirections. This is the
+  // attribute-argument analogue of the template-argument check below.
+  if (QualType D = gslAttrDerefType<OwnerAttr>(QT); !D.isNull() && IsIndirection(D))
+    return true;
   const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
       QT->getAsCXXRecordDecl());
   if (!CTSD)
@@ -364,24 +401,31 @@ bool isGslOwnerOfIndirection(QualType QT) {
     if (Arg.getKind() != TemplateArgument::Type)
       continue;
     QualType ArgT = Arg.getAsType();
-    // A type template argument that is itself an indirection (pointer,
-    // reference, or gsl::Pointer) means the container's elements hold borrows
-    // the analysis cannot track per element. Recurse so a container of
-    // containers-of-indirections (e.g. vector<vector<int*>>) is caught too.
-    if (isPointerLikeType(ArgT) || ArgT->isReferenceType() ||
-        isGslOwnerOfIndirection(ArgT))
+    // A type template argument that is itself an indirection means the
+    // container's elements hold borrows the analysis cannot track per element.
+    // This is the case for a pointer, reference, or gsl::Pointer; for a nested
+    // container of indirections (e.g. vector<vector<int*>>), handled by
+    // recursing; and for a complete, unannotated user type that holds a borrow
+    // (unknown ownership, e.g. unique_ptr<Box> where Box has a view member) --
+    // the element type itself must be annotated [[gsl::Owner]]/[[gsl::Pointer]]
+    // to be modeled, so reject the container until it is.
+    if (IsIndirection(ArgT))
       return true;
   }
   return false;
 }
 
 /// The type a gsl::Pointer view dereferences to (its pointee / element type).
-/// Tries, in order: a `value_type`/`element_type` member typedef (std views and
-/// iterators), the return type of `operator*`/`operator->` (a custom view that
-/// lacks the typedef), and finally -- only for a single-type-argument
-/// specialization -- that sole template argument. Returns a null QualType if the
-/// pointee cannot be determined.
+/// Tries, in order: the [[gsl::Pointer(T)]] attribute's optional type argument
+/// T (the authoritative declared pointee), a `value_type`/`element_type` member
+/// typedef (std views and iterators), the return type of `operator*`/`operator->`
+/// (a custom view that lacks the typedef), and finally -- only for a
+/// single-type-argument specialization -- that sole template argument. Returns a
+/// null QualType if the pointee cannot be determined.
 static QualType gslPointerPointeeType(QualType QT) {
+  // (0) [[gsl::Pointer(T)]] declares the pointee type directly.
+  if (QualType D = gslAttrDerefType<PointerAttr>(QT); !D.isNull())
+    return D;
   const auto *RD = QT->getAsCXXRecordDecl();
   if (!RD)
     return QualType();
@@ -416,7 +460,8 @@ static QualType gslPointerPointeeType(QualType QT) {
   return QualType();
 }
 
-bool isGslPointerOfIndirection(QualType QT) {
+bool isGslPointerOfIndirection(QualType QT,
+                               llvm::DenseMap<const Type *, bool> &Cache) {
   if (!isGslPointerType(QT))
     return false;
   QualType Pointee = gslPointerPointeeType(QT);
@@ -424,9 +469,16 @@ bool isGslPointerOfIndirection(QualType QT) {
     return false;
   // A view whose pointee is itself an indirection (e.g. std::span<int*>) hands
   // out borrows one level deeper than the view tracks; those inner pointees are
-  // not modeled. Recurse so a view-of-views is caught too.
+  // not modeled. Recurse so a view-of-views is caught too; a complete,
+  // unannotated borrow-holding pointee (unknown ownership) is likewise rejected.
+  // The pointee must be complete to inspect for borrows (see
+  // isGslOwnerOfIndirection).
+  const CXXRecordDecl *PointeeRD = Pointee->getAsCXXRecordDecl();
+  bool PointeeUnknownOwnership = PointeeRD && PointeeRD->hasDefinition() &&
+                                 isUnknownOwnershipType(Pointee, Cache);
   return isPointerLikeType(Pointee) || Pointee->isReferenceType() ||
-         isGslOwnerOfIndirection(Pointee) || isGslPointerOfIndirection(Pointee);
+         isGslOwnerOfIndirection(Pointee, Cache) ||
+         isGslPointerOfIndirection(Pointee, Cache) || PointeeUnknownOwnership;
 }
 
 bool isUnknownOwnershipType(QualType QT,
