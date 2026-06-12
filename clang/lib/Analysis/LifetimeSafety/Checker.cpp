@@ -609,7 +609,19 @@ public:
         Ty && isUnknownOwnershipType(QualType(Ty, 0),
                                      FactMgr.getUnknownOwnershipCache()))
       return;
-    if (!LoanPropagation.getLoans(OL->getOriginID(), UF).isEmpty())
+    // A borrow is lost if the origin holds no loan at all, OR if it holds an
+    // Unknown loan -- an untracked borrow (e.g. a non-lifetimebound view
+    // returned by std::string_view::substr). The Unknown loan survives dataflow
+    // joins, so it is detected even when a valid borrow on another path would
+    // otherwise mask the loss in the (union) loan set.
+    LoanSet Loans = LoanPropagation.getLoans(OL->getOriginID(), UF);
+    bool Lost = Loans.isEmpty();
+    for (LoanID L : Loans)
+      if (FactMgr.getLoanMgr().getLoan(L)->getAccessPath().isUnknown()) {
+        Lost = true;
+        break;
+      }
+    if (!Lost)
       return;
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;

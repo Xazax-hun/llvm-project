@@ -59,6 +59,15 @@ public:
     /// so the origin is never empty (a borrow stored into an element merges in
     /// alongside it). Like the placeholders, it never expires.
     Uninitialized,
+    /// An untracked borrow: the result of a borrow-returning operation the
+    /// analysis cannot model (e.g. a call returning a view/pointer that is not
+    /// [[clang::lifetimebound]] and not a recognized accessor, such as
+    /// std::string_view::substr). Carried so that "a borrow was lost here"
+    /// survives dataflow joins -- unlike an empty loan set, which a co-resident
+    /// valid borrow on another path would mask. Rooted at the producing
+    /// expression. Never matches real storage, so it is inert in expiry /
+    /// invalidation; the lost-loan check reports it.
+    Unknown,
   };
 
 private:
@@ -91,6 +100,13 @@ public:
   static AccessPath Uninitialized(const clang::ValueDecl *D) {
     return AccessPath(Kind::Uninitialized, D);
   }
+  /// An untracked borrow produced by `Producer` (a borrow-returning operation
+  /// the analysis cannot model). Reported by the lost-loan check; inert
+  /// elsewhere.
+  static AccessPath Unknown(const clang::Expr *Producer) {
+    return AccessPath(Kind::Unknown, Producer);
+  }
+  bool isUnknown() const { return K == Kind::Unknown; }
   AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
   AccessPath &operator=(const AccessPath &) = delete;
 

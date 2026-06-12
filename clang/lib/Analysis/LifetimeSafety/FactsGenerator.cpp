@@ -1833,8 +1833,10 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
            shouldTrackImplicitObjectArg(*Args[0], Method,
                                         /*RunningUnderLifetimeSafety=*/true);
   };
-  if (Args.empty())
+  if (Args.empty()) {
+    issueUnknownLoanIfUntrackedBorrow(Call, CallNode, /*FlowedIntoResult=*/false);
     return;
+  }
   bool KillSrc = true;
   for (unsigned I = 0; I < Args.size(); ++I) {
     OriginNode *ArgNode = getOriginNode(*Args[I]);
@@ -1889,6 +1891,32 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
       KillSrc = false;
     }
   }
+  // If the call returns a borrow-carrying value but no loan was propagated into
+  // it (KillSrc still true), the borrow is untracked -- e.g. a view-returning
+  // method that is not [[clang::lifetimebound]] and not a recognized accessor,
+  // such as std::string_view::substr. Mark the result with an Unknown loan so
+  // the lost borrow is reported when the result is used, robustly across
+  // dataflow joins (an empty loan set would be masked by a co-resident valid
+  // borrow on another path).
+  issueUnknownLoanIfUntrackedBorrow(Call, CallNode, /*FlowedIntoResult=*/!KillSrc);
+}
+
+void FactsGenerator::issueUnknownLoanIfUntrackedBorrow(const Expr *Call,
+                                                       OriginNode *CallNode,
+                                                       bool FlowedIntoResult) {
+  if (!CallNode || FlowedIntoResult)
+    return;
+  // Only a value that itself carries a borrow at its top level: a view
+  // (gsl::Pointer) or a raw pointer/reference. An owner is tracked differently
+  // and a non-pointer return holds no borrow.
+  QualType RetTy = Call->getType();
+  if (!isGslPointerType(RetTy) && !RetTy->isPointerType() &&
+      !RetTy->isReferenceType())
+    return;
+  const Loan *L =
+      FactMgr.getLoanMgr().createLoan(AccessPath::Unknown(Call), Call);
+  CurrentBlockFacts.push_back(
+      FactMgr.createFact<IssueFact>(L->getID(), CallNode->getOriginID()));
 }
 
 /// Checks if the expression is a `void("__lifetime_test_point_...")` cast.

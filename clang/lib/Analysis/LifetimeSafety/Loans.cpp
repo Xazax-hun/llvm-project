@@ -43,6 +43,9 @@ void AccessPath::dump(llvm::raw_ostream &OS) const {
             Root.dyn_cast<const clang::Decl *>()))
       OS << " " << D->getNameAsString();
     break;
+  case Kind::Unknown:
+    OS << "Unknown";
+    break;
   }
 }
 

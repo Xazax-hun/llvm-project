@@ -141,6 +141,12 @@ private:
                           ArrayRef<const Expr *> Args,
                           bool IsGslConstruction = false);
 
+  // If a call returns a borrow-carrying value (view/pointer/reference) but no
+  // loan was propagated into the result, mark it with an Unknown loan so the
+  // untracked borrow is reported when used (robustly across dataflow joins).
+  void issueUnknownLoanIfUntrackedBorrow(const Expr *Call, OriginNode *CallNode,
+                                         bool FlowedIntoResult);
+
   // Detect methods that invalidate iterators/references/pointees.
   // For instance methods, Args[0] is the implicit 'this' pointer.
   void handleInvalidatingCall(const Expr *Call, const FunctionDecl *FD,
