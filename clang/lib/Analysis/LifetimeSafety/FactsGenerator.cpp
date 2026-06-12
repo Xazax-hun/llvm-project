@@ -1298,14 +1298,21 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
-  // Whether the call may mutate the storage argument `I` refers to.
+  // Whether the call may mutate the storage argument `I` refers to in a way
+  // that reallocates/invalidates borrows into it -- i.e. it is (or contains) an
+  // owner being mutated. A plain non-owner receiver (e.g. an element's
+  // `operator=`) does not reallocate, so it is not an aliasing hazard.
   auto IsMutatingArg = [&](unsigned I) -> bool {
-    if (IsInstance && I == 0)
-      // The receiver of any non-const instance method may be mutated. Whether
-      // the method also returns a borrow (lifetimebound / a GSL accessor) is
-      // orthogonal -- such a method can still reallocate the receiver -- so it
-      // is not excluded here.
-      return !Method->isConst();
+    if (IsInstance && I == 0) {
+      // The receiver of a non-const instance method may be reallocated only if
+      // it is an owner (or contains owner fields). Whether the method also
+      // returns a borrow (lifetimebound / a GSL accessor) is orthogonal.
+      // (I == 0 is only reached from the loop below, so Args[0] exists.)
+      if (Method->isConst())
+        return false;
+      QualType RecvTy = Args[0]->getType();
+      return isGslOwnerType(RecvTy) || recordHasGslOwnerField(RecvTy);
+    }
     const ParmVarDecl *PVD = nullptr;
     if (IsInstance) {
       if (I - 1 < Method->getNumParams())
@@ -1314,20 +1321,6 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
       PVD = FD->getParamDecl(I);
     }
     return PVD && paramMayMutateOwner(PVD->getType());
-  };
-
-  // The parameter type that argument `I` binds to (null for the implicit object
-  // or a trailing variadic argument).
-  auto ParamType = [&](unsigned I) -> QualType {
-    if (IsInstance) {
-      if (I == 0)
-        return QualType();
-      if (I - 1 < Method->getNumParams())
-        return Method->getParamDecl(I - 1)->getType();
-    } else if (I < FD->getNumParams()) {
-      return FD->getParamDecl(I)->getType();
-    }
-    return QualType();
   };
 
   for (unsigned M = 0; M < Args.size(); ++M) {
@@ -1342,24 +1335,22 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
     for (unsigned B = 0; B < Args.size(); ++B) {
       if (B == M)
         continue;
-      // A co-argument can alias the mutated owner's storage if it is a
-      // view/pointer value that borrows it, OR if the callee receives it by
-      // reference/pointer to an owner (another handle to the same object, e.g.
-      // `f(string& a, string& b)` called `f(s, s)`).
-      QualType BT = Args[B]->getType().getNonReferenceType();
-      QualType BParam = ParamType(B);
-      bool ByOwnerHandle =
-          !BParam.isNull() &&
-          (BParam->isReferenceType() || BParam->isPointerType()) &&
-          isGslOwnerType(BParam->getPointeeType());
-      OriginNode *BorrowNode = nullptr;
-      if (ByOwnerHandle)
-        // The handle aliases the owner's own storage.
-        BorrowNode = getOriginNode(*Args[B]);
-      else if (isGslPointerType(BT) || BT->isPointerOrReferenceType())
-        BorrowNode = getRValueOrigins(Args[B], getOriginNode(*Args[B]));
-      if (BorrowNode)
-        Borrows.push_back(BorrowNode->getOriginID());
+      // A co-argument can alias the mutated owner's storage if it carries a
+      // borrow into it. We rely on the propagated origins/loans rather than the
+      // argument's static type, and the checker compares the actual loans -- so
+      // collect both origin levels and let it decide: the OUTER origin (the
+      // borrow is the handle itself -- a reference/pointer, or a
+      // [[clang::lifetimebound]] result such as `h.get()` returning a reference
+      // into `*h.p` while the receiver `h` is the mutated arg) and the RVALUE
+      // origin (the borrow is the value -- a view such as string_view, whose
+      // loans live one level in). Non-borrow co-arguments simply hold no
+      // matching loan and are ignored by the checker.
+      OriginNode *Outer = getOriginNode(*Args[B]);
+      if (Outer)
+        Borrows.push_back(Outer->getOriginID());
+      if (OriginNode *RVal = getRValueOrigins(Args[B], Outer);
+          RVal && RVal != Outer)
+        Borrows.push_back(RVal->getOriginID());
     }
     if (Borrows.empty())
       continue;
