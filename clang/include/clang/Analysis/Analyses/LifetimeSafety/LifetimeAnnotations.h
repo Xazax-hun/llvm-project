@@ -23,6 +23,16 @@ bool isInStlNamespace(const Decl *D);
 
 bool isPointerLikeType(QualType QT);
 
+/// If `E` accesses an element of an array object -- a subscript `arr[i]`, or the
+/// equivalent dereference of the array decayed to a pointer and offset
+/// (`*(arr+i)`, `*arr`, `i[arr]`) -- returns the underlying array object
+/// expression (the `arr` lvalue); otherwise null. Element accesses written
+/// either way denote the same storage, so they should share the array's single
+/// element-origin. Recurses, so a nested access (`m[i][j]`) resolves to the
+/// inner array object. Does not match a subscript/deref of a real pointer
+/// variable (that is an ordinary indirection, not an array element).
+const Expr *getArrayObjectOfElementAccess(const Expr *E);
+
 /// Returns the most recent declaration of the method to ensure all
 /// lifetime-bound attributes from redeclarations are considered.
 const FunctionDecl *getDeclWithMergedLifetimeBoundAttrs(const FunctionDecl *FD);

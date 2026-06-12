@@ -11,6 +11,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/OperatorKinds.h"
@@ -122,6 +123,44 @@ bool isInStlNamespace(const Decl *D) {
 
 bool isPointerLikeType(QualType QT) {
   return isGslPointerType(QT) || QT->isPointerType() || QT->isNullPtrType();
+}
+
+const Expr *getArrayObjectOfElementAccess(const Expr *E) {
+  E = E->IgnoreParenImpCasts();
+  // `arr[i]` / `i[arr]`: a genuine array subscript (base is array-typed). A
+  // subscript of a real pointer is an ordinary indirection, not an element of a
+  // known array object.
+  if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+    const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
+    if (Base->getType()->isArrayType())
+      return Base;
+    return nullptr;
+  }
+  // `*(arr + i)`, `*arr`: a dereference of an array that has decayed to a
+  // pointer, optionally offset by pointer arithmetic. `arr[i]` is defined as
+  // `*(arr + i)`, so this denotes the same element storage. Look through the
+  // arithmetic to the ArrayToPointerDecay of the array object. Note: we strip
+  // only parens here (not implicit casts), because the ArrayToPointerDecay we
+  // are looking for is itself an implicit cast.
+  if (const auto *UO = dyn_cast<UnaryOperator>(E);
+      UO && UO->getOpcode() == UO_Deref) {
+    const Expr *Ptr = UO->getSubExpr()->IgnoreParens();
+    // Peel additive pointer arithmetic (`arr + i`, `i + arr`), keeping the
+    // pointer-typed operand.
+    while (const auto *BO = dyn_cast<BinaryOperator>(Ptr)) {
+      if (!BO->isAdditiveOp())
+        break;
+      const Expr *L = BO->getLHS()->IgnoreParens();
+      const Expr *R = BO->getRHS()->IgnoreParens();
+      Ptr = L->getType()->isPointerType() ? L : R;
+    }
+    // The pointer must be an array-to-pointer decay; its operand is the array
+    // object expression.
+    if (const auto *ICE = dyn_cast<ImplicitCastExpr>(Ptr);
+        ICE && ICE->getCastKind() == CK_ArrayToPointerDecay)
+      return ICE->getSubExpr()->IgnoreParenImpCasts();
+  }
+  return nullptr;
 }
 
 static bool isReferenceOrPointerLikeType(QualType QT) {

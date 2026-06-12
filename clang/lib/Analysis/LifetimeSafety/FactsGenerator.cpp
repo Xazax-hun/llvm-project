@@ -643,15 +643,16 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
     LHSType = ME_LHS->getMemberDecl()->getType();
     LHSUseFact = UseFacts.lookup(ME_LHS);
   }
-  // Assignment to an array element (`arr[i] = &x`). All elements share the
-  // array's single element-origin, so we cannot tell which element is
-  // overwritten: merge the new loans in rather than killing the old ones (the
-  // origin conservatively holds the loans of every element ever stored).
+  // Assignment to an array element (`arr[i] = &x`, or equivalently
+  // `*(arr+i) = &x`). All elements share the array's single element-origin, so
+  // we cannot tell which element is overwritten: merge the new loans in rather
+  // than killing the old ones (the origin conservatively holds the loans of
+  // every element ever stored). Route the store to the array OBJECT's origin so
+  // both the subscript and the decayed-pointer-dereference store forms land on
+  // the same shared element-origin that element reads observe.
   bool MergeIntoSharedElement = false;
-  if (const auto *ASE_LHS = dyn_cast<ArraySubscriptExpr>(LHSExpr);
-      ASE_LHS &&
-      ASE_LHS->getBase()->IgnoreParenImpCasts()->getType()->isArrayType()) {
-    LHSNode = getOriginNode(*ASE_LHS);
+  if (const Expr *ArrObj = getArrayObjectOfElementAccess(LHSExpr)) {
+    LHSNode = getOriginNode(*ArrObj);
     MergeIntoSharedElement = LHSNode != nullptr;
   }
 

@@ -380,7 +380,10 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   // shape an element access needs, so reuse it directly. A borrow stored into
   // one element is then visible through every element access. This applies only
   // to genuine array subscripts; a subscript of a *pointer* (e.g. an `int a[]`
-  // parameter, which is really `int *`) is an ordinary indirection.
+  // parameter, which is really `int *`) is an ordinary indirection. (The
+  // equivalent `*(arr+i)` form propagates element loans through the normal
+  // decay/arithmetic/deref flow; only its store is routed to the shared
+  // element-origin, in handleAssignment.)
   if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
     const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
     if (Base->getType()->isArrayType())
