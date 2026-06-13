@@ -1979,6 +1979,53 @@ llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
         /*IssuingExpr=*/nullptr);
     PlaceholderLoanFacts.push_back(
         FactMgr.createFact<IssueFact>(L->getID(), Node->getOriginID()));
+
+    // Seed the implicit object's pointer/view *members* with a non-expiring
+    // "uninitialized" loan, recursively through by-value sub-objects and array
+    // elements (which share one element origin). The members are caller-provided
+    // storage, so reading one that this function never wrote is not a lost
+    // borrow; a borrow stored into a member later kills and replaces the seed.
+    // Mirrors the local-array seeding in VisitDeclStmt, but for `this`.
+    //
+    // A member read resolves to the origin reached from the field's own origin
+    // node (`this->f` uses getOriginNode(f); `this->f.g` narrows into that
+    // node's `g` subtree), so seed by walking the origin tree of each field of
+    // the implicit object's record (and its bases).
+    const auto *MD = cast<CXXMethodDecl>(FD);
+    llvm::SmallPtrSet<const OriginNode *, 16> SeededNodes;
+    auto seedTree = [&](auto &&Self, OriginNode *N, const FieldDecl *Tag) -> void {
+      if (!N || !SeededNodes.insert(N).second)
+        return;
+      if (const Type *Ty =
+              FactMgr.getOriginMgr().getOrigin(N->getOriginID()).Ty) {
+        QualType QT(Ty, 0);
+        if (isPointerLikeType(QT) || QT->isReferenceType()) {
+          const Loan *ML = FactMgr.getLoanMgr().createLoan(
+              AccessPath::Uninitialized(Tag), /*IssuingExpr=*/nullptr);
+          PlaceholderLoanFacts.push_back(FactMgr.createFact<IssueFact>(
+              ML->getID(), N->getOriginID()));
+        }
+      }
+      for (const OriginNode::Edge &E : N->children())
+        Self(Self, E.Child, Tag);
+    };
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> VisitedRD;
+    auto seedRecord = [&](auto &&Self, const CXXRecordDecl *RD) -> void {
+      if (!RD || !RD->hasDefinition() || !VisitedRD.insert(RD).second)
+        return;
+      for (const CXXBaseSpecifier &B : RD->bases())
+        Self(Self, B.getType()->getAsCXXRecordDecl());
+      for (const FieldDecl *F : RD->fields()) {
+        // Owners are opaque leaves (a borrow into an owner field is tracked via
+        // its own field-rooted loan, not seeded here); skip them.
+        if (isMutableOwnerType(F->getType()) ||
+            !FactMgr.getOriginMgr().hasOrigins(F->getType()))
+          continue;
+        if (OriginNode *FN = getOriginNode(*F))
+          seedTree(seedTree, FN, F);
+      }
+    };
+    seedRecord(seedRecord, MD->getParent());
   }
   for (const ParmVarDecl *PVD : FD->parameters()) {
     OriginNode *Node = getOriginNode(*PVD);
