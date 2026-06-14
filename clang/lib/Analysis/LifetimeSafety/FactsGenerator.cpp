@@ -1317,9 +1317,24 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     bool OwnerReceiver = isGslOwnerType(Args[0]->getType());
     if ((OwnerReceiver || recordHasGslOwnerField(Args[0]->getType())) &&
         !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
-      if (OriginNode *L = getOriginNode(*Args[0]))
+      if (OriginNode *L = getOriginNode(*Args[0])) {
         CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
             L->getOriginID(), Call, /*Assumed=*/true));
+        // When the receiver is a gsl::Pointer object (a view/wrapper that
+        // reaches a mutable owner through what it points at, e.g. a wrapper
+        // holding `std::vector<int>* v`), the borrows it carries also live on its
+        // pointee origin. Invalidate the pointee too, so a borrow into the
+        // underlying owner handed out *directly* (not through this object, so it
+        // carries the owner's loan rather than this object's) is also
+        // invalidated. The outer invalidation above already covers a borrow
+        // returned by a lifetimebound accessor of this object (which carries the
+        // object's loan). Mirrors shouldTrackPointerImplicitObjectArg in
+        // handleFunctionCall.
+        if (isGslPointerType(Args[0]->getType().getNonReferenceType()))
+          if (OriginNode *Pointee = L->getPointeeChild())
+            CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+                Pointee->getOriginID(), Call, /*Assumed=*/true));
+      }
   }
   // The implicit object argument (I == 0 for implicit-this instance methods) is
   // intentionally skipped below -- it is handled by case (1) above. (For a C++23
