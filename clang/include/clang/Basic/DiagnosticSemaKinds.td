@@ -11158,10 +11158,10 @@ def warn_lifetime_safety_annotated_param_escapes_to_global
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
 def warn_lifetime_safety_global_capture
-    : Warning<"'lifetime_capture_by(global)' is not supported by the safe "
-              "programming model; the analysis cannot track borrows captured "
-              "into global or static storage, so such a capture may dangle "
-              "undetected">,
+    : Warning<"'lifetime_capture_by(%select{global|unknown}0)' is not supported "
+              "by the safe programming model; the analysis cannot track borrows "
+              "captured into %select{global or static storage|an unspecified "
+              "location}0, so such a capture may dangle undetected">,
       InGroup<LifetimeSafetyGlobalCapture>,
       DefaultIgnore;
 def warn_lifetime_safety_multilevel_indirection

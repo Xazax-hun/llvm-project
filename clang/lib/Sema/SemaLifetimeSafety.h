@@ -521,9 +521,9 @@ public:
         << Global << PVD->getSourceRange();
   }
 
-  void reportGlobalCapture(const ParmVarDecl *PVD) override {
+  void reportGlobalCapture(const ParmVarDecl *PVD, bool IsUnknown) override {
     S.Diag(PVD->getLocation(), diag::warn_lifetime_safety_global_capture)
-        << PVD->getSourceRange();
+        << IsUnknown << PVD->getSourceRange();
   }
 
   void reportMultiLevelIndirection(const ValueDecl *VD) override {

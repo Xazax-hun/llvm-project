@@ -60,6 +60,12 @@ void capture_by_global_banned(int *a [[clang::lifetime_capture_by(global)]]) { /
   g_p = a;
 }
 
+// lifetime_capture_by(unknown) is likewise rejected: the captured borrow goes to
+// an unspecified location the analysis cannot track, so it may dangle undetected.
+void capture_by_unknown_banned(int *a [[clang::lifetime_capture_by(unknown)]]) { // expected-warning {{'lifetime_capture_by(unknown)' is not supported by the safe programming model}}
+  (void)a;
+}
+
 // A lifetimebound parameter that does not escape to a global is fine.
 int *lifetimebound_no_escape(int *a [[clang::lifetimebound]]) {
   return a; // no-warning

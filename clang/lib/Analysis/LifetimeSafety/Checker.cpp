@@ -280,6 +280,17 @@ public:
     return false;
   }
 
+  /// Returns true if \p PVD is annotated
+  /// [[clang::lifetime_capture_by(unknown)]], which documents that the parameter
+  /// may be captured by an unspecified location.
+  static bool capturesUnknown(const ParmVarDecl *PVD) {
+    if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
+      for (int Idx : A->params())
+        if (Idx == LifetimeCaptureByAttr::Unknown)
+          return true;
+    return false;
+  }
+
   /// Checks if an escaping origin holds a placeholder loan, indicating a
   /// missing [[clang::lifetimebound]] annotation or a violation of
   /// [[clang::noescape]].
@@ -1266,8 +1277,10 @@ public:
       SemaHelper->reportAnnotatedParamEscapesToGlobal(PVD, Global);
   }
 
-  // Bans [[clang::lifetime_capture_by(global)]]: the analysis cannot track a
-  // borrow captured into global/static storage, so the construct is rejected.
+  // Bans [[clang::lifetime_capture_by(global)]] and
+  // [[clang::lifetime_capture_by(unknown)]]: the analysis cannot track a borrow
+  // captured into global/static storage or an unspecified location, so the
+  // construct is rejected.
   void checkGlobalCaptureAnnotations() {
     if (!SemaHelper)
       return;
@@ -1276,7 +1289,9 @@ public:
       return;
     for (const ParmVarDecl *PVD : Fn->parameters())
       if (capturesGlobal(PVD))
-        SemaHelper->reportGlobalCapture(PVD);
+        SemaHelper->reportGlobalCapture(PVD, /*IsUnknown=*/false);
+      else if (capturesUnknown(PVD))
+        SemaHelper->reportGlobalCapture(PVD, /*IsUnknown=*/true);
   }
 
   void reportLifetimeboundViolations() {
