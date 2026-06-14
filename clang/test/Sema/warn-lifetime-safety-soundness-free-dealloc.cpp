@@ -39,3 +39,35 @@ void free_no_live_borrow() {
   int *p = (int *)malloc(16);
   free(p); // no-warning
 }
+
+//===----------------------------------------------------------------------===//
+// The BSD/macOS C deallocators reallocf/cfree, and __builtin_operator_delete,
+// are recognized too -- including when the freed pointer's parameter is
+// (correctly) annotated [[clang::noescape]], which would otherwise silence the
+// only backstop for an unrecognized deallocator.
+//===----------------------------------------------------------------------===//
+
+extern "C" void *reallocf(void *p [[clang::noescape]], unsigned long) noexcept;
+extern "C" void cfree(void *p [[clang::noescape]]) noexcept;
+
+void reallocf_invalidates() {
+  int *p = (int *)malloc(16); // expected-warning {{object whose reference is captured is later invalidated}}
+  int *alias = p;
+  p = (int *)reallocf(p, 0); // expected-note {{invalidated here}}
+  use(alias);                // expected-note {{later used here}}
+  use(p);
+}
+
+void cfree_invalidates() {
+  int *p = (int *)malloc(16); // expected-warning {{object whose reference is captured is later invalidated}}
+  int *alias = p;
+  cfree(p);   // expected-note {{invalidated here}}
+  use(alias); // expected-note {{later used here}}
+}
+
+void builtin_operator_delete_invalidates() {
+  int *p = new int(7); // expected-warning {{object whose reference is captured is later invalidated}}
+  int *alias = p;
+  __builtin_operator_delete(p); // expected-note {{invalidated here}}
+  use(alias);                   // expected-note {{later used here}}
+}

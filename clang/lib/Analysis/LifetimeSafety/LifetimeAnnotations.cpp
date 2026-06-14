@@ -772,15 +772,20 @@ bool destructsFirstArg(const FunctionDecl &FD) {
   // A direct call to an `operator delete` / `operator delete[]` deallocation
   // function frees its first argument (a `delete`/`delete[]` *expression* is a
   // CXXDeleteExpr, handled separately; this is the explicit-call form, e.g.
-  // `::operator delete(p)`).
+  // `::operator delete(p)`). The `__builtin_operator_delete` builtin is the
+  // same deallocation but is not spelled as an overloaded operator.
   OverloadedOperatorKind OO = FD.getOverloadedOperator();
   if (OO == OO_Delete || OO == OO_Array_Delete)
     return true;
-  // The C deallocators `free(p)` / `realloc(p, n)` free their first argument.
-  // Recognize them at global (the usual `extern "C"` declaration) or std scope.
-  // `realloc` additionally returns a fresh allocation, but invalidating the old
-  // pointer is what matters for borrows into it.
-  if (getName(FD) == "free" || getName(FD) == "realloc") {
+  if (FD.getBuiltinID() == Builtin::BI__builtin_operator_delete)
+    return true;
+  // The C deallocators `free`/`realloc` (and the BSD/macOS variants
+  // `reallocf`/`cfree`) free their first argument. Recognize them at global (the
+  // usual `extern "C"` declaration) or std scope. `realloc`/`reallocf`
+  // additionally return a fresh allocation, but invalidating the old pointer is
+  // what matters for borrows into it.
+  if (getName(FD) == "free" || getName(FD) == "realloc" ||
+      getName(FD) == "reallocf" || getName(FD) == "cfree") {
     const DeclContext *DC = FD.getDeclContext()->getRedeclContext();
     return DC->isTranslationUnit() || isInStlNamespace(&FD);
   }
