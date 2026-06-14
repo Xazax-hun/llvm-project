@@ -202,3 +202,29 @@ void const_ptr_member_silent() {
   w.touch(); // no-warning
   (void)x;
 }
+
+//===----------------------------------------------------------------------===//
+// A gsl::Pointer wrapper that reaches a mutable owner is also owner-mutating
+// when passed BY VALUE to a free function (not only as a method receiver): the
+// copy still aliases the same owner, so a call that reallocates the owner
+// through it invalidates a borrow taken directly from that owner.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer]] PtrWrap2 {
+  vector<int> *v;
+  PtrWrap2(vector<int> *p [[clang::lifetime_capture_by(this)]]) : v(p) {}
+};
+
+void grow_byval(PtrWrap2 w [[clang::noescape]]) {
+  for (int i = 0; i < 1000; ++i)
+    w.v->push_back(i);
+}
+
+void byval_wrapper_arg_invalidates() {
+  vector<int> d;
+  d.push_back(42);
+  PtrWrap2 w(&d);
+  int &r = d[0];   // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  grow_byval(w);   // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}

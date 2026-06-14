@@ -201,8 +201,18 @@ static bool paramMayMutateOwner(QualType PT) {
     llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
     return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited);
   }
-  if (isGslPointerType(PT.getNonReferenceType()))
-    return pointsToMutableOwner(PT.getNonReferenceType());
+  if (isGslPointerType(PT.getNonReferenceType())) {
+    if (pointsToMutableOwner(PT.getNonReferenceType()))
+      return true;
+    // A gsl::Pointer wrapper that reaches a mutable owner through a member it
+    // aliases (e.g. a `std::vector<int>* v` member). A by-value copy still
+    // aliases the same owner, so the callee can reallocate it through the copy,
+    // invalidating borrows into it. (A by-value record that OWNS its owner is a
+    // copy and must not be treated this way -- hence gated on gsl::Pointer.)
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+    return recordContainsMutableOwner(
+        PT.getNonReferenceType()->getAsCXXRecordDecl(), Visited);
+  }
   return false;
 }
 
@@ -1349,9 +1359,18 @@ void FactsGenerator::handleAssumedInvalidatingCall(
       continue;
     if (!paramMayMutateOwner(PVD->getType()))
       continue;
-    if (OriginNode *L = getOriginNode(*Args[I]))
+    if (OriginNode *L = getOriginNode(*Args[I])) {
       CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
           L->getOriginID(), Call, /*Assumed=*/true));
+      // A gsl::Pointer argument (a view/wrapper that reaches a mutable owner
+      // through what it points at) carries its borrows on the pointee origin, so
+      // also invalidate the pointee -- mirroring the receiver branch above -- so
+      // a borrow taken directly from the aliased owner is invalidated too.
+      if (isGslPointerType(PVD->getType().getNonReferenceType()))
+        if (OriginNode *Pointee = L->getPointeeChild())
+          CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+              Pointee->getOriginID(), Call, /*Assumed=*/true));
+    }
   }
 }
 
