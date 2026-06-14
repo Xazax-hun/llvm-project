@@ -1312,6 +1312,40 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
+  auto invalidate = [&](OriginID OID) {
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<InvalidateOriginFact>(OID, Call, /*Assumed=*/true));
+  };
+  // A gsl::Pointer object/argument carries the borrows it holds on its pointee
+  // origin(s). Invalidate the *entire* pointee chain, not just the first level:
+  // a nested gsl::Pointer wrapper (a gsl::Pointer whose member is itself a
+  // by-value gsl::Pointer) reaches the borrowed owner several pointee levels
+  // down, so a borrow taken directly from the aliased owner lives deeper than
+  // getPointeeChild() once.
+  auto invalidatePointeeChain = [&](OriginNode *L) {
+    for (OriginNode *Pointee = L->getPointeeChild(); Pointee;
+         Pointee = Pointee->getPointeeChild())
+      invalidate(Pointee->getOriginID());
+  };
+  // Mutating an owner *through a member* (`w.in.grow()`) can invalidate a
+  // borrow that flowed into an enclosing object rather than the receiver
+  // itself. A gsl::Pointer / owner record is a leaf in the origin tree (its
+  // members are not expanded -- see buildNodeForTypeImpl), so a borrow captured
+  // into `w` at construction lives on `w`'s own origin and is *not* reachable
+  // from the freshly built `w.in` receiver origin. The origin records that
+  // enclosing object as its parent (set in getOrCreateNode), so walk the parent
+  // chain and invalidate each enclosing object (outer + its whole pointee
+  // chain). This is driven by the origin tree, not by AST pattern-matching the
+  // base expression -- robust to forms like `(c ? a.f : b.f).g`. Invalidation
+  // matches by exact borrowed-storage (AccessPath) identity, so an enclosing
+  // object that holds no aliasing borrow yields nothing.
+  auto invalidateEnclosingObjects = [&](OriginNode *L) {
+    for (OriginNode *P = L->getParent(); P; P = P->getParent()) {
+      invalidate(P->getOriginID());
+      invalidatePointeeChain(P);
+    }
+  };
+
   // (1) Non-const member call whose receiver is an owner, or a non-owner object
   // that CONTAINS owner fields (e.g. `struct S { std::string buf; };`). The call
   // may reallocate the owner (or one of its owner fields), invalidating borrows
@@ -1328,22 +1362,17 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     if ((OwnerReceiver || recordHasGslOwnerField(Args[0]->getType())) &&
         !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
-        CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-            L->getOriginID(), Call, /*Assumed=*/true));
+        invalidate(L->getOriginID());
         // When the receiver is a gsl::Pointer object (a view/wrapper that
         // reaches a mutable owner through what it points at, e.g. a wrapper
-        // holding `std::vector<int>* v`), the borrows it carries also live on its
-        // pointee origin. Invalidate the pointee too, so a borrow into the
-        // underlying owner handed out *directly* (not through this object, so it
-        // carries the owner's loan rather than this object's) is also
-        // invalidated. The outer invalidation above already covers a borrow
-        // returned by a lifetimebound accessor of this object (which carries the
-        // object's loan). Mirrors shouldTrackPointerImplicitObjectArg in
-        // handleFunctionCall.
+        // holding `std::vector<int>* v`), the borrows it carries also live on
+        // its pointee origin(s). The outer invalidation above already covers a
+        // borrow returned by a lifetimebound accessor of this object (which
+        // carries the object's loan). Mirrors shouldTrackPointerImplicitObjectArg
+        // in handleFunctionCall.
         if (isGslPointerType(Args[0]->getType().getNonReferenceType()))
-          if (OriginNode *Pointee = L->getPointeeChild())
-            CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-                Pointee->getOriginID(), Call, /*Assumed=*/true));
+          invalidatePointeeChain(L);
+        invalidateEnclosingObjects(L);
       }
   }
   // The implicit object argument (I == 0 for implicit-this instance methods) is
@@ -1360,16 +1389,15 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     if (!paramMayMutateOwner(PVD->getType()))
       continue;
     if (OriginNode *L = getOriginNode(*Args[I])) {
-      CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-          L->getOriginID(), Call, /*Assumed=*/true));
+      invalidate(L->getOriginID());
       // A gsl::Pointer argument (a view/wrapper that reaches a mutable owner
-      // through what it points at) carries its borrows on the pointee origin, so
-      // also invalidate the pointee -- mirroring the receiver branch above -- so
-      // a borrow taken directly from the aliased owner is invalidated too.
+      // through what it points at) carries its borrows on the pointee
+      // origin(s), so also invalidate the whole pointee chain -- mirroring the
+      // receiver branch above -- so a borrow taken directly from the aliased
+      // owner is invalidated too, at any nesting depth.
       if (isGslPointerType(PVD->getType().getNonReferenceType()))
-        if (OriginNode *Pointee = L->getPointeeChild())
-          CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-              Pointee->getOriginID(), Call, /*Assumed=*/true));
+        invalidatePointeeChain(L);
+      invalidateEnclosingObjects(L);
     }
   }
 }

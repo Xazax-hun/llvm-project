@@ -395,9 +395,9 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   // field child in the base's per-instance origin tree. This makes loans
   // flowing into one occurrence of `s.v` visible at later occurrences.
   if (auto *ME = dyn_cast<MemberExpr>(E))
-    if (auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
-      if (OriginNode *Base =
-              getOrCreateNode(ME->getBase()->IgnoreParenImpCasts()))
+    if (auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl())) {
+      OriginNode *Base = getOrCreateNode(ME->getBase()->IgnoreParenImpCasts());
+      if (Base)
         if (OriginNode *Sub = Base->getFieldChildInChain(FD)) {
           // For non-reference fields (e.g., `View v;` in a record), the
           // MemberExpr `s.v` is an lvalue (addressable) that can be
@@ -414,6 +414,21 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
           // field's subtree.
           return ExprToNode[E] = Sub;
         }
+      // The field child was not found because the base's record is a leaf in
+      // the origin tree (a gsl::Pointer / owner / lambda / lifetime-annotated
+      // type is not field-expanded -- see buildNodeForTypeImpl). Build a fresh
+      // node for this member access, but record the base origin as its parent:
+      // a borrow captured into the whole enclosing object lives on the base's
+      // origin -- unreachable from this fresh node -- so consumers (e.g.
+      // assumed-invalidation) can walk the parent chain to find it.
+      QualType MemberTy = E->getType();
+      if (E->isGLValue() && !MemberTy->isReferenceType())
+        MemberTy = AST.getLValueReferenceType(MemberTy);
+      OriginNode *N = buildNodeForType(MemberTy, E);
+      if (Base)
+        N->setParent(Base);
+      return ExprToNode[E] = N;
+    }
 
   // If E is an lvalue , it refers to storage. We model this storage as the
   // first level of origin list, as if it were a reference, because l-values are

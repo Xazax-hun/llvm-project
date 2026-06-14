@@ -228,3 +228,49 @@ void byval_wrapper_arg_invalidates() {
   grow_byval(w);   // expected-note {{assumed to be invalidated by this operation}}
   (void)r;
 }
+
+//===----------------------------------------------------------------------===//
+// A NESTED by-value gsl::Pointer wrapper: the borrowed owner is reached several
+// pointee levels below the receiver (`w.in.grow()`: NestWrap -> PtrWrap2 ->
+// vector). A gsl::Pointer record is a leaf in the origin tree, so a borrow
+// captured into the whole object `w` lives on `w`'s own origin, not reachable
+// from the freshly built `w.in` receiver origin. The receiver's origin records
+// `w` as its parent, so invalidation walks the origin-tree parent chain and
+// invalidates the enclosing object too.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer]] PtrWrapGrow {
+  vector<int> *v;
+  PtrWrapGrow(vector<int> *p [[clang::lifetime_capture_by(this)]]) : v(p) {}
+  void grow() {
+    for (int i = 0; i < 1000; ++i)
+      v->push_back(i);
+  }
+};
+
+struct [[gsl::Pointer]] NestWrap {
+  PtrWrapGrow in;
+  NestWrap(PtrWrapGrow i [[clang::lifetime_capture_by(this)]]) : in(i) {}
+};
+
+void nested_wrapper_member_call_invalidates() {
+  vector<int> d;
+  d.push_back(42);
+  NestWrap w{PtrWrapGrow{&d}};
+  int &r = d[0];  // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  w.in.grow();    // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// Robustness: the enclosing object is found through the origin tree, not by
+// AST-matching the base expression, so a non-trivial base form (here a
+// conditional) is handled the same way.
+void nested_wrapper_conditional_base(bool c) {
+  vector<int> d;
+  d.push_back(42);
+  NestWrap a{PtrWrapGrow{&d}};
+  NestWrap b{PtrWrapGrow{&d}};
+  int &r = d[0];       // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  (c ? a : b).in.grow(); // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}

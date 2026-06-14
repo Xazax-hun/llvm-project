@@ -143,6 +143,19 @@ public:
     Children = NewChildren;
   }
 
+  /// The enclosing-object origin this node was reached through, when that
+  /// object is a leaf in the origin tree (a gsl::Pointer / owner / lambda /
+  /// lifetime-annotated record is not field-expanded -- see
+  /// buildNodeForTypeImpl). A member access `w.in` of such a leaf base builds a
+  /// fresh, disconnected node; its parent records `w`'s origin so a borrow that
+  /// flowed into the whole object (which lives on `w`'s origin, unreachable
+  /// from this node) can still be found -- e.g. for invalidation -- without
+  /// fragile AST inspection of the base expression. Null for nodes that are
+  /// genuine descendants of their enclosing object (plain-record field
+  /// subtrees) or have no enclosing object.
+  OriginNode *getParent() const { return Parent; }
+  void setParent(OriginNode *P) { Parent = P; }
+
   // Used for assertion checks only (to ensure pointee chains have matching
   // lengths).
   size_t getLength() const {
@@ -158,6 +171,7 @@ public:
 private:
   OriginID OID;
   llvm::ArrayRef<Edge> Children;
+  OriginNode *Parent = nullptr;
 };
 
 bool doesDeclHaveStorage(const ValueDecl *D);
