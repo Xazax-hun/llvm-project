@@ -157,3 +157,46 @@ void lambda_no_capture_silent() {
   noop(); // no-warning
   (void)r;
 }
+
+//===----------------------------------------------------------------------===//
+// A record that reaches a mutable owner through a non-const pointer/reference
+// member (not only a by-value owner field) is treated as containing a mutable
+// owner: a non-const method that mutates the owner through the indirection is
+// assumed to invalidate borrows handed out from the object.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer]] PtrWrap {
+  vector<int> *v;
+  PtrWrap(vector<int> *p [[clang::lifetime_capture_by(this)]]) : v(p) {}
+  int &at0() [[clang::lifetimebound]] { return (*v)[0]; }
+  void grow() {
+    for (int i = 0; i < 1000; ++i)
+      v->push_back(i);
+  }
+};
+
+void ptr_member_owner_invalidated() {
+  vector<int> d;
+  d.push_back(42);
+  PtrWrap w(&d);
+  int &r = w.at0(); // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  w.grow();         // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// A const pointee cannot be reallocated through the member, so no invalidation.
+struct ConstPtrWrap {
+  const vector<int> *v;
+  ConstPtrWrap(const vector<int> *p [[clang::lifetime_capture_by(this)]]) : v(p) {}
+  const int *read() const { return v->data(); }
+  void touch() {} // non-const, but cannot mutate *v
+};
+
+void const_ptr_member_silent() {
+  vector<int> d;
+  d.push_back(42);
+  ConstPtrWrap w(&d);
+  const int *x = w.read();
+  w.touch(); // no-warning
+  (void)x;
+}

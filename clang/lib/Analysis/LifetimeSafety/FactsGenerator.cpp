@@ -126,8 +126,11 @@ static bool isMutableOwnerType(QualType QT) {
 }
 
 /// Returns true if `RD` has a reachable mutable owner data member -- directly,
-/// transitively (a field whose own record contains one), or through a base
-/// class. A non-const member call on such an object may reallocate that owner,
+/// transitively (a field whose own record contains one), through a base class,
+/// or through a non-const pointer/reference/gsl::Pointer member whose pointee is
+/// (or contains) a mutable owner. A non-const member call on such an object may
+/// reallocate that owner -- directly (`std::vector<int> v; ... v.push_back(...)`)
+/// or through the indirection (`std::vector<int>* v; ... v->push_back(...)`) --
 /// invalidating a view into it. `Visited` cuts cycles.
 static bool recordContainsMutableOwner(
     const CXXRecordDecl *RD, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
@@ -139,11 +142,29 @@ static bool recordContainsMutableOwner(
     if (recordContainsMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
-    if (isMutableOwnerType(FD->getType()))
+    QualType DeclT = FD->getType();
+    if (isMutableOwnerType(DeclT))
+      return true;
+    // A non-const pointer/reference member whose pointee is (or contains) a
+    // mutable owner: the owner can be reallocated through the indirection
+    // (`v->push_back(...)`). A const pointee cannot be mutated, so it is
+    // excluded. Recurse with the shared `Visited` set (do not call
+    // paramMayMutateOwner, which would start a fresh set and could loop).
+    if (DeclT->isPointerType() || DeclT->isReferenceType()) {
+      QualType Pointee = DeclT->getPointeeType();
+      if (!Pointee.isConstQualified() &&
+          (isMutableOwnerType(Pointee) ||
+           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
+        return true;
+    }
+    // A gsl::Pointer member (e.g. an iterator) that exposes mutable access to a
+    // non-const owner pointee.
+    if (isGslPointerType(DeclT.getNonReferenceType()) &&
+        pointsToMutableOwner(DeclT.getNonReferenceType()))
       return true;
     // Recurse into a non-owner record field (e.g. an aggregate sub-object that
     // itself holds an owner). Owners are leaves -- we never descend into them.
-    QualType FT = FD->getType().getNonReferenceType();
+    QualType FT = DeclT.getNonReferenceType();
     while (FT->isArrayType())
       FT = FT->getAsArrayTypeUnsafe()->getElementType();
     if (!isGslOwnerType(FT) &&
