@@ -1161,6 +1161,21 @@ void FactsGenerator::handleExitBlock() {
             FactMgr.createFact<GlobalEscapeFact>(O.ID, VD));
       }
     }
+
+  // Soundness: keep the implicit object (`this`) origin live at function exit.
+  // A borrow captured via [[clang::lifetime_capture_by(this)]] is modeled as a
+  // flow into the whole-object `this` origin (we do not know which member holds
+  // it), and `this` is a caller-scope placeholder that never expires -- so when
+  // the capture, the captured local's expiry, and a later read all happen inside
+  // one method, the captured local's loan sits on an origin that is not
+  // otherwise live at the expiry and the dangle is missed. An implicit use of
+  // `this` here makes it live back through the expiry, so checkExpiry reports the
+  // captured local going out of scope while still held by the object. The `this`
+  // placeholder loan never expires, so this adds no false positive for an object
+  // that only holds caller-scoped borrows.
+  if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+    CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
+        AC.getDecl()->getEndLoc(), *ThisOrigins));
 }
 
 void FactsGenerator::handleGSLPointerConstruction(const CXXConstructExpr *CCE) {
