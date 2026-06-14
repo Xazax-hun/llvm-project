@@ -766,7 +766,25 @@ bool isStlContainerType(const CXXRecordDecl *RD) {
 bool destructsFirstArg(const FunctionDecl &FD) {
   if (isa<CXXDestructorDecl>(FD))
     return true;
-  return isInStlNamespace(&FD) && getName(FD) == "destroy_at";
+  // `std::destroy_at(p)` runs p's destructor.
+  if (isInStlNamespace(&FD) && getName(FD) == "destroy_at")
+    return true;
+  // A direct call to an `operator delete` / `operator delete[]` deallocation
+  // function frees its first argument (a `delete`/`delete[]` *expression* is a
+  // CXXDeleteExpr, handled separately; this is the explicit-call form, e.g.
+  // `::operator delete(p)`).
+  OverloadedOperatorKind OO = FD.getOverloadedOperator();
+  if (OO == OO_Delete || OO == OO_Array_Delete)
+    return true;
+  // The C deallocators `free(p)` / `realloc(p, n)` free their first argument.
+  // Recognize them at global (the usual `extern "C"` declaration) or std scope.
+  // `realloc` additionally returns a fresh allocation, but invalidating the old
+  // pointer is what matters for borrows into it.
+  if (getName(FD) == "free" || getName(FD) == "realloc") {
+    const DeclContext *DC = FD.getDeclContext()->getRedeclContext();
+    return DC->isTranslationUnit() || isInStlNamespace(&FD);
+  }
+  return false;
 }
 
 bool isStdCallableWrapperType(const CXXRecordDecl *RD) {
