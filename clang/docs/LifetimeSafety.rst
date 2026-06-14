@@ -173,6 +173,11 @@ Without ``[[clang::lifetimebound]]`` on ``getView()``, the analysis would not
 know that the value returned by ``getView()`` depends on the temporary
 ``MyOwner`` object, and it would not be able to diagnose the dangling ``sv``.
 
+A C++23 explicit object parameter ("deducing this") is treated as the object for
+this purpose: ``[[clang::lifetimebound]]`` on the ``self`` parameter
+(``auto getView(this const MyOwner &self [[clang::lifetimebound]])``) binds the
+result to the object just as it would for an implicit ``this``.
+
 The analysis also tracks record types returned from functions and constructors
 with ``[[clang::lifetimebound]]`` annotated parameters:
 

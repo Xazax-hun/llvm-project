@@ -185,6 +185,29 @@ static bool paramMayMutateOwner(QualType PT) {
   return false;
 }
 
+/// Maps a modeled call-argument index to the callee's corresponding
+/// `ParmVarDecl`, or null when the argument has no declared parameter (the
+/// implicit object argument of an implicit-`this` instance method, or a variadic
+/// argument). The modeled argument list places the object first for instance
+/// methods, so:
+///   - implicit-`this` instance method: Args[0] is the object (no ParmVarDecl);
+///     Args[I>=1] maps to getParamDecl(I - 1).
+///   - C++23 explicit object member function: the object IS getParamDecl(0), so
+///     Args[I] maps to getParamDecl(I) 1:1 (including the object at I == 0).
+///   - free function / static method: Args[I] maps to getParamDecl(I).
+/// `IsInstance` is the caller's "instance method with a leading object argument"
+/// flag (false for constructors).
+static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
+                                      unsigned I) {
+  const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+  if (IsInstance && MD && !MD->isExplicitObjectMemberFunction()) {
+    if (I == 0)
+      return nullptr; // implicit object argument
+    I -= 1;
+  }
+  return I < FD->getNumParams() ? FD->getParamDecl(I) : nullptr;
+}
+
 /// Returns true if `MD` is a known non-invalidating accessor of a standard
 /// library type -- one that returns a borrow into the container (or smart
 /// pointer pointee) without reallocating it. Non-const member calls on an owner
@@ -1262,18 +1285,15 @@ void FactsGenerator::handleAssumedInvalidatingCall(
         CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
             L->getOriginID(), Call, /*Assumed=*/true));
   }
-  // The implicit object argument (I == 0 for instance methods) is intentionally
-  // skipped below -- it is handled by case (1) above.
+  // The implicit object argument (I == 0 for implicit-this instance methods) is
+  // intentionally skipped below -- it is handled by case (1) above. (For a C++23
+  // explicit object member function the object IS a parameter, handled uniformly
+  // by paramForArg; but its mutation as the receiver is still case (1), so skip
+  // its parameter here to avoid double-flagging.)
   for (unsigned I = 0; I < Args.size(); ++I) {
-    const ParmVarDecl *PVD = nullptr;
-    if (IsInstance) {
-      if (I == 0)
-        continue; // Implicit object argument, handled above.
-      if (I - 1 < Method->getNumParams())
-        PVD = Method->getParamDecl(I - 1);
-    } else if (I < FD->getNumParams()) {
-      PVD = FD->getParamDecl(I);
-    }
+    if (IsInstance && I == 0)
+      continue; // object argument, handled above
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD)
       continue;
     if (!paramMayMutateOwner(PVD->getType()))
@@ -1325,13 +1345,7 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
       QualType RecvTy = Args[0]->getType();
       return isGslOwnerType(RecvTy) || recordHasGslOwnerField(RecvTy);
     }
-    const ParmVarDecl *PVD = nullptr;
-    if (IsInstance) {
-      if (I - 1 < Method->getNumParams())
-        PVD = Method->getParamDecl(I - 1);
-    } else if (I < FD->getNumParams()) {
-      PVD = FD->getParamDecl(I);
-    }
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     return PVD && paramMayMutateOwner(PVD->getType());
   };
 
@@ -1415,17 +1429,13 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
-  auto getArgCaptureBy = [FD,
-                          IsInstance](unsigned I) -> LifetimeCaptureByAttr * {
-    const ParmVarDecl *PVD = nullptr;
-    if (IsInstance) {
-      // FIXME: Add support for I == 0 i.e. capture_by on function declarations
-      if (I > 0 && I - 1 < FD->getNumParams())
-        PVD = FD->getParamDecl(I - 1);
-    } else {
-      if (I < FD->getNumParams())
-        PVD = FD->getParamDecl(I);
-    }
+  // Whether the modeled argument list has a leading implicit object argument
+  // (true for an ordinary instance method, false for a C++23 explicit object
+  // member function, whose object is an ordinary parameter mapped 1:1).
+  bool ImplicitThis = IsInstance && !Method->isExplicitObjectMemberFunction();
+  auto getArgCaptureBy = [FD, IsInstance](unsigned I) -> LifetimeCaptureByAttr * {
+    // FIXME: Add support for capture_by on the implicit object (I == 0).
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     return PVD ? PVD->getAttr<LifetimeCaptureByAttr>() : nullptr;
   };
   for (unsigned I = 0; I < Args.size(); ++I) {
@@ -1443,7 +1453,11 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
           CapturingArgIdx == LifetimeCaptureByAttr::Unknown ||
           CapturingArgIdx == LifetimeCaptureByAttr::Invalid)
         continue;
-      ArrayRef<const Expr *> CallArgs = IsInstance ? Args.drop_front() : Args;
+      // CapturingArgIdx is a parameter index; map it back to a call argument.
+      // For an implicit-this method the object occupies Args[0], so the
+      // parameters start at Args[1] (drop_front); for an explicit object member
+      // function (and free functions) parameters map to Args 1:1.
+      ArrayRef<const Expr *> CallArgs = ImplicitThis ? Args.drop_front() : Args;
       const Expr *CapturedByArg =
           (CapturingArgIdx == LifetimeCaptureByAttr::This)
               ? Args[0]
@@ -1523,17 +1537,12 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
       (Method->isCopyAssignmentOperator() || Method->isMoveAssignmentOperator()))
     return;
   for (unsigned I = 0; I < Args.size(); ++I) {
-    // Map the argument index to its explicit parameter, skipping the implicit
-    // object argument of instance methods.
-    const ParmVarDecl *PVD = nullptr;
-    if (IsInstance) {
-      if (I == 0)
-        continue;
-      if (I - 1 < Method->getNumParams())
-        PVD = Method->getParamDecl(I - 1);
-    } else if (I < FD->getNumParams()) {
-      PVD = FD->getParamDecl(I);
-    }
+    // The object argument (I == 0 for an instance method, implicit or C++23
+    // explicit) is the receiver, not a borrow parameter to annotate; skip it.
+    if (IsInstance && I == 0)
+      continue;
+    // Map the argument index to its declared parameter.
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD || !hasOrigins(PVD->getType()))
       continue;
     if (PVD->hasAttr<clang::LifetimeBoundAttr>() ||
@@ -1809,15 +1818,23 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     const ParmVarDecl *PVD = nullptr;
     if (const auto *Method = dyn_cast<CXXMethodDecl>(FD);
         Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD)) {
-      if (I == 0)
-        // For the 'this' argument, the attribute is on the method itself.
+      if (Method->isExplicitObjectMemberFunction()) {
+        // C++23 deducing-this: the explicit object parameter `self` is
+        // getParamDecl(0), and the argument list (object first, then the
+        // explicit arguments) maps 1:1 to the parameters. So Args[I]'s
+        // lifetimebound-ness -- including the object argument at I == 0 -- comes
+        // from getParamDecl(I), not the method itself.
+        if (I < Method->getNumParams())
+          PVD = Method->getParamDecl(I);
+      } else if (I == 0) {
+        // For the implicit 'this' argument, the attribute is on the method.
         return implicitObjectParamIsLifetimeBound(Method) ||
                shouldTrackImplicitObjectArg(
                    *Args[0], Method, /*RunningUnderLifetimeSafety=*/true);
-      if ((I - 1) < Method->getNumParams())
-        // For explicit arguments, find the corresponding parameter
-        // declaration.
+      } else if ((I - 1) < Method->getNumParams()) {
+        // For explicit arguments, find the corresponding parameter declaration.
         PVD = Method->getParamDecl(I - 1);
+      }
     } else if (I == 0 && shouldTrackFirstArgument(FD)) {
       return true;
     } else if (I == 1 && shouldTrackSecondArgument(FD)) {
