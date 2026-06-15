@@ -868,6 +868,14 @@ void FactsGenerator::handlePointerArithmetic(const BinaryOperator *BO) {
 }
 
 void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
+  if (BO->getOpcode() == BO_Comma) {
+    // The comma operator's value is its right operand, so the result carries the
+    // RHS's loans. Without this a borrow used via a comma result (e.g.
+    // `g = (f(), p)`) is dropped. (For a non-pointer-like RHS there are no
+    // origins to flow; killAndFlowOrigin is a no-op then.)
+    killAndFlowOrigin(*BO, *BO->getRHS());
+    return;
+  }
   if (BO->isCompoundAssignmentOp()) {
     // A pointer compound additive assignment (`p += n` / `p -= n`) keeps the
     // pointer aimed into the same allocation, so its result (an lvalue
