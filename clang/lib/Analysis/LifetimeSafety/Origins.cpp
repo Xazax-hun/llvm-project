@@ -333,6 +333,18 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   if (It != ExprToNode.end())
     return It->second;
 
+  // A statement expression (`({ ...; e; })`) yields the value of its final
+  // expression `e`; forward to it so a borrow `e` produces is tracked. A borrow
+  // of a body-local escaping this way is still caught: FactsGenerator marks the
+  // statement-expression's value as used at the statement-expression's own
+  // program point -- after the body's locals expire -- so the loan is live at
+  // the local's expiry (see VisitStmtExpr).
+  if (const auto *SE = dyn_cast<StmtExpr>(E))
+    if (const CompoundStmt *CS = SE->getSubStmt(); CS && !CS->body_empty())
+      if (const auto *Last = dyn_cast<Expr>(CS->body_back()))
+        if (OriginNode *N = getOrCreateNode(Last))
+          return ExprToNode[E] = N;
+
   QualType Type = E->getType();
   // Special handling for 'this' expressions to share origins with the method's
   // implicit object parameter.

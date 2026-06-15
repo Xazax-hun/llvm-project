@@ -58,6 +58,7 @@ public:
   void VisitCXXNewExpr(const CXXNewExpr *NE);
   void VisitCXXDeleteExpr(const CXXDeleteExpr *DE);
   void VisitCXXThrowExpr(const CXXThrowExpr *TE);
+  void VisitStmtExpr(const StmtExpr *SE);
 
 private:
   OriginNode *getOriginNode(const ValueDecl &D);

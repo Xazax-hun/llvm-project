@@ -1214,6 +1214,17 @@ void FactsGenerator::VisitCXXThrowExpr(const CXXThrowExpr *TE) {
       UntrackedConstructReason::Exception, TE->getThrowLoc()));
 }
 
+void FactsGenerator::VisitStmtExpr(const StmtExpr *SE) {
+  // A statement expression's value is its final expression, whose origin
+  // getOrCreateNode forwards to. Mark that value as USED here -- at the
+  // statement-expression's own program point, which the CFG places AFTER the
+  // body's locals have expired. This keeps a borrow the value carries live
+  // across those expiries, so a borrow of a body-local escaping via the value
+  // is reported as a use-after-scope rather than silently dropped (the
+  // in-transit loan would otherwise not be "live" at the local's expiry).
+  handleUse(SE);
+}
+
 void FactsGenerator::handleTryStatements() {
   const Stmt *Body = AC.getBody();
   if (!Body)
