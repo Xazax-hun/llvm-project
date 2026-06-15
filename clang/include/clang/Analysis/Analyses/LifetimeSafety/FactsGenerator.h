@@ -34,6 +34,10 @@ public:
   void run();
 
   void VisitDeclStmt(const DeclStmt *DS);
+  /// Soundness catch-all: the fallback for any expression with no specific
+  /// handler. Flags an origin-bearing expression the fact generator does not
+  /// model (so its borrow would be silently dropped).
+  void VisitExpr(const Expr *E);
   void VisitDeclRefExpr(const DeclRefExpr *DRE);
   void VisitCXXConstructExpr(const CXXConstructExpr *CCE);
   void VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE);

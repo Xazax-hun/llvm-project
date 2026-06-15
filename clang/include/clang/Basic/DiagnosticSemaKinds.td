@@ -11177,6 +11177,13 @@ def warn_lifetime_safety_unsupported_store
               "here cannot be tracked and a later dangling use could be missed">,
       InGroup<LifetimeSafetyUnsupportedStore>,
       DefaultIgnore;
+def warn_lifetime_safety_unmodeled_expr
+    : Warning<"this expression is not modeled by lifetime safety analysis; it "
+              "produces a value that can hold a borrow, but the analysis does "
+              "not track this construct, so a borrow it carries could be lost "
+              "and a later dangling use missed">,
+      InGroup<LifetimeSafetyUnmodeledExpr>,
+      DefaultIgnore;
 def warn_lifetime_safety_move_silencing
     : Warning<"moving an owner is not modeled by lifetime safety analysis, so "
               "lifetime checks for the moved-from object are silenced">,

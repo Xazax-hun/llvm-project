@@ -467,6 +467,13 @@ enum class UntrackedConstructReason : uint8_t {
   /// `*&(...)`/casts -- so a stored borrow cannot be routed to a tracked storage
   /// origin and is dropped. The destination is borrow-holding (a pointer/view).
   UnsupportedStoreDestination,
+  /// Soundness catch-all: an expression whose type carries a borrow (a pointer,
+  /// reference, or view) for which the fact generator has no specific handler --
+  /// e.g. a C11 atomic builtin (`AtomicExpr`) or a compound literal. Such an
+  /// expression produces a value whose origin is never populated, so any borrow
+  /// it should carry is silently dropped. Flagging it keeps the soundness model
+  /// from silently failing on a construct it does not model.
+  UnmodeledExpr,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

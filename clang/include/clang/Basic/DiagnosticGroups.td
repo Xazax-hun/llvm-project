@@ -768,6 +768,19 @@ programming model.
   }];
 }
 
+def LifetimeSafetyUnmodeledExpr
+    : DiagGroup<"lifetime-safety-unmodeled-expr"> {
+  code Documentation = [{
+Soundness catch-all: warns on an expression whose type can hold a borrow (a
+pointer, reference, or view) but for which the lifetime safety analysis has no
+specific model -- for example a C11 atomic builtin or a compound literal. Such an
+expression produces a value whose borrow information is not tracked, so a borrow
+it carries could be dropped and a later dangling use missed. This is the generic
+backstop ensuring the safe programming model never silently fails on a construct
+the fact generator does not model.
+  }];
+}
+
 def LifetimeSafetyMoveSilencing : DiagGroup<"lifetime-safety-move-silencing"> {
   code Documentation = [{
 Warns when an owner is moved (e.g. via 'std::move' or
@@ -925,6 +938,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyUnannotatedIndirection,
                                          LifetimeSafetyMultilevelIndirection,
                                          LifetimeSafetyUnsupportedStore,
+                                         LifetimeSafetyUnmodeledExpr,
                                          LifetimeSafetyMoveSilencing,
                                          LifetimeSafetyAssumedInvalidation,
                                          LifetimeSafetyNakedDelete,

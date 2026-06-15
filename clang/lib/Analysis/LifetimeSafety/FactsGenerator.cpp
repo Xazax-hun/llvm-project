@@ -319,6 +319,36 @@ static OriginNode *getRValueOrigins(const Expr *E, OriginNode *Node) {
   return E->isGLValue() ? Node->getPointeeChild() : Node;
 }
 
+void FactsGenerator::VisitExpr(const Expr *E) {
+  // Soundness catch-all. This is the ConstStmtVisitor fallback: it is reached
+  // only by expression kinds with no specific Visit* handler. If such an
+  // expression's TYPE carries a borrow (a pointer/reference/view) the generator
+  // produced a value whose origin was never populated -- any borrow it should
+  // carry is silently dropped (e.g. a C11 atomic builtin / AtomicExpr). Flag it
+  // so the soundness model never silently fails on a construct it does not
+  // model. Gate on the type, not hasOrigins(Expr) (which is true for every
+  // glvalue), so a plain glvalue of non-borrow type is not flagged.
+  if (!hasOrigins(E->getType()))
+    return;
+  // Skip kinds that are handled structurally elsewhere or are transparent
+  // forwarders: their borrow flows through a sub-expression that is itself a
+  // visited CFG element (or, for `this`, through the dedicated `this` origin).
+  switch (E->getStmtClass()) {
+  case Stmt::CXXThisExprClass:                  // modeled via the `this` origin
+  case Stmt::ParenExprClass:                    // transparent
+  case Stmt::ExprWithCleanupsClass:             // transparent (peeled)
+  case Stmt::ConstantExprClass:                 // transparent
+  case Stmt::SubstNonTypeTemplateParmExprClass: // transparent
+  case Stmt::CXXDefaultArgExprClass:            // forwards to its sub-expr
+  case Stmt::OpaqueValueExprClass:              // bound by its enclosing expr
+    return;
+  default:
+    break;
+  }
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      UntrackedConstructReason::UnmodeledExpr, E));
+}
+
 void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
   for (const Decl *D : DS->decls()) {
     const auto *VD = dyn_cast<VarDecl>(D);

@@ -874,6 +874,10 @@ public:
     case UntrackedConstructReason::UnsupportedStoreDestination:
       SemaHelper->reportUnsupportedStoreDestination(E);
       break;
+    case UntrackedConstructReason::UnmodeledExpr:
+      if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
+        SemaHelper->reportUnmodeledExpr(E);
+      break;
     case UntrackedConstructReason::Union:
       if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
         SemaHelper->reportUnion(E);

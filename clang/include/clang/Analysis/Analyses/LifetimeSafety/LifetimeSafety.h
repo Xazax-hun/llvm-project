@@ -266,6 +266,10 @@ public:
   // a stored borrow cannot be routed to a tracked storage origin.
   virtual void reportUnsupportedStoreDestination(const Expr *E) {}
 
+  // Reports an origin-bearing expression the fact generator does not model (no
+  // specific handler), so any borrow it carries is silently dropped.
+  virtual void reportUnmodeledExpr(const Expr *E) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}
