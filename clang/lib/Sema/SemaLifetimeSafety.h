@@ -547,6 +547,20 @@ public:
            diag::warn_lifetime_safety_multilevel_indirection)
         << Subject << RTR;
   }
+  void reportMultiLevelIndirectionCapture(const Expr *CaptureRef) override {
+    std::string Subject = "by-reference capture";
+    if (const auto *DRE =
+            dyn_cast<DeclRefExpr>(CaptureRef->IgnoreParenImpCasts())) {
+      Subject += " of '";
+      llvm::raw_string_ostream OS(Subject);
+      DRE->getDecl()->getNameForDiagnostic(OS, S.getPrintingPolicy(),
+                                           /*Qualified=*/false);
+      OS << "'";
+    }
+    S.Diag(CaptureRef->getExprLoc(),
+           diag::warn_lifetime_safety_multilevel_indirection)
+        << Subject << CaptureRef->getSourceRange();
+  }
 
   void reportMoveSilencing(const Expr *MoveExpr) override {
     S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)

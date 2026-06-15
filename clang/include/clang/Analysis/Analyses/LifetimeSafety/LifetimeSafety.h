@@ -248,6 +248,14 @@ public:
   // returned reference silently drops the borrow, so the pattern is rejected.
   virtual void reportMultiLevelIndirectionReturn(const FunctionDecl *FD) {}
 
+  // Reports a by-reference lambda capture of an indirection-typed variable (e.g.
+  // capturing a std::string_view by `[&sv]`), which forms a reference to a view
+  // -- two levels of indirection. A reassignment of the view inside the lambda
+  // body is not modeled back into the captured variable, so a borrow held by it
+  // can dangle undetected. \p CaptureRef is the capture's reference to the
+  // variable (for the name and location).
+  virtual void reportMultiLevelIndirectionCapture(const Expr *CaptureRef) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}

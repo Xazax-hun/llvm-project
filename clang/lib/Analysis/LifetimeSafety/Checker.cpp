@@ -865,6 +865,9 @@ public:
     case UntrackedConstructReason::MultiLevelIndirectionExpr:
       SemaHelper->reportMultiLevelIndirection(E);
       break;
+    case UntrackedConstructReason::LambdaRefCaptureIndirection:
+      SemaHelper->reportMultiLevelIndirectionCapture(E);
+      break;
     case UntrackedConstructReason::Union:
       if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
         SemaHelper->reportUnion(E);

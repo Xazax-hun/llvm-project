@@ -158,6 +158,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::ReinterpretCast:
     OS << "ReinterpretCast";
     break;
+  case UntrackedConstructReason::LambdaRefCaptureIndirection:
+    OS << "LambdaRefCaptureIndirection";
+    break;
   }
   OS << ")\n";
 }

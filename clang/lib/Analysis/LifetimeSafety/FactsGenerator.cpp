@@ -1028,7 +1028,24 @@ void FactsGenerator::VisitLambdaExpr(const LambdaExpr *LE) {
   if (!LambdaNode)
     return;
   bool Kill = true;
+  const LambdaExpr::capture_iterator CapIt = LE->capture_begin();
+  unsigned CapIdx = 0;
   for (const Expr *Init : LE->capture_inits()) {
+    const LambdaCapture &Cap = *(CapIt + CapIdx);
+    ++CapIdx;
+    // Soundness: a by-reference capture of an indirection-typed variable (e.g.
+    // `[&sv]` where sv is a std::string_view) forms a reference to a view -- two
+    // levels of indirection. The lambda body reassigning the view is not flowed
+    // back into the captured variable (the merged-origin model below tracks only
+    // whether the lambda outlives a capture), so a borrow it holds can dangle
+    // undetected. Reject such a capture, mirroring the single-indirection rule
+    // for a `string_view&` declaration. Capturing an owner or a scalar by
+    // reference is a single level and stays fine.
+    if (Cap.getCaptureKind() == LCK_ByRef && Cap.capturesVariable() && Init)
+      if (FactMgr.getOriginMgr().getIndirectionDepth(
+              Cap.getCapturedVar()->getType().getNonReferenceType()) >= 1)
+        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+            UntrackedConstructReason::LambdaRefCaptureIndirection, Init));
     if (!Init)
       continue;
     OriginNode *InitNode = getOriginNode(*Init);

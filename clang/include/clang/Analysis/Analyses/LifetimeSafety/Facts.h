@@ -440,6 +440,11 @@ enum class UntrackedConstructReason : uint8_t {
   /// (reinterpreting storage), hiding its provenance from the analysis, so a
   /// borrow recovered through it is not tracked.
   ReinterpretCast,
+  /// A by-reference lambda capture of an indirection-typed variable (e.g. `[&sv]`
+  /// where sv is a std::string_view): the capture forms a reference to a view --
+  /// two levels of indirection -- and a reassignment of the view inside the
+  /// lambda body is not flowed back, so a borrow it holds can dangle undetected.
+  LambdaRefCaptureIndirection,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
