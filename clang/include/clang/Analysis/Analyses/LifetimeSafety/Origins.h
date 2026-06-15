@@ -229,6 +229,15 @@ public:
   bool hasOrigins(QualType QT) const;
   bool hasOrigins(const Expr *E) const;
 
+  /// The pointee-chain length of \p QT's origin tree -- the depth metric used
+  /// by the single-indirection rule. Returns 0 if the type bears no origins, 1
+  /// for a single indirection (e.g. int*, std::string_view), and >1 for a
+  /// multi-level indirection (e.g. int**, std::string_view& / std::string_view*
+  /// -- a reference/pointer to a view). Builds a throwaway origin tree so a
+  /// type with no declaration (such as a function return type) is measured
+  /// exactly like a parameter or local of the same type.
+  unsigned getIndirectionDepth(QualType QT);
+
   bool isAccessedField(const FieldDecl *FD) const {
     return AccessedFields.contains(FD);
   }

@@ -242,6 +242,14 @@ OriginNode *OriginManager::buildNodeForType(QualType QT, const T *Node) {
   return buildNodeForTypeImpl(QT, Node, Visited, 0);
 }
 
+unsigned OriginManager::getIndirectionDepth(QualType QT) {
+  if (!hasOrigins(QT))
+    return 0;
+  // Measure with the same builder used for declarations; the throwaway tree's
+  // pointee-chain length is the indirection depth.
+  return buildNodeForType(QT, static_cast<const Expr *>(nullptr))->getLength();
+}
+
 template <typename T>
 OriginNode *
 OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,

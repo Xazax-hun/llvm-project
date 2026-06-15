@@ -537,6 +537,16 @@ public:
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_multilevel_indirection)
         << getDiagSubjectDescription(E) << E->getSourceRange();
   }
+  void reportMultiLevelIndirectionReturn(const FunctionDecl *FD) override {
+    std::string Subject = "the return type of '";
+    llvm::raw_string_ostream OS(Subject);
+    FD->getNameForDiagnostic(OS, S.getPrintingPolicy(), /*Qualified=*/false);
+    OS << "'";
+    SourceRange RTR = FD->getReturnTypeSourceRange();
+    S.Diag(RTR.isValid() ? RTR.getBegin() : FD->getLocation(),
+           diag::warn_lifetime_safety_multilevel_indirection)
+        << Subject << RTR;
+  }
 
   void reportMoveSilencing(const Expr *MoveExpr) override {
     S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)

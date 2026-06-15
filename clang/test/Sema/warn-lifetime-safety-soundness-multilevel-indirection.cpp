@@ -56,3 +56,23 @@ int main(int argc, char **argv, char **envp) { // no-warning
 void not_main(char **argv) { // expected-warning {{parameter 'argv' uses more than one level of indirection}}
   (void)argv;
 }
+
+// The RETURN TYPE is subject to the same rule: returning a reference/pointer to
+// an indirection (a view, a pointer) is a second level. Storing through such a
+// returned reference (`obj.ref() = borrow;`) would otherwise silently drop the
+// borrow.
+struct Box {
+  View v;
+  View &ref() [[clang::lifetimebound]] { return v; } // expected-warning {{the return type of 'ref' uses more than one level of indirection}}
+  View *ptr() [[clang::lifetimebound]] { return &v; } // expected-warning {{the return type of 'ptr' uses more than one level of indirection}} expected-warning {{uses more than one level of indirection}}
+  View by_value() { return v; }                       // no-warning: a view returned by value is a single level
+};
+
+int **returns_pp() {       // expected-warning {{the return type of 'returns_pp' uses more than one level of indirection}}
+  return nullptr;
+}
+
+// Single-level returns are fine.
+int *returns_p(int *p) { return p; }    // no-warning
+View returns_view(View v) { return v; } // no-warning
+int returns_int() { return 0; }         // no-warning

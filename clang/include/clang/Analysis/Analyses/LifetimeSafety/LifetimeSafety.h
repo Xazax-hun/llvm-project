@@ -243,6 +243,11 @@ public:
   // model. Mirrors the declaration-level ban for transient expressions.
   virtual void reportMultiLevelIndirection(const Expr *E) {}
 
+  // Reports a function whose RETURN TYPE uses more than one level of indirection
+  // (e.g. 'std::string_view&' -- a reference to a view). Storing through such a
+  // returned reference silently drops the borrow, so the pattern is rejected.
+  virtual void reportMultiLevelIndirectionReturn(const FunctionDecl *FD) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}

@@ -1081,6 +1081,15 @@ public:
     });
     for (const ValueDecl *VD : MultiLevel)
       SemaHelper->reportMultiLevelIndirection(VD);
+
+    // The function's RETURN TYPE is subject to the same single-indirection rule:
+    // returning a reference/pointer to an indirection (e.g. 'std::string_view&')
+    // is a double indirection the analysis cannot model -- and a store *through*
+    // such a returned reference (`obj.ref() = borrow;`) silently drops the
+    // borrow. (A view returned BY VALUE is a single level and stays fine.)
+    if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
+      if (OM.getIndirectionDepth(Fn->getReturnType()) > 1)
+        SemaHelper->reportMultiLevelIndirectionReturn(Fn);
   }
 
   void issuePendingWarnings() {
