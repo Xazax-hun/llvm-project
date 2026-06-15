@@ -247,7 +247,22 @@ static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
 /// from being treated as mutating. Restricted to the std namespace: a user
 /// type's accessors are not recognized and are treated conservatively.
 static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
-  if (!isInStlNamespace(MD.getParent()))
+  // The read-accessor allow-list encodes knowledge about *standard library*
+  // owner types, so it must apply only to types in the genuine `std` namespace
+  // -- including libc++'s inline versioning namespace `std::__1`, which has a
+  // real `std` ancestor. The broader isInStlNamespace heuristic also treats any
+  // top-level reserved-name namespace (`__detail`, `__gnu_cxx`, ...) as STL; a
+  // user's custom [[gsl::Owner]] placed in such a namespace with a non-const,
+  // reallocating method merely *named* like an accessor (`data`, `find`, ...)
+  // must NOT be exempted -- it is conservatively assumed-invalidating.
+  const DeclContext *DC = MD.getParent()->getDeclContext();
+  bool InActualStd = false;
+  for (; DC; DC = DC->getParent())
+    if (DC->isStdNamespace()) {
+      InActualStd = true;
+      break;
+    }
+  if (!InActualStd)
     return false;
   switch (MD.getOverloadedOperator()) {
   case OO_Subscript: // operator[]
