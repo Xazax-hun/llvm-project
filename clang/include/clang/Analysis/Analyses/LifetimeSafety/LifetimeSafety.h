@@ -256,6 +256,11 @@ public:
   // variable (for the name and location).
   virtual void reportMultiLevelIndirectionCapture(const Expr *CaptureRef) {}
 
+  // Reports an array of indirections (`int* arr[N]`, `std::string_view arr[N]`)
+  // decaying to a pointer-to-pointer somewhere other than an `arr[i]` subscript
+  // base -- a double level of indirection the analysis cannot model.
+  virtual void reportArrayOfIndirectionDecay(const Expr *E) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}

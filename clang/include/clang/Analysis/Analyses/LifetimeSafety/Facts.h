@@ -445,6 +445,12 @@ enum class UntrackedConstructReason : uint8_t {
   /// two levels of indirection -- and a reassignment of the view inside the
   /// lambda body is not flowed back, so a borrow it holds can dangle undetected.
   LambdaRefCaptureIndirection,
+  /// An array whose element type is itself an indirection (a pointer, reference,
+  /// or view) decaying to a pointer (e.g. `int* arr[N]` -> `int**`), other than
+  /// as the base of an `arr[i]` subscript. The decay forms a pointer-to-pointer
+  /// -- a double indirection the analysis cannot model (like `int**` / `&p`), and
+  /// per-element borrows of such an array cannot be tracked (cf. std::vector<int*>).
+  ArrayOfIndirectionDecay,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

@@ -626,6 +626,25 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     return;
   case CK_ArrayToPointerDecay:
     assert(Src && "Array expression should have origins as it is GL value");
+    // Soundness: an array whose element type is itself an indirection (a
+    // pointer, reference, or view) decays to a pointer-to-pointer -- a double
+    // level of indirection the analysis cannot model (mirrors the `int**` / `&p`
+    // rule, and std::vector<int*> being rejected; per-element borrows cannot be
+    // tracked). Reject the decay EXCEPT as the immediate base of an `arr[i]`
+    // subscript, which is a single-level element access that IS modeled. So
+    // `arr[i]` stays usable, while escaping the decay as a bare
+    // pointer-to-pointer (`*(c ? arr : arr2)`, `*(arr + i)`, passing `arr` to an
+    // `int**` parameter) is flagged. (`int arr[]` / `char buf[]` decay is a
+    // single level and fine.)
+    if (const auto *AT = CE->getSubExpr()->getType()->getAsArrayTypeUnsafe();
+        AT && (isPointerLikeType(AT->getElementType()) ||
+               AT->getElementType()->isReferenceType())) {
+      const auto *ASE =
+          dyn_cast_or_null<ArraySubscriptExpr>(AC.getParentMap().getParent(CE));
+      if (!ASE || ASE->getBase() != CE)
+        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+            UntrackedConstructReason::ArrayOfIndirectionDecay, cast<Expr>(CE)));
+    }
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         Dest->getOriginID(), Src->getOriginID(), /*Kill=*/true));
     return;

@@ -561,6 +561,11 @@ public:
            diag::warn_lifetime_safety_multilevel_indirection)
         << Subject << CaptureRef->getSourceRange();
   }
+  void reportArrayOfIndirectionDecay(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_multilevel_indirection)
+        << "this array of pointers (decaying to a pointer to a pointer)"
+        << E->getSourceRange();
+  }
 
   void reportMoveSilencing(const Expr *MoveExpr) override {
     S.Diag(MoveExpr->getExprLoc(), diag::warn_lifetime_safety_move_silencing)
