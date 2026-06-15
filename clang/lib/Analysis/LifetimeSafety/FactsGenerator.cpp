@@ -698,6 +698,26 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
               UntrackedConstructReason::ConstMethodIndirectMutation, UO));
     return;
   }
+  case UO_PreInc:
+  case UO_PostInc:
+  case UO_PreDec:
+  case UO_PostDec: {
+    // Incrementing/decrementing a pointer keeps it aimed into the same
+    // allocation, so the result carries the operand's loans. Without this a
+    // borrow used via the inc/dec result (e.g. `g = ++p`) is dropped. Pre-inc/
+    // dec yields the operand (an lvalue, same origin shape); post-inc/dec yields
+    // the old value (a prvalue, one level shallower) -- match the value
+    // category. Non-pointer operands have no origins to flow.
+    if (!UO->getType()->isPointerType())
+      return;
+    const Expr *SubExpr = UO->getSubExpr();
+    OriginNode *SubNode = getOriginNode(*SubExpr);
+    OriginNode *Src =
+        UO->isGLValue() ? SubNode : getRValueOrigins(SubExpr, SubNode);
+    if (Src)
+      flow(getOriginNode(*UO), Src, /*Kill=*/true);
+    return;
+  }
   default:
     return;
   }
@@ -848,8 +868,18 @@ void FactsGenerator::handlePointerArithmetic(const BinaryOperator *BO) {
 }
 
 void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
-  if (BO->isCompoundAssignmentOp())
+  if (BO->isCompoundAssignmentOp()) {
+    // A pointer compound additive assignment (`p += n` / `p -= n`) keeps the
+    // pointer aimed into the same allocation, so its result (an lvalue
+    // referring to the LHS) carries the LHS pointer's loans. Propagate them so
+    // the result expression's origin is not empty -- mirroring
+    // handlePointerArithmetic for the non-compound `p + n`. Without this a
+    // borrow used via the compound-assign result (e.g. `g = (p += 5)`) is
+    // dropped. Compound assignments on non-pointer types have no origins.
+    if (BO->getType()->isPointerType())
+      killAndFlowOrigin(*BO, *BO->getLHS());
     return;
+  }
   if (BO->getType()->isPointerType() && BO->isAdditiveOp())
     handlePointerArithmetic(BO);
   handleUse(BO->getRHS());
