@@ -869,9 +869,21 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
       // self-referential too -- the membership walk then sees the derived
       // class's fields.
       const Expr *Base = ME_LHS->getBase()->IgnoreImpCasts();
-      if (OriginNode *Container = getOriginNode(*Base))
+      if (OriginNode *Container = getOriginNode(*Base)) {
         CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
             ME_LHS, RHSNode->getOriginID(), Container->getOriginID()));
+        // Soundness: when the enclosing object is itself a view (gsl::Pointer) --
+        // a leaf in the origin tree whose members are not tracked per field -- a
+        // store into its borrow-holding member otherwise lands on a transient
+        // member-access origin disconnected from the object, so the object never
+        // reflects the stored borrow and a later read of it dangles silently.
+        // Also MERGE the stored value's loans into the object's own origin (do
+        // NOT kill -- the object may hold other borrows), so the view now
+        // carries the borrow and a use of it after that borrow's source expires
+        // is reported.
+        if (isGslPointerType(Base->getType().getNonReferenceType()))
+          flow(Container->getPointeeChild(), RHSNode, /*Kill=*/false);
+      }
     }
 }
 
