@@ -951,6 +951,18 @@ void FactsGenerator::VisitConditionalOperator(const ConditionalOperator *CO) {
     HandleFlow(FalseExpr);
 }
 
+void FactsGenerator::VisitBinaryConditionalOperator(
+    const BinaryConditionalOperator *BCO) {
+  if (!hasOrigins(BCO))
+    return;
+  // The GNU binary conditional `a ?: b` yields `a` when `a` is truthy, else `b`.
+  // Merge both candidate values' loans into the result (a conservative union),
+  // so a borrow produced by either is tracked -- the common subexpression is the
+  // "true" value (its OpaqueValueExpr forwards to it in getOrCreateNode).
+  killAndFlowOrigin(*BCO, *BCO->getCommon());
+  flowOrigin(*BCO, *BCO->getFalseExpr());
+}
+
 void FactsGenerator::VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *OCE) {
   // Assignment operators have special "kill-then-propagate" semantics
   // and are handled separately.
