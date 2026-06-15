@@ -1112,12 +1112,59 @@ void FactsGenerator::VisitInitListExpr(const InitListExpr *ILE) {
   // For list initialization with a single element of the same type, like
   // `View{other}`, the origin of the list itself is the origin of its single
   // element.
-  //
-  // TODO: Handle aggregate (record) list initialization.
   if (ILE->getNumInits() == 1 &&
       ILE->getType().getCanonicalType() ==
-          ILE->getInit(0)->getType().getCanonicalType())
+          ILE->getInit(0)->getType().getCanonicalType()) {
     killAndFlowOrigin(*ILE, *ILE->getInit(0));
+    return;
+  }
+  // Aggregate initialization of a [[gsl::Pointer]] / [[gsl::Owner]] record from
+  // its underlying members (`View{heap}`, `View{.p = local}`, `View{p, n}`).
+  llvm::SmallVector<const Expr *, 4> Inits(ILE->inits().begin(),
+                                           ILE->inits().end());
+  handleGslAggregateInit(ILE, Inits);
+}
+
+void FactsGenerator::VisitCXXParenListInitExpr(
+    const CXXParenListInitExpr *PLIE) {
+  // The C++20 parenthesized aggregate init form `View(heap)`; same modeling as
+  // the braced `View{heap}` InitListExpr.
+  if (!hasOrigins(PLIE))
+    return;
+  llvm::SmallVector<const Expr *, 4> Inits(PLIE->getInitExprs().begin(),
+                                           PLIE->getInitExprs().end());
+  handleGslAggregateInit(PLIE, Inits);
+}
+
+void FactsGenerator::handleGslAggregateInit(
+    const Expr *AggExpr, llvm::ArrayRef<const Expr *> Inits) {
+  // A [[gsl::Pointer]] / [[gsl::Owner]] record is a LEAF in the origin tree
+  // (its members are not tracked per field): the whole object carries a single
+  // borrow, so merge every borrow-carrying initializer's loans into the
+  // aggregate's own origin. Without this the aggregate's origin stays empty and
+  // a borrow captured into a member is silently dropped -- and when the
+  // destination object already holds a loan (e.g. a `this`/parameter
+  // caller-scope placeholder that never expires), the lost-loan backstop is
+  // masked, so a later dangling use of the member is missed entirely.
+  if (!isGslPointerType(AggExpr->getType()) &&
+      !isGslOwnerType(AggExpr->getType()))
+    return;
+  OriginNode *Dst = getRValueOrigins(AggExpr, getOriginNode(*AggExpr));
+  if (!Dst)
+    return;
+  bool First = true;
+  for (const Expr *Init : Inits) {
+    OriginNode *InitNode = getRValueOrigins(Init, getOriginNode(*Init));
+    // Only flow an initializer of matching indirection depth (a borrow the leaf
+    // object holds); a non-pointer member (`unsigned n`) has no origin, and a
+    // depth mismatch is handled by the multi-level-indirection rule elsewhere.
+    if (!InitNode || InitNode->getLength() != Dst->getLength())
+      continue;
+    // Merge (not kill) across multiple borrow-carrying members; the first
+    // establishes the set.
+    flow(Dst, InitNode, /*Kill=*/First);
+    First = false;
+  }
 }
 
 void FactsGenerator::VisitCXXBindTemporaryExpr(

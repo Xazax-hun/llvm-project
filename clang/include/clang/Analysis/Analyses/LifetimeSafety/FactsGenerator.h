@@ -51,6 +51,12 @@ public:
   void VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *OCE);
   void VisitCXXFunctionalCastExpr(const CXXFunctionalCastExpr *FCE);
   void VisitInitListExpr(const InitListExpr *ILE);
+  void VisitCXXParenListInitExpr(const CXXParenListInitExpr *PLIE);
+  /// Models aggregate initialization of a [[gsl::Pointer]] / [[gsl::Owner]]
+  /// leaf record (`View{heap}`, `View{.p = local}`, `View(p)`) by merging each
+  /// borrow-carrying initializer's loans into the aggregate's own origin.
+  void handleGslAggregateInit(const Expr *AggExpr,
+                              llvm::ArrayRef<const Expr *> Inits);
   void VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *BTE);
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *MTE);
   void VisitLambdaExpr(const LambdaExpr *LE);
