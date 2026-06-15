@@ -578,21 +578,21 @@ public:
   }
 
   void reportAssumedInvalidation(const Expr *IssueExpr,
-                                 const Expr *OperationExpr) override {
+                                 const Stmt *OperationStmt) override {
     S.Diag(IssueExpr->getExprLoc(),
            diag::warn_lifetime_safety_assumed_invalidation)
         << /*object=*/0 << IssueExpr->getSourceRange();
-    S.Diag(OperationExpr->getExprLoc(),
+    S.Diag(OperationStmt->getBeginLoc(),
            diag::note_lifetime_safety_assumed_invalidated_here)
-        << OperationExpr->getSourceRange();
+        << OperationStmt->getSourceRange();
   }
   void reportAssumedInvalidation(const ParmVarDecl *PVD,
-                                 const Expr *OperationExpr) override {
+                                 const Stmt *OperationStmt) override {
     S.Diag(PVD->getBeginLoc(), diag::warn_lifetime_safety_assumed_invalidation)
         << /*parameter=*/1 << PVD->getSourceRange();
-    S.Diag(OperationExpr->getExprLoc(),
+    S.Diag(OperationStmt->getBeginLoc(),
            diag::note_lifetime_safety_assumed_invalidated_here)
-        << OperationExpr->getSourceRange();
+        << OperationStmt->getSourceRange();
   }
 
   void reportNakedDeallocation(const Expr *DeallocExpr) override {

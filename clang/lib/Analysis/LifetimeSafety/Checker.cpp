@@ -185,7 +185,7 @@ private:
   llvm::DenseSet<SourceLocation> ReportedUntrackedLocs;
   /// (loan, operation) pairs already reported as assumed-invalidation, to avoid
   /// duplicate warnings when several live origins hold the same borrow.
-  llvm::DenseSet<std::pair<unsigned, const Expr *>> ReportedAssumedInval;
+  llvm::DenseSet<std::pair<unsigned, const Stmt *>> ReportedAssumedInval;
   /// (aliased storage, call) pairs already reported as an argument overlap, to
   /// avoid a duplicate when two aliasing reference arguments are symmetric.
   llvm::DenseSet<std::pair<const void *, const Expr *>> ReportedArgOverlap;
@@ -193,7 +193,7 @@ private:
   llvm::DenseSet<const Expr *> ReportedSelfRefStores;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
   /// after the precise warnings are finalized.
-  llvm::SmallVector<std::pair<LoanID, const Expr *>> PendingAssumedInval;
+  llvm::SmallVector<std::pair<LoanID, const Stmt *>> PendingAssumedInval;
   const LoanPropagationAnalysis &LoanPropagation;
   const MovedLoansAnalysis &MovedLoans;
   const LiveOriginsAnalysis &LiveOrigins;
@@ -624,9 +624,9 @@ public:
         // Report each invalidated view (origin) at most once per operation: a
         // multi-level field borrow (`o.inner.s`) carries both the field loan
         // and the enclosing-object loan, but it is a single captured value.
-        if (ReportedAssumedInval.insert({LiveLoanID.Value, IOF->getInvalidationExpr()})
+        if (ReportedAssumedInval.insert({LiveLoanID.Value, IOF->getInvalidationStmt()})
                 .second)
-          PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationExpr()});
+          PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationStmt()});
         break;
       }
     }
@@ -637,7 +637,7 @@ public:
   void issueAssumedInvalidations() {
     if (!SemaHelper)
       return;
-    for (auto &[LID, OperationExpr] : PendingAssumedInval) {
+    for (auto &[LID, OperationStmt] : PendingAssumedInval) {
       // If this borrow is already reported as a known invalidation, the
       // lower-confidence assumed warning would be redundant.
       auto It = FinalWarningsMap.find(LID);
@@ -645,10 +645,10 @@ public:
         continue;
       const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
       if (const Expr *IssueExpr = L->getIssuingExpr())
-        SemaHelper->reportAssumedInvalidation(IssueExpr, OperationExpr);
+        SemaHelper->reportAssumedInvalidation(IssueExpr, OperationStmt);
       else if (const ParmVarDecl *PVD =
                    L->getAccessPath().getAsPlaceholderParam())
-        SemaHelper->reportAssumedInvalidation(PVD, OperationExpr);
+        SemaHelper->reportAssumedInvalidation(PVD, OperationStmt);
     }
   }
 

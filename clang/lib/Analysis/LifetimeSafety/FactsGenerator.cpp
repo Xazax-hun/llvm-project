@@ -1377,9 +1377,37 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   if (const CXXRecordDecl *RD = VDTy->getAsCXXRecordDecl();
       RD && RD->hasDefinition() && RD->hasNonTrivialDestructor() &&
       !isGslOwnerType(VDTy) && hasOrigins(VDTy))
-    if (OriginNode *Node = getOriginNode(*LifetimeEndsVD))
+    if (OriginNode *Node = getOriginNode(*LifetimeEndsVD)) {
       CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
           LifetimeEnds.getTriggerStmt()->getEndLoc(), Node));
+      // Soundness: a gsl::Pointer object that captured a mutable owner (e.g. an
+      // RAII guard `Trigger(MyOwner * [[clang::lifetime_capture_by(this)]])`
+      // whose `~Trigger() { o->grow(); }` reallocates it) may mutate/free that
+      // owner in its out-of-line destructor, which the intra-procedural analysis
+      // cannot see. Conservatively treat the destruction as an assumed
+      // invalidation of the borrows the object carries on its captured owner
+      // (its pointee chain), so a view into that owner that is live *past* the
+      // guard's scope is reported -- while a view used only during the guard's
+      // lifetime (before the destructor runs) is not. Gated on paramMayMutateOwner
+      // (the same "gsl::Pointer reaching a mutable owner" test used for call
+      // arguments), so a guard that aliases only a const owner is not flagged.
+      // The invalidating "operation" here is the destructor's trigger
+      // statement, not an expression -- hence InvalidateOriginFact carries a
+      // Stmt. A gsl::Pointer is a leaf in the origin tree, so the captured
+      // borrow sits on the object's OWN origin; invalidate it and its whole
+      // pointee chain (the latter for a nested wrapper reaching the owner
+      // through a by-value gsl::Pointer member).
+      if (paramMayMutateOwner(VDTy)) {
+        auto invalidate = [&](OriginID OID) {
+          CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+              OID, LifetimeEnds.getTriggerStmt(), /*Assumed=*/true));
+        };
+        invalidate(Node->getOriginID());
+        for (OriginNode *Pointee = Node->getPointeeChild(); Pointee;
+             Pointee = Pointee->getPointeeChild())
+          invalidate(Pointee->getOriginID());
+      }
+    }
   // Expire the origin when its variable's lifetime ends to ensure liveness
   // doesn't persist through loop back-edges.
   std::optional<OriginID> ExpiredOID;

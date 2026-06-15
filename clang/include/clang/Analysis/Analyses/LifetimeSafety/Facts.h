@@ -287,7 +287,11 @@ public:
 /// is called on the container.
 class InvalidateOriginFact : public Fact {
   OriginID OID;
-  const Expr *InvalidationExpr;
+  /// The operation that invalidates the origin. Usually an Expr (a mutating
+  /// call, `delete`, ...), but may be a non-Expr Stmt -- e.g. the trigger
+  /// statement of a destructor, which the intra-procedural analysis treats as
+  /// an assumed invalidation when an RAII object captured a mutable owner.
+  const Stmt *InvalidationOp;
   /// True when the invalidation is only *assumed* (a non-const operation on an
   /// owner, or passing an owner to a non-const pointer/reference parameter)
   /// rather than a known container-mutation method. Drives the lower-confidence
@@ -308,15 +312,22 @@ public:
     return F->getKind() == Kind::InvalidateOrigin;
   }
 
-  InvalidateOriginFact(OriginID OID, const Expr *InvalidationExpr,
+  InvalidateOriginFact(OriginID OID, const Stmt *InvalidationOp,
                        bool Assumed = false, bool Deallocation = false,
                        const FieldDecl *MutatedField = nullptr)
       : Fact(Kind::InvalidateOrigin), OID(OID),
-        InvalidationExpr(InvalidationExpr), Assumed(Assumed),
+        InvalidationOp(InvalidationOp), Assumed(Assumed),
         Deallocation(Deallocation), MutatedField(MutatedField) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
-  const Expr *getInvalidationExpr() const { return InvalidationExpr; }
+  /// The invalidating operation as a statement (never null). Use this for the
+  /// diagnostic location/range, which every Stmt provides.
+  const Stmt *getInvalidationStmt() const { return InvalidationOp; }
+  /// The invalidating operation when it is an expression (a call / `delete`),
+  /// or null for a non-Expr operation (a destructor trigger statement).
+  const Expr *getInvalidationExpr() const {
+    return dyn_cast_or_null<Expr>(InvalidationOp);
+  }
   bool isAssumed() const { return Assumed; }
   bool isDeallocation() const { return Deallocation; }
   const FieldDecl *getMutatedField() const { return MutatedField; }

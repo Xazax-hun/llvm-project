@@ -274,9 +274,9 @@ public:
   // conservatively assumes mutates the owner (a non-const member call, or
   // passing the owner to a non-const pointer/reference parameter).
   virtual void reportAssumedInvalidation(const Expr *IssueExpr,
-                                         const Expr *OperationExpr) {}
+                                         const Stmt *OperationStmt) {}
   virtual void reportAssumedInvalidation(const ParmVarDecl *PVD,
-                                         const Expr *OperationExpr) {}
+                                         const Stmt *OperationStmt) {}
 
   // Reports a 'delete'/'free' of a pointer whose allocation the analysis did not
   // see, so it cannot verify the deallocation is a live, unaliased allocation.
