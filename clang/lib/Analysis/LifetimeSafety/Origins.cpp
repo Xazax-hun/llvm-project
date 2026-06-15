@@ -339,6 +339,19 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   if (isa<CXXThisExpr>(E) && ThisOrigins)
     return *ThisOrigins;
 
+  // A dereference of an address-of (`*&E`) denotes the very same object as `E`
+  // -- the two operators cancel. Reuse `E`'s origins rather than building a
+  // fresh, disconnected node, so an access through the round-trip (e.g.
+  // `(*&arr)[i] = ...`) routes to the same storage as a plain `arr[i]` and the
+  // borrow is tracked.
+  if (const auto *Deref = dyn_cast<UnaryOperator>(E);
+      Deref && Deref->getOpcode() == UO_Deref)
+    if (const auto *AddrOf = dyn_cast<UnaryOperator>(
+            Deref->getSubExpr()->IgnoreParenImpCasts());
+        AddrOf && AddrOf->getOpcode() == UO_AddrOf)
+      if (OriginNode *N = getOrCreateNode(AddrOf->getSubExpr()))
+        return ExprToNode[E] = N;
+
   // A structured binding is an alias for an element of its holding object.
   // Resolve a binding reference to its holding expression (e.g. `e[i]` /
   // `e.field`); the flows for those expressions are generated in
