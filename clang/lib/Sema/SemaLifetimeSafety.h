@@ -71,7 +71,8 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_pointer_of_indirection,
       diag::warn_lifetime_safety_view_on_mutable_global,
       diag::warn_lifetime_safety_const_indirect_mutation,
-      diag::warn_lifetime_safety_self_referential};
+      diag::warn_lifetime_safety_self_referential,
+      diag::warn_lifetime_safety_unsupported_store};
   for (unsigned DiagID : DiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
       return true;
@@ -564,6 +565,10 @@ public:
   void reportArrayOfIndirectionDecay(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_multilevel_indirection)
         << "this array of pointers (decaying to a pointer to a pointer)"
+        << E->getSourceRange();
+  }
+  void reportUnsupportedStoreDestination(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unsupported_store)
         << E->getSourceRange();
   }
 

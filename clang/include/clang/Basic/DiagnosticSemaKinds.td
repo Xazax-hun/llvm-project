@@ -11170,6 +11170,13 @@ def warn_lifetime_safety_multilevel_indirection
               "supports only a single level of indirection">,
       InGroup<LifetimeSafetyMultilevelIndirection>,
       DefaultIgnore;
+def warn_lifetime_safety_unsupported_store
+    : Warning<"assignment through this expression is not modeled by lifetime "
+              "safety analysis; the expression selects among several objects "
+              "(e.g. a conditional, comma, or dereference), so a borrow stored "
+              "here cannot be tracked and a later dangling use could be missed">,
+      InGroup<LifetimeSafetyUnsupportedStore>,
+      DefaultIgnore;
 def warn_lifetime_safety_move_silencing
     : Warning<"moving an owner is not modeled by lifetime safety analysis, so "
               "lifetime checks for the moved-from object are silenced">,

@@ -1,0 +1,58 @@
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -Wno-gnu-conditional-omitted-operand -verify %s
+
+// An assignment whose destination lvalue selects/forwards among several objects
+// -- a conditional `(c ? p : q) = ...`, a comma `(f(), p) = ...`, the GNU
+// `(p ?: q) = ...`, or those wrapped in `*&(...)`/casts -- produces a transient
+// merged origin that a store cannot be routed back through. Rather than
+// enumerate every spelling, any such unroutable store whose destination TYPE
+// holds a borrow (a pointer/view) is conservatively rejected. A store whose
+// destination is not borrow-holding (an int/char element) is unaffected.
+
+int g;
+int side();
+
+// Conditional pointer lvalue store -- rejected (robust to the spelling).
+void cond(bool c) {
+  int *p = &g, *q = &g;
+  (c ? p : q) = &g; // expected-warning {{assignment through this expression is not modeled by lifetime safety analysis}}
+}
+
+// `*&(...)` wrapper around the conditional -- also rejected (no enumeration).
+void deref_addrof(bool c) {
+  int *p = &g, *q = &g;
+  (*&(c ? p : q)) = &g; // expected-warning {{assignment through this expression is not modeled}} expected-warning {{uses more than one level of indirection}}
+}
+
+// Comma lvalue store -- rejected.
+void comma() {
+  int *p = &g;
+  (side(), p) = &g; // expected-warning {{assignment through this expression is not modeled}}
+}
+
+// GNU binary conditional lvalue store -- rejected.
+void gnu_cond() {
+  int *p = &g, *q = &g;
+  (p ?: q) = &g; // expected-warning {{assignment through this expression is not modeled}}
+}
+
+// Negative: the same conditional with a NON-borrow (int) destination is fine.
+void cond_int(bool c) {
+  int x, y;
+  (c ? x : y) = 5; // no-warning
+}
+
+// Negative: a user operator[] storing a non-borrow (char) is fine -- the
+// destination type (char) holds no borrow, so the unroutable operator[] LHS is
+// not flagged.
+struct CharVec {
+  char &operator[](unsigned) [[clang::lifetimebound]];
+};
+void op_char(CharVec &v [[clang::noescape]], unsigned i) {
+  v[i] = 'a'; // no-warning
+}
+
+// Negative: a plain routable store stays silent.
+void plain() {
+  int *p = &g;
+  p = &g; // no-warning
+}

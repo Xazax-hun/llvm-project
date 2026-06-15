@@ -871,6 +871,9 @@ public:
     case UntrackedConstructReason::ArrayOfIndirectionDecay:
       SemaHelper->reportArrayOfIndirectionDecay(E);
       break;
+    case UntrackedConstructReason::UnsupportedStoreDestination:
+      SemaHelper->reportUnsupportedStoreDestination(E);
+      break;
     case UntrackedConstructReason::Union:
       if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
         SemaHelper->reportUnion(E);

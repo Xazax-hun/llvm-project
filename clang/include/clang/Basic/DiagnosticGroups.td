@@ -756,6 +756,18 @@ single level of indirection.
   }];
 }
 
+def LifetimeSafetyUnsupportedStore
+    : DiagGroup<"lifetime-safety-unsupported-store"> {
+  code Documentation = [{
+Warns on an assignment whose destination lvalue selects or forwards among several
+objects -- a conditional (`(c ? p : q) = ...`), comma (`(f(), p) = ...`), or those
+wrapped in `*&(...)`/casts. Such a destination is a transient merge the analysis
+cannot route a store back through, so a borrow stored there cannot be tracked and
+a later dangling use could be missed. The construct is rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetyMoveSilencing : DiagGroup<"lifetime-safety-move-silencing"> {
   code Documentation = [{
 Warns when an owner is moved (e.g. via 'std::move' or
@@ -912,6 +924,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyIndirectCall,
                                          LifetimeSafetyUnannotatedIndirection,
                                          LifetimeSafetyMultilevelIndirection,
+                                         LifetimeSafetyUnsupportedStore,
                                          LifetimeSafetyMoveSilencing,
                                          LifetimeSafetyAssumedInvalidation,
                                          LifetimeSafetyNakedDelete,

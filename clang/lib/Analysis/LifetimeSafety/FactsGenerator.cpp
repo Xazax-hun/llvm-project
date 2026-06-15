@@ -804,8 +804,25 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
     MergeIntoSharedElement = LHSNode != nullptr;
   }
 
-  if (!LHSNode)
+  if (!LHSNode) {
+    // The destination could not be routed to a tracked storage origin. This
+    // happens for an lvalue that selects/forwards among several objects -- a
+    // conditional `(c ? p : q) = ...`, a comma `(f(), p) = ...`, or those
+    // wrapped in `*&(...)`/casts -- whose origin is a transient merge that a
+    // store cannot propagate back to the real objects (the same one-way-merge
+    // limitation as the array-of-pointers case). Rather than enumerate every
+    // such spelling, conservatively flag any unroutable store whose destination
+    // TYPE holds a borrow (a pointer/view): a borrow stored here is dropped, and
+    // (masked by a pre-existing concrete loan on the real object) a later
+    // dangling use could be missed. Gate on the type, not hasOrigins(Expr) --
+    // the latter is true for every glvalue, so it would flag a plain
+    // `cells[i] = ' '` char store through operator[].
+    if (hasOrigins(LHSExpr->getType()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::UnsupportedStoreDestination,
+          cast<Expr>(LHSExpr)));
     return;
+  }
   OriginNode *RHSNode = getOriginNode(*RHSExpr);
   // For operator= with reference parameters (e.g.,
   // `View& operator=(const View&)`), the RHS argument stays an lvalue,

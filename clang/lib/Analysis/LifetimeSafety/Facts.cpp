@@ -164,6 +164,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::ArrayOfIndirectionDecay:
     OS << "ArrayOfIndirectionDecay";
     break;
+  case UntrackedConstructReason::UnsupportedStoreDestination:
+    OS << "UnsupportedStoreDestination";
+    break;
   }
   OS << ")\n";
 }

@@ -261,6 +261,11 @@ public:
   // base -- a double level of indirection the analysis cannot model.
   virtual void reportArrayOfIndirectionDecay(const Expr *E) {}
 
+  // Reports an assignment whose destination lvalue selects/forwards among
+  // several objects (`(c ? p : q) = ...`, `(f(), p) = ...`, `*&(...) = ...`), so
+  // a stored borrow cannot be routed to a tracked storage origin.
+  virtual void reportUnsupportedStoreDestination(const Expr *E) {}
+
   // Reports an ownership-transferring move of an owner (e.g. 'std::move' of a
   // gsl::Owner, or 'unique_ptr::release'), which the analysis does not model.
   virtual void reportMoveSilencing(const Expr *MoveExpr) {}

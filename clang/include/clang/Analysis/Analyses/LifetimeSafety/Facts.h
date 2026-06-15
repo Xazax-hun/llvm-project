@@ -451,6 +451,11 @@ enum class UntrackedConstructReason : uint8_t {
   /// -- a double indirection the analysis cannot model (like `int**` / `&p`), and
   /// per-element borrows of such an array cannot be tracked (cf. std::vector<int*>).
   ArrayOfIndirectionDecay,
+  /// An assignment whose destination lvalue selects/forwards among several
+  /// objects -- e.g. `(c ? p : q) = ...`, `(f(), p) = ...`, or those wrapped in
+  /// `*&(...)`/casts -- so a stored borrow cannot be routed to a tracked storage
+  /// origin and is dropped. The destination is borrow-holding (a pointer/view).
+  UnsupportedStoreDestination,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the
