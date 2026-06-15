@@ -319,6 +319,22 @@ OriginNode *OriginManager::getOrCreateNode(const ValueDecl *D) {
   return DeclToNode[D] = buildNodeForType(D->getType(), D);
 }
 
+bool OriginManager::isStableStorageOrigin(const OriginNode *N) const {
+  if (!N)
+    return false;
+  // A decl-anchored access either is the decl-origin itself (reference-typed
+  // decls/fields reuse it) or is an lvalue outer node whose pointee is the
+  // decl-origin (storage-having decls/fields: `&v` borrows v's slot). Check
+  // both N and its pointee against the declaration and `this` anchors.
+  const OriginNode *Pointee = N->getPointeeChild();
+  for (const auto &KV : DeclToNode)
+    if (KV.second == N || (Pointee && KV.second == Pointee))
+      return true;
+  if (ThisOrigins && (*ThisOrigins == N || *ThisOrigins == Pointee))
+    return true;
+  return false;
+}
+
 OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   if (auto *ParenIgnored = E->IgnoreParens(); ParenIgnored != E)
     return getOrCreateNode(ParenIgnored);

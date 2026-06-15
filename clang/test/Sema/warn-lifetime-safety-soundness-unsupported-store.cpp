@@ -56,3 +56,17 @@ void plain() {
   int *p = &g;
   p = &g; // no-warning
 }
+
+// A view-member store whose base SELECTS among objects -- `(c ? a : b).p = ...`
+// -- is also rejected: the base is a transient origin that does not root in a
+// single stable object, so the merge into the view's own origin would be
+// dropped. (A non-selecting nested base like `v.inner.p` is tracked instead;
+// see warn-lifetime-safety-soundness-view-member-store.cpp.)
+struct [[gsl::Pointer]] View {
+  const int *p;
+};
+void cond_view_base(View a [[clang::noescape]], View b [[clang::noescape]],
+                    bool c) {
+  int local = 0;
+  (c ? a : b).p = &local; // expected-warning {{assignment through this expression is not modeled}}
+}

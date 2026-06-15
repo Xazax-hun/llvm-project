@@ -220,6 +220,16 @@ public:
   /// declaration is an instance method.
   std::optional<OriginNode *> getThisOrigins() const { return ThisOrigins; }
 
+  /// Whether \p N is an origin that later reads of the same storage re-resolve
+  /// to -- i.e. it is anchored to a declaration (a local/param/field, tracked
+  /// in DeclToNode) or to `this`, directly or as the pointee of the lvalue
+  /// outer node built for such an access. A borrow merged into such an origin
+  /// is observable at a later read; a borrow merged into a transient
+  /// expression origin (a conditional `(c?a:b)`, comma, call result, or
+  /// temporary) is not, because reads of the underlying objects route to their
+  /// own origins, never to that throwaway node.
+  bool isStableStorageOrigin(const OriginNode *N) const;
+
   const Origin &getOrigin(OriginID ID) const;
 
   llvm::ArrayRef<Origin> getOrigins() const { return AllOrigins; }

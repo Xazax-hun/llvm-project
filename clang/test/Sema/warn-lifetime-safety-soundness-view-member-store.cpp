@@ -33,3 +33,29 @@ void store_static(V v [[clang::noescape]]) {
   v.p = buf;
   use(v.p); // no-warning
 }
+
+// A NESTED store into a view member reached through another view member
+// (`v.inner.p = local`). Both the outer object and its `inner` member are
+// leaves in the origin tree, so the immediate base (`v.inner`) is a transient
+// member-access origin disconnected from `v`. The merge must reach the
+// OUTERMOST object `v` -- found by climbing the origin-tree parent chain --
+// otherwise a later read routed to `v` would not see the borrow.
+struct [[gsl::Pointer]] Outer {
+  V inner;
+  const char *q;
+};
+
+void store_nested(Outer v [[clang::noescape]]) {
+  {
+    char local[64];
+    v.inner.p = local; // expected-warning {{local variable 'local' does not live long enough}}
+  }                    // expected-note {{destroyed here}}
+  use(v.inner.p);      // expected-note {{later used here}}
+}
+
+// Negative: a nested store of a long-lived borrow stays silent.
+void store_nested_static(Outer v [[clang::noescape]]) {
+  static char buf[64];
+  v.inner.p = buf;
+  use(v.inner.p); // no-warning
+}

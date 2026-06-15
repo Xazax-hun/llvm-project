@@ -898,8 +898,37 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         // NOT kill -- the object may hold other borrows), so the view now
         // carries the borrow and a use of it after that borrow's source expires
         // is reported.
-        if (isGslPointerType(Base->getType().getNonReferenceType()))
-          flow(Container->getPointeeChild(), RHSNode, /*Kill=*/false);
+        if (isGslPointerType(Base->getType().getNonReferenceType())) {
+          // Merge into the OUTERMOST tracked object, not the immediate base.
+          // For a nested store like `v.inner.q = &local` (where both `Outer v`
+          // and its `Inner inner` member are gsl::Pointer leaves), `Container`
+          // is the transient member-access origin of `v.inner`, disconnected
+          // from `v`. Reads of the whole object route to `v` (leaf members are
+          // untracked), so a merge into `v.inner` would never be seen. Each
+          // such leaf member-access origin records its base as its parent (see
+          // OriginManager::getOrCreateNode), so climbing the parent chain
+          // reaches the outermost enclosing object regardless of how the access
+          // is spelled (parens, implicit casts, arbitrarily deep member
+          // chains) -- this is origin-tree-based, not AST-shape matching.
+          OriginNode *MergeTarget = Container;
+          while (OriginNode *P = MergeTarget->getParent())
+            MergeTarget = P;
+          // The merge is only observable if reads of the enclosing object
+          // re-resolve to `MergeTarget`. That holds when it is anchored to a
+          // declaration or `this`. If instead the object roots in a transient
+          // selecting/forwarding expression -- `(c ? a.v : b.v).q = &local`, a
+          // comma, a call result, or a temporary -- the borrow merged here is
+          // dropped (reads of the real objects route elsewhere), so reject the
+          // store as unroutable (the same one-way-merge limitation handled for
+          // `!LHSNode` above), rather than tracking it unsoundly.
+          if (FactMgr.getOriginMgr().isStableStorageOrigin(MergeTarget))
+            flow(MergeTarget->getPointeeChild(), RHSNode, /*Kill=*/false);
+          else if (hasOrigins(LHSExpr->getType()))
+            CurrentBlockFacts.push_back(
+                FactMgr.createFact<UntrackedConstructFact>(
+                    UntrackedConstructReason::UnsupportedStoreDestination,
+                    cast<Expr>(LHSExpr)));
+        }
       }
     }
 }
