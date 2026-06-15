@@ -30,9 +30,26 @@ struct HolderNested {
   std::pair<int, std::pair<std::vector<std::string_view>, int>> p; // expected-warning {{type 'std::vector<std::string_view>' is a container whose element type holds a borrow}}
 };
 
-// A bare pair/tuple *local* of the same type (not a member) is also reached:
-// the field walk only fires for records, but a local declaration is checked by
-// the analysis's unknown-ownership/of-indirection machinery.
+// A bare pair/tuple *local*, parameter, or return value of such a type -- not
+// just a record member -- is also rejected: the local/call-result detection in
+// the analysis searches the aggregate's template arguments too (the field walk
+// alone only covers record members). The diagnostic names the precise buried
+// element/pointee type, not the whole aggregate.
+void local_pair() {
+  std::pair<std::vector<std::string_view>, int> p; // expected-warning {{type 'std::vector<std::string_view>' is a container whose element type holds a borrow}}
+  (void)p;
+}
+
+void local_tuple() {
+  std::tuple<int, std::span<int *>> t; // expected-warning {{type 'std::span<int *>' is a view whose pointee type holds a borrow}}
+  (void)t;
+}
+
+std::pair<std::vector<std::string_view>, int> returns_pair() {
+  std::pair<std::vector<std::string_view>, int> p; // expected-warning {{type 'std::vector<std::string_view>' is a container whose element type holds a borrow}}
+  return p;
+}
+
 void local_ok_does_not_crash() {
   std::pair<std::string, int> ok; // no-warning: owner of char
   (void)ok;

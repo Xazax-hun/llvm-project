@@ -281,14 +281,21 @@ public:
 
   // Reports a value of a [[gsl::Owner]] container whose element type is an
   // indirection (e.g. std::vector<int*>); per-element borrows are not tracked.
-  virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
-  virtual void reportOwnerOfIndirection(const Expr *E) {}
+  // \p ReportType, when non-null, is the precise borrow-holding type to name
+  // (e.g. the element buried in a std::pair argument); otherwise the construct's
+  // own type is used.
+  virtual void reportOwnerOfIndirection(const ValueDecl *VD,
+                                        QualType ReportType = QualType()) {}
+  virtual void reportOwnerOfIndirection(const Expr *E,
+                                        QualType ReportType = QualType()) {}
 
   // Reports a value of a [[gsl::Pointer]] view whose pointee/element type is
   // itself an indirection (e.g. std::span<int*>); the inner pointees are not
-  // tracked.
-  virtual void reportPointerOfIndirection(const ValueDecl *VD) {}
-  virtual void reportPointerOfIndirection(const Expr *E) {}
+  // tracked. \p ReportType as above.
+  virtual void reportPointerOfIndirection(const ValueDecl *VD,
+                                          QualType ReportType = QualType()) {}
+  virtual void reportPointerOfIndirection(const Expr *E,
+                                          QualType ReportType = QualType()) {}
 
   // Reports a view (gsl::Pointer) constructed from a mutable global/static owner
   // (e.g. 'std::string_view sv = some_global_string;'). The global can be

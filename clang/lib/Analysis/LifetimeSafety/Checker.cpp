@@ -842,15 +842,15 @@ public:
       break;
     case UntrackedConstructReason::OwnerOfIndirection:
       if (D)
-        SemaHelper->reportOwnerOfIndirection(D);
+        SemaHelper->reportOwnerOfIndirection(D, UCF->getReportType());
       else
-        SemaHelper->reportOwnerOfIndirection(E);
+        SemaHelper->reportOwnerOfIndirection(E, UCF->getReportType());
       break;
     case UntrackedConstructReason::PointerOfIndirection:
       if (D)
-        SemaHelper->reportPointerOfIndirection(D);
+        SemaHelper->reportPointerOfIndirection(D, UCF->getReportType());
       else
-        SemaHelper->reportPointerOfIndirection(E);
+        SemaHelper->reportPointerOfIndirection(E, UCF->getReportType());
       break;
     case UntrackedConstructReason::Exception:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)

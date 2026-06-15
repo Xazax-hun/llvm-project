@@ -458,18 +458,26 @@ class UntrackedConstructFact : public Fact {
   /// statement that is neither an expression nor a declaration (e.g. a `try`).
   /// Invalid otherwise.
   SourceLocation ConstructLoc;
+  /// For the owner-/pointer-of-indirection reasons, the precise borrow-holding
+  /// type to name in the diagnostic, when it differs from the construct's own
+  /// type -- e.g. the std::vector<std::string_view> element buried in a
+  /// std::pair<std::vector<std::string_view>, int> local. Null when the
+  /// construct's own type is the offending type (the common case).
+  QualType ReportType;
 
 public:
   static bool classof(const Fact *F) {
     return F->getKind() == Kind::UntrackedConstruct;
   }
 
-  UntrackedConstructFact(UntrackedConstructReason Reason, const Expr *E)
+  UntrackedConstructFact(UntrackedConstructReason Reason, const Expr *E,
+                         QualType ReportType = QualType())
       : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(E),
-        ConstructDecl(nullptr) {}
-  UntrackedConstructFact(UntrackedConstructReason Reason, const ValueDecl *D)
+        ConstructDecl(nullptr), ReportType(ReportType) {}
+  UntrackedConstructFact(UntrackedConstructReason Reason, const ValueDecl *D,
+                         QualType ReportType = QualType())
       : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
-        ConstructDecl(D) {}
+        ConstructDecl(D), ReportType(ReportType) {}
   UntrackedConstructFact(UntrackedConstructReason Reason, SourceLocation Loc)
       : Fact(Kind::UntrackedConstruct), Reason(Reason), ConstructExpr(nullptr),
         ConstructDecl(nullptr), ConstructLoc(Loc) {}
@@ -478,6 +486,7 @@ public:
   const Expr *getConstructExpr() const { return ConstructExpr; }
   const ValueDecl *getConstructDecl() const { return ConstructDecl; }
   SourceLocation getConstructLoc() const { return ConstructLoc; }
+  QualType getReportType() const { return ReportType; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &) const override;

@@ -325,6 +325,7 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
     if (!VD)
       continue;
     // Soundness: a local of a user-defined type whose ownership is unknown.
+    bool IsPointer = false;
     if (isUnknownOwnershipType(VD->getType(),
                                FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
@@ -341,6 +342,19 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
                                        FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::PointerOfIndirection, VD));
+    // Or an owner-/pointer-of-indirection buried in the template arguments of a
+    // non-owner aggregate (e.g. std::pair<std::vector<std::string_view>, int>).
+    // Such an aggregate is neither a gsl::Owner nor gsl::Pointer, so the checks
+    // above do not inspect its arguments; search them, mirroring the per-record
+    // field-declaration check, so the local is rejected too. Report the precise
+    // buried element/pointee type rather than the whole aggregate.
+    else if (QualType Nested = findNestedOwnerOrPointerOfIndirection(
+                 VD->getType(), FactMgr.getUnknownOwnershipCache(), IsPointer);
+             !Nested.isNull())
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          IsPointer ? UntrackedConstructReason::PointerOfIndirection
+                    : UntrackedConstructReason::OwnerOfIndirection,
+          VD, Nested));
     // An array of pointer-like elements shares one element-origin across all
     // elements. Seed it with a non-expiring "uninitialized" loan so the origin
     // is never empty: a borrow stored into an element later merges in beside
@@ -1869,6 +1883,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // [[gsl::Pointer]]) produces a value the analysis cannot track. Constructor
   // calls are skipped -- constructing such a value is reported at its
   // declaration or surrounding context.
+  bool IsPointerResult = false;
   if (!isa<CXXConstructorDecl>(FD) &&
       isUnknownOwnershipType(Call->getType(),
                              FactMgr.getUnknownOwnershipCache()))
@@ -1888,6 +1903,20 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
                                      FactMgr.getUnknownOwnershipCache()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::PointerOfIndirection, Call));
+  // Or a call returning a non-owner aggregate (std::pair/std::tuple) burying an
+  // owner-/pointer-of-indirection in its template arguments; search them as for
+  // a local declaration, reporting the precise buried element/pointee type.
+  else if (QualType Nested =
+               isa<CXXConstructorDecl>(FD)
+                   ? QualType()
+                   : findNestedOwnerOrPointerOfIndirection(
+                         Call->getType(), FactMgr.getUnknownOwnershipCache(),
+                         IsPointerResult);
+           !Nested.isNull())
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        IsPointerResult ? UntrackedConstructReason::PointerOfIndirection
+                        : UntrackedConstructReason::OwnerOfIndirection,
+        Call, Nested));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
   handleConstSubversion(Call, FD, Args);

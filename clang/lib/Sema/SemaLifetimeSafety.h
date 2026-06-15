@@ -587,22 +587,28 @@ public:
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_reinterpret_cast)
         << E->getSourceRange();
   }
-  void reportOwnerOfIndirection(const ValueDecl *VD) override {
+  void reportOwnerOfIndirection(const ValueDecl *VD,
+                                QualType ReportType) override {
     S.Diag(VD->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
-        << VD->getType() << VD->getSourceRange();
+        << (ReportType.isNull() ? VD->getType() : ReportType)
+        << VD->getSourceRange();
   }
-  void reportOwnerOfIndirection(const Expr *E) override {
+  void reportOwnerOfIndirection(const Expr *E, QualType ReportType) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_owner_of_indirection)
-        << E->getType() << E->getSourceRange();
+        << (ReportType.isNull() ? E->getType() : ReportType)
+        << E->getSourceRange();
   }
-  void reportPointerOfIndirection(const ValueDecl *VD) override {
+  void reportPointerOfIndirection(const ValueDecl *VD,
+                                  QualType ReportType) override {
     S.Diag(VD->getLocation(),
            diag::warn_lifetime_safety_pointer_of_indirection)
-        << VD->getType() << VD->getSourceRange();
+        << (ReportType.isNull() ? VD->getType() : ReportType)
+        << VD->getSourceRange();
   }
-  void reportPointerOfIndirection(const Expr *E) override {
+  void reportPointerOfIndirection(const Expr *E, QualType ReportType) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_pointer_of_indirection)
-        << E->getType() << E->getSourceRange();
+        << (ReportType.isNull() ? E->getType() : ReportType)
+        << E->getSourceRange();
   }
   void reportViewOnMutableGlobal(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_view_on_mutable_global)
