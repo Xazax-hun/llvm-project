@@ -721,6 +721,18 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
                                       const Expr *LHSExpr,
                                       const Expr *RHSExpr) {
   LHSExpr = LHSExpr->IgnoreParenImpCasts();
+  // Look through a value-preserving explicit reference cast on the destination
+  // (e.g. `static_cast<int*&>(p) = ...` or the C-style `(int*&)p = ...`), which
+  // preserves the underlying lvalue but is not stripped by IgnoreParenImpCasts.
+  // Without this the store would route to no origin and be silently dropped. A
+  // reinterpret_cast is not CK_NoOp (it stays flagged as type punning) and a
+  // const_cast keeps its const-subversion diagnostic, both emitted independently
+  // when the cast expression is visited.
+  while (const auto *ECE = dyn_cast<ExplicitCastExpr>(LHSExpr)) {
+    if (ECE->getCastKind() != CK_NoOp)
+      break;
+    LHSExpr = ECE->getSubExpr()->IgnoreParenImpCasts();
+  }
 
   OriginNode *LHSNode = nullptr;
   QualType LHSType;
