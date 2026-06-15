@@ -804,6 +804,17 @@ so a borrow that dangles only along an exception path may be missed.
   }];
 }
 
+def LifetimeSafetyTypePunning : DiagGroup<"lifetime-safety-type-punning"> {
+  code Documentation = [{
+Warns on a union member access or a 'reinterpret_cast'. Both reinterpret the
+same storage as a different type: union members alias each other (a borrow into
+one member can be invalidated by writing another), and a 'reinterpret_cast' can
+launder a borrow through an unrelated type. The analysis cannot track borrows
+across such type punning, so these constructs are rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetyOwnerOfIndirection
     : DiagGroup<"lifetime-safety-owner-of-indirection"> {
   code Documentation = [{
@@ -906,6 +917,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyNakedDelete,
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
+                                         LifetimeSafetyTypePunning,
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyPointerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,

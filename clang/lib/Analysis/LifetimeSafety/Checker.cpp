@@ -865,6 +865,14 @@ public:
     case UntrackedConstructReason::MultiLevelIndirectionExpr:
       SemaHelper->reportMultiLevelIndirection(E);
       break;
+    case UntrackedConstructReason::Union:
+      if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
+        SemaHelper->reportUnion(E);
+      break;
+    case UntrackedConstructReason::ReinterpretCast:
+      if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
+        SemaHelper->reportReinterpretCast(E);
+      break;
     }
   }
 

@@ -489,6 +489,15 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
   if (!FD)
     return;
 
+  // Safe-model soundness: a union member access is not modeled. Different union
+  // members alias the same storage, so a borrow into one member can be
+  // invalidated by writing another (or by switching the active member);
+  // invalidation is keyed by field identity, which does not see this aliasing,
+  // so the borrow can dangle undetected. Surface the access as unsupported.
+  if (FD->getParent()->isUnion())
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::Union, cast<Expr>(ME)));
+
   assert(ME->isGLValue() && "Field member should be GL value");
   OriginNode *Dst = getOriginNode(*ME);
   assert(Dst && "Field member should have an origin list as it is GL value");
@@ -558,6 +567,14 @@ void FactsGenerator::VisitCXXNullPtrLiteralExpr(
 }
 
 void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
+  // Safe-model soundness: a reinterpret_cast can launder a borrow through an
+  // unrelated type (reinterpreting storage), hiding its provenance, so a borrow
+  // recovered through it is not tracked. Surface it as unsupported, regardless
+  // of the cast kind or whether the result has a trackable origin.
+  if (isa<CXXReinterpretCastExpr>(CE))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::ReinterpretCast, cast<Expr>(CE)));
+
   OriginNode *Dest = getOriginNode(*CE);
   if (!Dest)
     return;

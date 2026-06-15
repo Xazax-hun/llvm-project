@@ -431,6 +431,15 @@ enum class UntrackedConstructReason : uint8_t {
   /// single-indirection rule is mirrored here for transient expressions, which
   /// could otherwise build a double indirection no declaration captures.
   MultiLevelIndirectionExpr,
+  /// A member access on a union. Different union members alias the same storage,
+  /// so a borrow into one member can be invalidated by writing another (or by
+  /// switching the active member); the analysis keys borrows by field identity
+  /// and does not model this aliasing, so such a borrow can dangle undetected.
+  Union,
+  /// A `reinterpret_cast`. It can launder a borrow through an unrelated type
+  /// (reinterpreting storage), hiding its provenance from the analysis, so a
+  /// borrow recovered through it is not tracked.
+  ReinterpretCast,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

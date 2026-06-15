@@ -99,10 +99,12 @@ struct WithMembers {
 // without ever binding a named pointer variable.
 int deref_int_to_ptr(unsigned long n) {
   return *reinterpret_cast<int *>(n); // expected-warning {{lifetime safety cannot track this value here; no borrow information flows into it, so a borrow was likely lost to an unmodeled construct}}
+  // umbrella-warning@-1 {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
 }
 
 int index_int_to_ptr(unsigned long n) {
   return reinterpret_cast<int *>(n)[3]; // expected-warning {{lifetime safety cannot track this value here}}
+  // umbrella-warning@-1 {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
 }
 
 int cstyle_int_to_ptr(unsigned long n) {

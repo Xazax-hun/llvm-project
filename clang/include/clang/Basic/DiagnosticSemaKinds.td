@@ -11201,6 +11201,19 @@ def warn_lifetime_safety_exception
               "may be missed">,
       InGroup<LifetimeSafetyException>,
       DefaultIgnore;
+def warn_lifetime_safety_union
+    : Warning<"union member access is not modeled by lifetime safety analysis; "
+              "members alias the same storage, so a borrow into one member can "
+              "be invalidated by writing another, which the analysis cannot "
+              "track">,
+      InGroup<LifetimeSafetyTypePunning>,
+      DefaultIgnore;
+def warn_lifetime_safety_reinterpret_cast
+    : Warning<"'reinterpret_cast' is not modeled by lifetime safety analysis; "
+              "it can launder a borrow through an unrelated type, hiding its "
+              "provenance">,
+      InGroup<LifetimeSafetyTypePunning>,
+      DefaultIgnore;
 def warn_lifetime_safety_owner_of_indirection
     : Warning<"type %0 is a container whose element type holds a borrow (a "
               "pointer, reference, or unannotated borrow-holding type); "

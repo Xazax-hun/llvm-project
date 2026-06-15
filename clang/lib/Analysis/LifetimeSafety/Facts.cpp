@@ -152,6 +152,12 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::MultiLevelIndirectionExpr:
     OS << "MultiLevelIndirectionExpr";
     break;
+  case UntrackedConstructReason::Union:
+    OS << "Union";
+    break;
+  case UntrackedConstructReason::ReinterpretCast:
+    OS << "ReinterpretCast";
+    break;
   }
   OS << ")\n";
 }

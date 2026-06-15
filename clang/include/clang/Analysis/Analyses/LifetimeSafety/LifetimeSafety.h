@@ -270,6 +270,15 @@ public:
   // so a borrow that dangles only along an exception path can be missed.
   virtual void reportException(SourceLocation Loc) {}
 
+  // Reports a member access on a union. Different union members alias the same
+  // storage, so a borrow into one member can be invalidated by writing another;
+  // the analysis keys borrows by field identity and does not model this.
+  virtual void reportUnion(const Expr *E) {}
+
+  // Reports a `reinterpret_cast`, which can launder a borrow through an
+  // unrelated type and hide its provenance from the analysis.
+  virtual void reportReinterpretCast(const Expr *E) {}
+
   // Reports a value of a [[gsl::Owner]] container whose element type is an
   // indirection (e.g. std::vector<int*>); per-element borrows are not tracked.
   virtual void reportOwnerOfIndirection(const ValueDecl *VD) {}
