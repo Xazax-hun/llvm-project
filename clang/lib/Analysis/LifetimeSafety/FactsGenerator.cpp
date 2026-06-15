@@ -801,7 +801,23 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   bool MergeIntoSharedElement = false;
   if (const Expr *ArrObj = getArrayObjectOfElementAccess(LHSExpr)) {
     LHSNode = getOriginNode(*ArrObj);
-    MergeIntoSharedElement = LHSNode != nullptr;
+    // Soundness: for the genuine subscript form `base[i] = ...`, the array
+    // object must be stable storage that a later element read re-resolves to --
+    // a declared array or a `this`/field array. A selecting/forwarding base
+    // (`(c ? a : b)[i] = ...`, `(f(), a)[i] = ...`) yields a transient
+    // element-origin produced by a one-way merge, which a store cannot be routed
+    // back through to the real arrays -- the same limitation as the scalar
+    // selecting-lvalue case. Leaving LHSNode null lets the unroutable-store
+    // catch-all below reject it (-Wlifetime-safety-unsupported-store) rather than
+    // silently dropping the borrow into the transient origin (where the
+    // uninitialized-array sentinel would also mask the lost loan). The `*(...)`
+    // deref form is already rejected by the array-of-indirection-decay rule, so
+    // restrict this to ArraySubscriptExpr to avoid double-flagging it.
+    if (isa<ArraySubscriptExpr>(LHSExpr) && LHSNode &&
+        !FactMgr.getOriginMgr().isStableStorageOrigin(LHSNode))
+      LHSNode = nullptr;
+    else
+      MergeIntoSharedElement = LHSNode != nullptr;
   }
 
   if (!LHSNode) {
