@@ -111,6 +111,10 @@ private:
 } // namespace
 
 bool OriginManager::hasOrigins(QualType QT) const {
+  // An `_Atomic(T)` wraps T transparently for lifetime purposes (the atomic
+  // holds the same value); see through it.
+  if (const auto *AT = QT->getAs<AtomicType>())
+    return hasOrigins(AT->getValueType());
   if (QT->isPointerOrReferenceType() || isGslPointerType(QT))
     return true;
   // An array of pointer-like elements is tracked with a single origin shared
@@ -256,6 +260,10 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
                                     llvm::SmallPtrSet<const Type *, 4> &Visited,
                                     unsigned FieldDepth) {
   assert(hasOrigins(QT) && "buildNodeForType called for type without origins");
+
+  // `_Atomic(T)` is transparent for lifetime purposes: build the node for T.
+  if (const auto *AT = QT->getAs<AtomicType>())
+    return buildNodeForTypeImpl(AT->getValueType(), Node, Visited, FieldDepth);
 
   // An array shares a single origin across all of its elements; model it as if
   // it were one element. `arr[i]` accesses (built in getOrCreateNode) reuse

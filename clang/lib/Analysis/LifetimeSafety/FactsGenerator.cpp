@@ -658,6 +658,35 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     if (Src && Dest && Dest->getLength() == Src->getLength())
       flow(Dest, Src, /*Kill=*/true);
     return;
+  case CK_LValueToRValueBitCast: {
+    // `__builtin_bit_cast` / `std::bit_cast` reinterprets the object
+    // representation. A pointer-to-pointer bit-cast preserves the value, so
+    // propagate the borrow (a `return __builtin_bit_cast(T*, &local)` is then
+    // caught as return-stack-address, matching reinterpret_cast). A bit-cast that
+    // materializes a pointer from a non-pointer representation (an integer
+    // round-trip) launders the borrow's provenance and yields no matching source
+    // origin -- mark a use so the result surfaces as a lost loan (mirrors
+    // CK_IntegralToPointer). The operand may be a materialized glvalue, so strip
+    // its outer lvalue level first.
+    OriginNode *RVSrc = getRValueOrigins(SubExpr, Src);
+    if (RVSrc && Dest->getLength() == RVSrc->getLength())
+      flow(Dest, RVSrc, /*Kill=*/true);
+    else
+      handleUse(CE);
+    return;
+  }
+  case CK_NonAtomicToAtomic:
+  case CK_AtomicToNonAtomic: {
+    // Wrapping/unwrapping an atomic preserves the underlying pointer value, so
+    // propagate the origin. Without this a borrow stored into / read from an
+    // `_Atomic(T*)` / `std::atomic<T*>` was silently dropped (e.g. on a direct
+    // `return` of the atomic). The operand may be an lvalue, so strip its outer
+    // lvalue level first.
+    OriginNode *RVSrc = getRValueOrigins(SubExpr, Src);
+    if (RVSrc && Dest->getLength() == RVSrc->getLength())
+      flow(Dest, RVSrc, /*Kill=*/true);
+    return;
+  }
   case CK_IntegralToPointer:
     // A pointer materialized from an integer (e.g. 'reinterpret_cast<int*>(n)'
     // or a C-style '(int*)n') has no tracked provenance: any borrow laundered
