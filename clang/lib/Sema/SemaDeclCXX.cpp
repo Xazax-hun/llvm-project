@@ -7147,6 +7147,22 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
       else if (lifetimes::isGslPointerOfIndirection(FT, Cache))
         Diag(F->getLocation(), diag::warn_lifetime_safety_pointer_of_indirection)
             << FT << F->getSourceRange();
+      else {
+        // The offending type may be buried in the template arguments of a
+        // non-owner aggregate field (e.g. a std::pair/std::tuple member holding
+        // a std::vector<std::string_view>). Such an aggregate is neither a
+        // gsl::Owner nor gsl::Pointer, so the checks above do not inspect its
+        // arguments; search them so the member is still rejected here, at the
+        // enclosing record's definition.
+        bool IsPointer = false;
+        if (QualType Nested = lifetimes::findNestedOwnerOrPointerOfIndirection(
+                FT, Cache, IsPointer);
+            !Nested.isNull())
+          Diag(F->getLocation(),
+               IsPointer ? diag::warn_lifetime_safety_pointer_of_indirection
+                         : diag::warn_lifetime_safety_owner_of_indirection)
+              << Nested << F->getSourceRange();
+      }
     }
   }
 

@@ -481,6 +481,67 @@ bool isGslPointerOfIndirection(QualType QT,
          isGslPointerOfIndirection(Pointee, Cache) || PointeeUnknownOwnership;
 }
 
+static QualType findNestedOwnerOrPointerOfIndirectionImpl(
+    QualType QT, llvm::DenseMap<const Type *, bool> &Cache,
+    llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer);
+
+// Inspects one template argument: a type argument is descended into; a pack
+// argument (variadic template, e.g. std::tuple<...>) is flattened into its
+// elements; other argument kinds are ignored.
+static QualType findIndirectionInTemplateArg(
+    const TemplateArgument &Arg, llvm::DenseMap<const Type *, bool> &Cache,
+    llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer) {
+  if (Arg.getKind() == TemplateArgument::Pack) {
+    for (const TemplateArgument &Elt : Arg.pack_elements())
+      if (QualType Found =
+              findIndirectionInTemplateArg(Elt, Cache, Visited, IsPointer);
+          !Found.isNull())
+        return Found;
+    return QualType();
+  }
+  if (Arg.getKind() != TemplateArgument::Type)
+    return QualType();
+  return findNestedOwnerOrPointerOfIndirectionImpl(Arg.getAsType(), Cache,
+                                                   Visited, IsPointer);
+}
+
+static QualType findNestedOwnerOrPointerOfIndirectionImpl(
+    QualType QT, llvm::DenseMap<const Type *, bool> &Cache,
+    llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer) {
+  // A type that is itself an owner-/pointer-of-indirection is the answer. (For a
+  // recognized owner/view these already recurse through their own template
+  // arguments, so the explicit descent below only matters for a non-owner
+  // aggregate such as std::pair/std::tuple, whose arguments nothing inspects.)
+  if (isGslOwnerOfIndirection(QT, Cache)) {
+    IsPointer = false;
+    return QT;
+  }
+  if (isGslPointerOfIndirection(QT, Cache)) {
+    IsPointer = true;
+    return QT;
+  }
+  const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
+      QT->getAsCXXRecordDecl());
+  if (!CTSD)
+    return QualType();
+  if (!Visited.insert(QT.getCanonicalType().getTypePtr()).second)
+    return QualType();
+  for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray())
+    if (QualType Found =
+            findIndirectionInTemplateArg(Arg, Cache, Visited, IsPointer);
+        !Found.isNull())
+      return Found;
+  return QualType();
+}
+
+QualType findNestedOwnerOrPointerOfIndirection(
+    QualType QT, llvm::DenseMap<const Type *, bool> &Cache, bool &IsPointer) {
+  llvm::SmallPtrSet<const Type *, 8> Visited;
+  return findNestedOwnerOrPointerOfIndirectionImpl(QT, Cache, Visited,
+                                                   IsPointer);
+}
+
+
 bool isUnknownOwnershipType(QualType QT,
                             llvm::DenseMap<const Type *, bool> &Cache) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();

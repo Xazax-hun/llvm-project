@@ -119,6 +119,23 @@ bool isGslOwnerOfIndirection(QualType QT,
 bool isGslPointerOfIndirection(QualType QT,
                                llvm::DenseMap<const Type *, bool> &Cache);
 
+// Searches \p QT and, recursively, the type template arguments of any non-owner
+// class template specialization nested within it for a type that is an
+// owner-of-indirection or a pointer-of-indirection. Returns that offending
+// nested type (and sets \p IsPointer to true for a pointer-of-indirection, false
+// for an owner-of-indirection), or a null QualType if none is found.
+//
+// This catches a borrow-holding container/view buried inside a plain aggregate
+// that is itself neither a [[gsl::Owner]] nor a [[gsl::Pointer]] -- e.g.
+// std::pair<std::vector<std::string_view>, int> or
+// std::tuple<std::span<int*>, ...>. The per-record field-declaration check uses
+// it so that a data member of such an aggregate type is rejected at the
+// enclosing record's definition; isGslOwnerOfIndirection alone misses it because
+// std::pair/std::tuple are not recognized owners and so their template arguments
+// are never inspected. \p Cache memoizes the of-indirection sub-checks.
+QualType findNestedOwnerOrPointerOfIndirection(
+    QualType QT, llvm::DenseMap<const Type *, bool> &Cache, bool &IsPointer);
+
 // Returns true if the given gsl::Pointer type can mutate the (non-const) owner
 // it points to, i.e. it (or a base class) exposes operator*/operator[]
 // returning a reference to a non-const gsl::Owner, or operator-> returning a
