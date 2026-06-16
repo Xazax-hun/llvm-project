@@ -611,6 +611,28 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
       UseFacts.erase(ME->getBase());
     }
   }
+
+  // Safe-model soundness (read-side dual of the view-member store merge in
+  // handleAssignment): when the base is a [[gsl::Pointer]] leaf -- whose fields
+  // are not expanded, so the field is not in the base's origin tree -- and the
+  // field is itself borrow-holding, a READ of the field yields the borrow the
+  // view holds. The view carries that borrow on its own value origin (the
+  // rvalue of the base); flow it into the member-read's value so `out = v.p`
+  // extracts the held borrow instead of dropping it into the disconnected
+  // member-access origin. (A store into v.p symmetrically merges into the view's
+  // origin; without this a later read would not see the borrow, and a control-
+  // flow merge supplying a valid loan on another path could mask the lost-loan
+  // backstop.)
+  if (Src && !Src->getFieldChildInChain(FD) &&
+      isGslPointerType(ME->getBase()->getType().getNonReferenceType()) &&
+      hasOrigins(FD->getType())) {
+    OriginNode *MemberVal =
+        doesDeclHaveStorage(FD) ? Dst->getPointeeChild() : Dst;
+    OriginNode *ViewBorrow = getRValueOrigins(ME->getBase(), Src);
+    if (MemberVal && ViewBorrow &&
+        MemberVal->getLength() == ViewBorrow->getLength())
+      flow(MemberVal, ViewBorrow, /*Kill=*/false);
+  }
 }
 
 void FactsGenerator::VisitCallExpr(const CallExpr *CE) {
