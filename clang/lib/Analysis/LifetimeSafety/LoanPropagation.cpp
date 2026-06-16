@@ -66,8 +66,16 @@ static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
       case Fact::Kind::KillOrigin:
         CheckOrigin(F->getAs<KillOriginFact>()->getKilledOrigin());
         break;
-      case Fact::Kind::MovedOrigin:
       case Fact::Kind::OriginEscapes:
+        // An origin that escapes (via return/field/global) is defined in some
+        // earlier block and read here at the escape point; it spans blocks and
+        // must participate in joins. Omitting it misclassifies an origin that is
+        // only conditionally assigned and escapes at the exit block as
+        // block-local, dropping its loans at the join before the escape/expiry
+        // check (e.g. a conditional store of a stack address to a global).
+        CheckOrigin(F->getAs<OriginEscapesFact>()->getEscapedOriginID());
+        break;
+      case Fact::Kind::MovedOrigin:
       case Fact::Kind::Expire:
       case Fact::Kind::TestPoint:
       case Fact::Kind::InvalidateOrigin:
