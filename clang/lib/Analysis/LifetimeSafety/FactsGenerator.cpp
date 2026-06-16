@@ -371,19 +371,25 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
       continue;
     // Soundness: a local of a user-defined type whose ownership is unknown.
     bool IsPointer = false;
-    if (isUnknownOwnershipType(VD->getType(),
-                               FactMgr.getUnknownOwnershipCache()))
+    // An array of a borrow-holding element is just as untracked as the element;
+    // peel array dimensions so `P a[N]` is flagged like the scalar `P a` (the
+    // unknown-ownership / owner-/pointer-of-indirection checks otherwise bail on
+    // an array type, whose getAsCXXRecordDecl() is null).
+    QualType VDType = VD->getType();
+    while (const ArrayType *AT = VDType->getAsArrayTypeUnsafe())
+      VDType = AT->getElementType();
+    if (isUnknownOwnershipType(VDType, FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::UnknownOwnership, VD));
     // Soundness: a local gsl::Owner container whose elements are indirections
     // (e.g. std::vector<int*>); per-element borrows are not tracked.
-    else if (isGslOwnerOfIndirection(VD->getType(),
+    else if (isGslOwnerOfIndirection(VDType,
                                      FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::OwnerOfIndirection, VD));
     // Likewise a local gsl::Pointer view whose pointee is an indirection (e.g.
     // std::span<int*>); the inner pointees are not tracked.
-    else if (isGslPointerOfIndirection(VD->getType(),
+    else if (isGslPointerOfIndirection(VDType,
                                        FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::PointerOfIndirection, VD));
@@ -394,7 +400,7 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
     // field-declaration check, so the local is rejected too. Report the precise
     // buried element/pointee type rather than the whole aggregate.
     else if (QualType Nested = findNestedOwnerOrPointerOfIndirection(
-                 VD->getType(), FactMgr.getUnknownOwnershipCache(), IsPointer);
+                 VDType, FactMgr.getUnknownOwnershipCache(), IsPointer);
              !Nested.isNull())
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           IsPointer ? UntrackedConstructReason::PointerOfIndirection
@@ -831,6 +837,15 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
         UO->isGLValue() ? SubNode : getRValueOrigins(SubExpr, SubNode);
     if (Src)
       flow(getOriginNode(*UO), Src, /*Kill=*/true);
+    return;
+  }
+  case UO_Real:
+  case UO_Imag: {
+    // `__real__ obj` / `__imag__ obj` name a component of `obj` (a glvalue when
+    // the operand is a glvalue), so `&__real__ obj` borrows obj's storage.
+    // Propagate the operand's origin so the borrow is tracked; without this the
+    // address-of yields an empty origin and the borrow is dropped.
+    killAndFlowOrigin(*UO, *UO->getSubExpr());
     return;
   }
   default:
