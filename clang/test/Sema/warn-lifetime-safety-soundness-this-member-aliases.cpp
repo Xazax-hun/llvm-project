@@ -9,13 +9,22 @@
 // was silent (a real use-after-scope). All spellings are now treated alike.
 
 struct [[gsl::Owner]] Holder {
-  const int *p = nullptr; // expected-note 2 {{this field dangles}}
+  const int *p = nullptr; // expected-note 3 {{this field dangles}}
 
   // (*this).p : deref of this.
   int via_deref() {
     {
       int local = 7;
       (*this).p = &local; // expected-warning {{escapes to the field 'p' which will dangle}}
+    }
+    return *p;
+  }
+
+  // (*&*this).p : a `*&` round-trip wrapping this.
+  int via_deref_addrof() {
+    {
+      int local = 7;
+      (*&*this).p = &local; // expected-warning {{escapes to the field 'p' which will dangle}}
     }
     return *p;
   }

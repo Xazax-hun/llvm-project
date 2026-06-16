@@ -145,8 +145,15 @@ bool isThisExpr(const Expr *E) {
     }
   // `*this`: a dereference of `this`.
   if (const auto *UO = dyn_cast<UnaryOperator>(E);
-      UO && UO->getOpcode() == UO_Deref)
-    return isThisExpr(UO->getSubExpr());
+      UO && UO->getOpcode() == UO_Deref) {
+    const Expr *Sub = UO->getSubExpr()->IgnoreParenImpCasts();
+    // Collapse a `*&X` round-trip (`*&*this`, `*&this`, ...): the deref of an
+    // address-of denotes X itself.
+    if (const auto *Inner = dyn_cast<UnaryOperator>(Sub);
+        Inner && Inner->getOpcode() == UO_AddrOf)
+      return isThisExpr(Inner->getSubExpr());
+    return isThisExpr(Sub);
+  }
   return false;
 }
 
