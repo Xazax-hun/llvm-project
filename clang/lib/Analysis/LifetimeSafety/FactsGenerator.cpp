@@ -307,6 +307,9 @@ void FactsGenerator::run() {
       else if (std::optional<CFGLifetimeEnds> LifetimeEnds =
                    Element.getAs<CFGLifetimeEnds>())
         handleLifetimeEnds(*LifetimeEnds);
+      else if (std::optional<CFGCleanupFunction> CleanupFunction =
+                   Element.getAs<CFGCleanupFunction>())
+        handleCleanupFunction(*CleanupFunction);
       else if (std::optional<CFGFullExprCleanup> FullExprCleanup =
                    Element.getAs<CFGFullExprCleanup>()) {
         handleFullExprCleanup(*FullExprCleanup);
@@ -1567,6 +1570,25 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
       AccessPath(LifetimeEndsVD), LifetimeEnds.getTriggerStmt()->getEndLoc(),
       ExpiredOID));
+}
+
+void FactsGenerator::handleCleanupFunction(
+    const CFGCleanupFunction &CleanupFunction) {
+  // A variable with `__attribute__((cleanup(fn)))` has `fn(&var)` called at
+  // scope exit. Like a non-trivial destructor, that callback may read a borrow
+  // the variable holds (e.g. a [[gsl::Pointer]] whose cleanup dereferences its
+  // captured view). The analysis does not see the out-of-line callback body, so
+  // model the cleanup call as a *use* of the variable: this keeps the borrow
+  // live up to the cleanup point, so a borrowed-from object destroyed earlier
+  // (reverse-declaration order) is reported at its expiry. The CFG emits this
+  // element after the variable's lifetime-end run, interleaved with the other
+  // scope-exit cleanups in reverse construction order.
+  const VarDecl *VD = CleanupFunction.getVarDecl();
+  if (!VD || !hasOrigins(VD->getType()))
+    return;
+  if (OriginNode *Node = getOriginNode(*VD))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
+        VD->getLocation(), Node));
 }
 
 void FactsGenerator::handleFullExprCleanup(
