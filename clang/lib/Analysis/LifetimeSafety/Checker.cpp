@@ -938,10 +938,21 @@ public:
   void checkArgumentOverlap(const ArgOverlapFact *AOF) {
     if (!SemaHelper)
       return;
-    LoanSet Mutating = LoanPropagation.getLoans(AOF->getMutatingOrigin(), AOF);
-    if (Mutating.isEmpty())
+    // Gather the loans across the mutating argument and its pointee chain: for
+    // a gsl::Pointer receiver the borrow into the aliased owner lives on the
+    // pointee origin, not on the wrapper's own origin.
+    llvm::SmallVector<LoanID, 8> Mutating;
+    for (OriginID MO : AOF->getMutatingOrigins())
+      for (LoanID ML : LoanPropagation.getLoans(MO, AOF))
+        Mutating.push_back(ML);
+    if (Mutating.empty())
       return;
     const Expr *Op = AOF->getOperationExpr();
+    // The precise record being mutated -- the actual subobject (e.g. `Grid` for
+    // `world.grid_.build(...)`), taken from the argument's static type, not from
+    // the mutating loan (which may widen to the enclosing object's `$this`
+    // placeholder and over-match disjoint sibling fields).
+    const CXXRecordDecl *MutatedRecord = AOF->getMutatedRecord();
     for (OriginID BO : AOF->getBorrowOrigins()) {
       LoanSet BLoans = LoanPropagation.getLoans(BO, AOF);
       for (LoanID BL : BLoans) {
@@ -955,15 +966,14 @@ public:
         // do not -- `c` is not a member of `b`'s type. (Field loans are
         // instance-insensitive: the same accepted over-approximation as the
         // invalidation check.)
-        bool Aliases = false;
+        bool Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
         for (LoanID ML : Mutating) {
+          if (Aliases)
+            break;
           const AccessPath &MAP =
               FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
-          if (MAP == BAP ||
-              isFieldBorrowOf(BLoan, invalidatedObjectRecord(MAP))) {
+          if (MAP == BAP)
             Aliases = true;
-            break;
-          }
         }
         if (!Aliases)
           continue;

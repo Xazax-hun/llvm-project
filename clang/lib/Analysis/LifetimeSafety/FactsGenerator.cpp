@@ -1897,8 +1897,32 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
     }
     if (Borrows.empty())
       continue;
+    // The mutating origin together with its pointee chain: for a gsl::Pointer
+    // argument the borrow into the aliased owner lives on the pointee origin
+    // (the wrapper points AT the owner), not on the wrapper's own origin. Only
+    // a gsl::Pointer indirects this way -- a plain owner / owner-containing
+    // record holds its borrows on the top origin and its field children carry
+    // unrelated loans -- so gate on it, mirroring invalidatePointeeChain in
+    // handleAssumedInvalidatingCall.
+    llvm::SmallVector<OriginID, 4> MutOrigins;
+    MutOrigins.push_back(MutNode->getOriginID());
+    if (isGslPointerType(Args[M]->getType().getNonReferenceType()))
+      for (OriginNode *Pointee = MutNode->getPointeeChild(); Pointee;
+           Pointee = Pointee->getPointeeChild())
+        MutOrigins.push_back(Pointee->getOriginID());
+    // The precise record being mutated is the argument's static type (the
+    // actual subobject -- e.g. `Grid` for `world.grid_.build(...)`). The
+    // mutating origin's loan may widen to the enclosing object's `$this`
+    // placeholder, so the checker must NOT derive the mutated record from the
+    // loan -- that would over-match disjoint sibling fields. Peel a pointer /
+    // reference to reach the mutated pointee record.
+    QualType MutTy = Args[M]->getType().getNonReferenceType();
+    if (MutTy->isPointerType())
+      MutTy = MutTy->getPointeeType();
+    const CXXRecordDecl *MutatedRecord = MutTy->getAsCXXRecordDecl();
     CurrentBlockFacts.push_back(FactMgr.createFact<ArgOverlapFact>(
-        Call, MutNode->getOriginID(),
+        Call, FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(MutOrigins)),
+        MutatedRecord,
         FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(Borrows))));
   }
 }

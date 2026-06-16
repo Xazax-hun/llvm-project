@@ -567,8 +567,19 @@ public:
 class ArgOverlapFact : public Fact {
   /// The call expression, for diagnostics.
   const Expr *OperationExpr;
-  /// The argument the call may mutate.
-  OriginID MutatingOrigin;
+  /// The argument the call may mutate, together with its pointee chain: for a
+  /// `gsl::Pointer` receiver (e.g. a wrapper holding `Owner* p`) the aliased
+  /// owner's borrow lives one indirection level in, on the pointee origin, not
+  /// on the wrapper's own origin -- so the checker must union loans across all
+  /// of them (allocated in the FactManager's allocator).
+  llvm::ArrayRef<OriginID> MutatingOrigins;
+  /// The static record type of the mutated argument -- the actual subobject
+  /// being mutated (e.g. `Grid` for `world.grid_.build(...)`), or null if the
+  /// mutated argument is not a record. Used for the subobject-containment check:
+  /// the mutating origin's loan may widen to the enclosing object's placeholder
+  /// (`$this`), so deriving the mutated record from the loan would over-match
+  /// disjoint sibling fields. The precise static type does not.
+  const CXXRecordDecl *MutatedRecord;
   /// The other borrow-holding arguments to the same call (allocated in the
   /// FactManager's allocator).
   llvm::ArrayRef<OriginID> BorrowOrigins;
@@ -578,13 +589,17 @@ public:
     return F->getKind() == Kind::ArgumentOverlap;
   }
 
-  ArgOverlapFact(const Expr *OperationExpr, OriginID MutatingOrigin,
+  ArgOverlapFact(const Expr *OperationExpr,
+                 llvm::ArrayRef<OriginID> MutatingOrigins,
+                 const CXXRecordDecl *MutatedRecord,
                  llvm::ArrayRef<OriginID> BorrowOrigins)
       : Fact(Kind::ArgumentOverlap), OperationExpr(OperationExpr),
-        MutatingOrigin(MutatingOrigin), BorrowOrigins(BorrowOrigins) {}
+        MutatingOrigins(MutatingOrigins), MutatedRecord(MutatedRecord),
+        BorrowOrigins(BorrowOrigins) {}
 
   const Expr *getOperationExpr() const { return OperationExpr; }
-  OriginID getMutatingOrigin() const { return MutatingOrigin; }
+  llvm::ArrayRef<OriginID> getMutatingOrigins() const { return MutatingOrigins; }
+  const CXXRecordDecl *getMutatedRecord() const { return MutatedRecord; }
   llvm::ArrayRef<OriginID> getBorrowOrigins() const { return BorrowOrigins; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,

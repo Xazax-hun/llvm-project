@@ -182,9 +182,15 @@ void FieldStoreFact::dump(llvm::raw_ostream &OS, const LoanManager &,
 
 void ArgOverlapFact::dump(llvm::raw_ostream &OS, const LoanManager &,
                           const OriginManager &OM) const {
-  OS << "ArgOverlap (Mutating: ";
-  OM.dump(getMutatingOrigin(), OS);
-  OS << ", Borrows: [";
+  OS << "ArgOverlap (Mutating: [";
+  bool FirstMut = true;
+  for (OriginID M : getMutatingOrigins()) {
+    if (!FirstMut)
+      OS << ", ";
+    FirstMut = false;
+    OM.dump(M, OS);
+  }
+  OS << "], Borrows: [";
   bool First = true;
   for (OriginID B : getBorrowOrigins()) {
     if (!First)
