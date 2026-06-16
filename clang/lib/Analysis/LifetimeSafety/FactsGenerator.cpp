@@ -1057,6 +1057,25 @@ void FactsGenerator::handlePointerArithmetic(const BinaryOperator *BO) {
 }
 
 void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
+  if (BO->getOpcode() == BO_PtrMemD || BO->getOpcode() == BO_PtrMemI) {
+    // Pointer-to-data-member access `obj.*pm` (BO_PtrMemD) / `objptr->*pm`
+    // (BO_PtrMemI): the result is a glvalue naming a member of the object, so a
+    // borrow of it borrows the object (`&(obj.*pm)` aims into `obj`). Flow the
+    // object operand's origin into the result, mirroring a MemberExpr; without
+    // this the borrow of the object is silently dropped to an empty origin (and
+    // a control-flow merge supplying a valid loan could mask the lost-loan
+    // backstop). For `.*` the object is the LHS; for `->*` it is what the LHS
+    // pointer points at (its rvalue/pointee origin).
+    OriginNode *Dst = getOriginNode(*BO);
+    OriginNode *ObjSrc =
+        BO->getOpcode() == BO_PtrMemD
+            ? getOriginNode(*BO->getLHS())
+            : getRValueOrigins(BO->getLHS(), getOriginNode(*BO->getLHS()));
+    if (Dst && ObjSrc && Dst->getLength() == ObjSrc->getLength())
+      flow(Dst, ObjSrc, /*Kill=*/true);
+    handleUse(BO->getLHS());
+    return;
+  }
   if (BO->getOpcode() == BO_Comma) {
     // The comma operator's value is its right operand, so the result carries the
     // RHS's loans. Without this a borrow used via a comma result (e.g.
