@@ -941,30 +941,48 @@ public:
     LoanSet Mutating = LoanPropagation.getLoans(AOF->getMutatingOrigin(), AOF);
     if (Mutating.isEmpty())
       return;
+    const Expr *Op = AOF->getOperationExpr();
     for (OriginID BO : AOF->getBorrowOrigins()) {
-      for (LoanID BL : LoanPropagation.getLoans(BO, AOF)) {
-        const AccessPath &BAP =
-            FactMgr.getLoanMgr().getLoan(BL)->getAccessPath();
+      LoanSet BLoans = LoanPropagation.getLoans(BO, AOF);
+      for (LoanID BL : BLoans) {
+        const Loan *BLoan = FactMgr.getLoanMgr().getLoan(BL);
+        const AccessPath &BAP = BLoan->getAccessPath();
+        // The borrow aliases the mutated argument if it borrows the same
+        // storage, OR a SUBOBJECT of it: mutating an object (`a` / the receiver
+        // `this`) may reallocate any owner field it (transitively) contains,
+        // dangling a field-rooted borrow into it. So `f(a, a.b)` /
+        // `obj.m(this->buf)` overlap, while disjoint subobjects (`f(a.b, a.c)`)
+        // do not -- `c` is not a member of `b`'s type. (Field loans are
+        // instance-insensitive: the same accepted over-approximation as the
+        // invalidation check.)
         bool Aliases = false;
-        for (LoanID ML : Mutating)
-          if (FactMgr.getLoanMgr().getLoan(ML)->getAccessPath() == BAP) {
+        for (LoanID ML : Mutating) {
+          const AccessPath &MAP =
+              FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
+          if (MAP == BAP ||
+              isFieldBorrowOf(BLoan, invalidatedObjectRecord(MAP))) {
             Aliases = true;
             break;
           }
+        }
         if (!Aliases)
           continue;
-        // The borrowing argument aliases the mutated one. Two aliasing
-        // reference arguments produce symmetric facts (a->[b] and b->[a]); they
-        // describe the same hazard, so de-duplicate by (aliased storage, call).
+        // Only a loan with a reportable anchor (an issuing expression or a
+        // placeholder parameter) produces a diagnostic; skip others so `break`
+        // (one report per captured value) lands on a reportable loan rather
+        // than a non-reportable one that would emit nothing.
+        if (!BLoan->getIssuingExpr() && !BAP.getAsPlaceholderParam())
+          continue;
+        // Two aliasing reference arguments produce symmetric facts (a->[b] and
+        // b->[a]); they describe the same hazard, so de-duplicate by (aliased
+        // storage, call).
         const void *Storage = BAP.getAsValueDecl();
-        if (Storage &&
-            !ReportedArgOverlap.insert({Storage, AOF->getOperationExpr()})
-                 .second)
+        if (Storage && !ReportedArgOverlap.insert({Storage, Op}).second)
           continue;
         // Reuse the assumed-invalidation reporting (the operation is the call).
-        if (ReportedAssumedInval.insert({BL.Value, AOF->getOperationExpr()})
-                .second)
-          PendingAssumedInval.push_back({BL, AOF->getOperationExpr()});
+        if (ReportedAssumedInval.insert({BL.Value, Op}).second)
+          PendingAssumedInval.push_back({BL, Op});
+        break; // one report per captured value
       }
     }
   }
