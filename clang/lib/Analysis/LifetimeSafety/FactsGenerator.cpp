@@ -1272,6 +1272,14 @@ void FactsGenerator::VisitInitListExpr(const InitListExpr *ILE) {
   llvm::SmallVector<const Expr *, 4> Inits(ILE->inits().begin(),
                                            ILE->inits().end());
   handleGslAggregateInit(ILE, Inits);
+  // Soundness: a plain (non-gsl) aggregate that holds a borrow but whose
+  // ownership is untracked. A local/member declaration of such a type is
+  // reported at the declaration (VisitDeclStmt) and a call result at the call,
+  // but an aggregate *temporary* that escapes (`return Box{&x}`, `g =
+  // Box{&x}.p`) is neither -- its borrow is orphaned and silently dropped. Flag
+  // the escaping temporary here; skip the var/member-initializer form to avoid
+  // double-reporting the declaration.
+  maybeReportUntrackedAggregateTemporary(ILE);
 }
 
 void FactsGenerator::VisitCXXParenListInitExpr(
@@ -1283,6 +1291,67 @@ void FactsGenerator::VisitCXXParenListInitExpr(
   llvm::SmallVector<const Expr *, 4> Inits(PLIE->getInitExprs().begin(),
                                            PLIE->getInitExprs().end());
   handleGslAggregateInit(PLIE, Inits);
+  maybeReportUntrackedAggregateTemporary(PLIE);
+}
+
+void FactsGenerator::maybeReportUntrackedAggregateTemporary(
+    const Expr *AggExpr) {
+  // A [[gsl::Pointer]]/[[gsl::Owner]] aggregate is modeled (handleGslAggregate-
+  // Init); only a plain borrow-holding aggregate is untracked here.
+  QualType Ty = AggExpr->getType();
+  if (isGslPointerType(Ty) || isGslOwnerType(Ty))
+    return;
+  // Skip an aggregate that directly initializes a declaration: a local/member
+  // VarDecl is reported at the declaration (VisitDeclStmt) and reporting here
+  // too would double-fire (the checker dedups per-Expr, not by location). The
+  // initializer of a VarDecl appears, after peeling the implicit
+  // ExprWithCleanups / Cast / paren wrappers, as that VarDecl's init. An
+  // escaping temporary instead has a MaterializeTemporaryExpr, a ReturnStmt, or
+  // some other expression as its parent.
+  ParentMap &PM = AC.getParentMap();
+  const Stmt *Cur = AggExpr;
+  while (const Stmt *P = PM.getParent(Cur)) {
+    // Walk up through wrappers and through an enclosing aggregate initializer
+    // (a nested element init, `Outer{Inner{...}}`), so a sub-aggregate of a
+    // declaration's initializer reaches the DeclStmt below and is skipped,
+    // while a sub-aggregate of an escaping temporary reaches a ReturnStmt /
+    // call / assignment and is still reported.
+    if (isa<ExprWithCleanups>(P) || isa<ConstantExpr>(P) ||
+        isa<ParenExpr>(P) || isa<CastExpr>(P) || isa<InitListExpr>(P) ||
+        isa<CXXParenListInitExpr>(P)) {
+      Cur = P;
+      continue;
+    }
+    // A DeclStmt parent means this aggregate is a declaration's initializer
+    // (`Box b{...};`), already reported at the VarDecl.
+    if (isa<DeclStmt>(P))
+      return;
+    break;
+  }
+  // Mirror the 4-way classification used for local declarations (VisitDeclStmt)
+  // and call results (handleFunctionCall): a borrow-holding type whose
+  // ownership the analysis cannot track. Report the escaping aggregate temporary
+  // so its orphaned borrow is not silently dropped.
+  auto &Cache = FactMgr.getUnknownOwnershipCache();
+  if (isUnknownOwnershipType(Ty, Cache))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::UnknownOwnership, AggExpr));
+  else if (isGslOwnerOfIndirection(Ty, Cache))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::OwnerOfIndirection, AggExpr));
+  else if (isGslPointerOfIndirection(Ty, Cache))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::PointerOfIndirection, AggExpr));
+  else {
+    bool IsPointer = false;
+    if (QualType Nested =
+            findNestedOwnerOrPointerOfIndirection(Ty, Cache, IsPointer);
+        !Nested.isNull())
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          IsPointer ? UntrackedConstructReason::PointerOfIndirection
+                    : UntrackedConstructReason::OwnerOfIndirection,
+          AggExpr, Nested));
+  }
 }
 
 void FactsGenerator::handleGslAggregateInit(

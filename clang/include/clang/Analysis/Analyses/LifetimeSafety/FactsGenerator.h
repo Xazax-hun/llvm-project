@@ -61,6 +61,15 @@ public:
   /// borrow-carrying initializer's loans into the aggregate's own origin.
   void handleGslAggregateInit(const Expr *AggExpr,
                               llvm::ArrayRef<const Expr *> Inits);
+  /// Soundness: a plain (non-gsl) aggregate `AggExpr` that can hold a borrow but
+  /// whose ownership is untracked. A local/member declaration of such a type is
+  /// reported at the declaration (VisitDeclStmt) and a call result at the call,
+  /// but an aggregate *temporary* that escapes (`return Box{&x}`, `g =
+  /// Box{&x}.p`) is covered by neither -- its borrow is orphaned and silently
+  /// dropped. Emits an UntrackedConstructFact for the escaping temporary form;
+  /// skips an aggregate that directly initializes a declaration (already
+  /// reported there) to avoid double-reporting.
+  void maybeReportUntrackedAggregateTemporary(const Expr *AggExpr);
   void VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *BTE);
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *MTE);
   void VisitLambdaExpr(const LambdaExpr *LE);
