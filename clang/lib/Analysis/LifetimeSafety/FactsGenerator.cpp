@@ -782,7 +782,7 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     if (const auto *EnclMD = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
         EnclMD && EnclMD->isConst())
       if (const auto *ME = dyn_cast<MemberExpr>(SubExpr->IgnoreParenImpCasts());
-          ME && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts()))
+          ME && isThisExpr(ME->getBase()))
         if (const auto *FieldD = dyn_cast<FieldDecl>(ME->getMemberDecl());
             FieldD && FieldD->getType()->isPointerType() &&
             isGslOwnerType(FieldD->getType()->getPointeeType()) &&
@@ -1853,8 +1853,7 @@ void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
   if (!MemberCall)
     return;
 
-  if (!isa_and_present<CXXThisExpr>(
-          MemberCall->getImplicitObjectArgument()->IgnoreImpCasts()))
+  if (!isThisExpr(MemberCall->getImplicitObjectArgument()))
     return;
 
   const auto *MD = dyn_cast<CXXMethodDecl>(FD);
@@ -2097,7 +2096,7 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
   // `this->m`.
   const auto *ME = dyn_cast<MemberExpr>(Args[0]->IgnoreParenImpCasts());
   const FieldDecl *FieldD =
-      ME && isa<CXXThisExpr>(ME->getBase()->IgnoreParenImpCasts())
+      ME && isThisExpr(ME->getBase())
           ? dyn_cast<FieldDecl>(ME->getMemberDecl())
           : nullptr;
 

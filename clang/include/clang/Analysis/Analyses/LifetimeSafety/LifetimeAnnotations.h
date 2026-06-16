@@ -23,6 +23,13 @@ bool isInStlNamespace(const Decl *D);
 
 bool isPointerLikeType(QualType QT);
 
+/// Whether `E` denotes the enclosing object `this` -- either the `CXXThisExpr`
+/// `this` itself, or `*this` (a dereference of `this`). `m.field`'s base is
+/// `this` in the `this->field` spelling and `*this` in the `(*this).field`
+/// spelling; both name the same object, so member accesses through either must
+/// be modeled identically. Parens and implicit casts are looked through.
+bool isThisExpr(const Expr *E);
+
 /// If `E` accesses an element of an array object -- a subscript `arr[i]`, or the
 /// equivalent dereference of the array decayed to a pointer and offset
 /// (`*(arr+i)`, `*arr`, `i[arr]`) -- returns the underlying array object
