@@ -1979,8 +1979,16 @@ void CFGBuilder::addAutomaticObjHandling(LocalScope::const_iterator B,
 }
 
 /// Add CFG elements corresponding to call destructor and end of lifetime
-/// of all automatic variables with non-trivial destructor in range [B, E).
+/// of all automatic variables in range [B, E).
 /// This include AutomaticObjectDtor and LifetimeEnds elements.
+///
+/// Variables are processed in reverse declaration order (last declared is
+/// destroyed first), interleaving objects with trivial and non-trivial
+/// destructors so the CFG reflects the actual reverse-construction destruction
+/// order. (An object with a trivial destructor ends its lifetime when its
+/// storage is released, which -- like a non-trivial destructor -- happens in
+/// reverse construction order, *not* batched after every non-trivial
+/// destructor.)
 void CFGBuilder::addAutomaticObjDestruction(LocalScope::const_iterator B,
                                             LocalScope::const_iterator E,
                                             Stmt *S) {
@@ -1990,15 +1998,14 @@ void CFGBuilder::addAutomaticObjDestruction(LocalScope::const_iterator B,
   if (B == E)
     return;
 
-  SmallVector<VarDecl *, 10> DeclsNeedDestruction;
-  DeclsNeedDestruction.reserve(B.distance(E));
+  SmallVector<VarDecl *, 10> Decls;
+  Decls.reserve(B.distance(E));
+  for (VarDecl *D : llvm::make_range(B, E))
+    Decls.push_back(D);
 
-  for (VarDecl* D : llvm::make_range(B, E))
-    if (needsAutomaticDestruction(D))
-      DeclsNeedDestruction.push_back(D);
-
-  for (VarDecl *VD : llvm::reverse(DeclsNeedDestruction)) {
-    if (BuildOpts.AddImplicitDtors) {
+  for (VarDecl *VD : llvm::reverse(Decls)) {
+    const bool NeedsDtor = needsAutomaticDestruction(VD);
+    if (BuildOpts.AddImplicitDtors && NeedsDtor) {
       // If this destructor is marked as a no-return destructor, we need to
       // create a new block for the destructor which does not have as a
       // successor anything built thus far: control won't flow out of this
@@ -2015,12 +2022,12 @@ void CFGBuilder::addAutomaticObjDestruction(LocalScope::const_iterator B,
 
     autoCreateBlock();
 
-    // Add LifetimeEnd after automatic obj with non-trivial destructors,
-    // as they end their lifetime when the destructor returns. For trivial
-    // objects, we end lifetime with scope end.
+    // The lifetime of every automatic object ends here, in reverse
+    // construction order; for an object with a non-trivial destructor that is
+    // when the destructor returns.
     if (BuildOpts.AddLifetime)
       appendLifetimeEnds(Block, VD, S);
-    if (BuildOpts.AddImplicitDtors && !hasTrivialDestructor(VD))
+    if (BuildOpts.AddImplicitDtors && NeedsDtor && !hasTrivialDestructor(VD))
       appendAutomaticObjDtor(Block, VD, S);
     if (VD->hasAttr<CleanupAttr>())
       appendCleanupFunction(Block, VD);
@@ -2030,39 +2037,18 @@ void CFGBuilder::addAutomaticObjDestruction(LocalScope::const_iterator B,
 /// Add CFG elements corresponding to leaving a scope.
 /// Assumes that range [B, E) corresponds to single scope.
 /// This add following elements:
-///   * LifetimeEnds for all variables with non-trivial destructor
-///   * ScopeEnd for each scope left
+///   * ScopeEnd for the scope left
+/// (The lifetime-end markers for the scope's variables are emitted by
+/// addAutomaticObjDestruction, interleaved with destructors in reverse
+/// construction order.)
 void CFGBuilder::addScopeExitHandling(LocalScope::const_iterator B,
                                       LocalScope::const_iterator E, Stmt *S) {
   assert(!B.inSameLocalScope(E));
-  if (!BuildOpts.AddLifetime && !BuildOpts.AddScopes)
-    return;
-
-  if (BuildOpts.AddScopes) {
-    autoCreateBlock();
-    appendScopeEnd(Block, B.getFirstVarInScope(), S);
-  }
-
-  if (!BuildOpts.AddLifetime)
-    return;
-
-  // We need to perform the scope leaving in reverse order
-  SmallVector<VarDecl *, 10> DeclsTrivial;
-  DeclsTrivial.reserve(B.distance(E));
-
-  // Objects with trivial destructor ends their lifetime when their storage
-  // is destroyed, for automatic variables, this happens when the end of the
-  // scope is added.
-  for (VarDecl* D : llvm::make_range(B, E))
-    if (!needsAutomaticDestruction(D))
-      DeclsTrivial.push_back(D);
-
-  if (DeclsTrivial.empty())
+  if (!BuildOpts.AddScopes)
     return;
 
   autoCreateBlock();
-  for (VarDecl *VD : llvm::reverse(DeclsTrivial))
-    appendLifetimeEnds(Block, VD, S);
+  appendScopeEnd(Block, B.getFirstVarInScope(), S);
 }
 
 /// addScopeChangesHandling - appends information about destruction, lifetime

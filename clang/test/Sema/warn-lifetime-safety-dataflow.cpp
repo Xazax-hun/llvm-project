@@ -25,8 +25,8 @@ MyObj* return_local_addr() {
 // CHECK:   OriginFlow:
 // CHECK-NEXT:       Dest: [[O_RET_VAL:[0-9]+]] (Expr: ImplicitCastExpr, Type : MyObj *)
 // CHECK-NEXT:       Src:  [[O_P]] (Decl: p, Type : MyObj *)
-// CHECK:   Expire (x)
 // CHECK:   Expire (p, Origin: [[O_P]] (Decl: p, Type : MyObj *))
+// CHECK:   Expire (x)
 // CHECK:   OriginEscapes ([[O_RET_VAL]] (Expr: ImplicitCastExpr, Type : MyObj *), via Return)
 }
 

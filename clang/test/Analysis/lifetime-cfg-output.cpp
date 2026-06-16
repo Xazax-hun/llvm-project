@@ -1,12 +1,10 @@
 // RUN: %clang_analyze_cc1 -fcxx-exceptions -fexceptions -analyzer-checker=debug.DumpCFG -analyzer-config cfg-lifetime=true %s > %t 2>&1
 // RUN: FileCheck --input-file=%t %s
 
-// FIXME Most of the cases in this file test only with the objects of type `A`,
-// that has a non-trivial destructor. The types with a trivial destructor
-// ends their lifetime when the underlying memory is released, i.e. they
-// are destroyed last, after all objects with non-trivial destructors.
-// Consequently, they are handled differently in code, and we should make 
-// sure that test cover also trivially destructible types.
+// Objects with a trivial destructor end their lifetime when their underlying
+// storage is released. Like objects with a non-trivial destructor, this happens
+// in reverse construction order, interleaved with the non-trivial destructors
+// (see test_const_ref, test_array, test_trivial_vs_non_trivial_order).
 
 extern bool UV;
 class A {
@@ -77,9 +75,9 @@ public:
 // CHECK-NEXT:   10: const A &c = A();
 // CHECK-NEXT:   11: [B1.10].~A() (Implicit destructor)
 // CHECK-NEXT:   12: [B1.10] (Lifetime ends)
-// CHECK-NEXT:   13: [B1.2].~A() (Implicit destructor)
-// CHECK-NEXT:   14: [B1.2] (Lifetime ends)
-// CHECK-NEXT:   15: [B1.5] (Lifetime ends)
+// CHECK-NEXT:   13: [B1.5] (Lifetime ends)
+// CHECK-NEXT:   14: [B1.2].~A() (Implicit destructor)
+// CHECK-NEXT:   15: [B1.2] (Lifetime ends)
 // CHECK-NEXT:    Preds (1): B2
 // CHECK-NEXT:    Succs (1): B0
 // CHECK:       [B0 (EXIT)]
@@ -97,11 +95,11 @@ void test_const_ref() {
 // CHECK-NEXT:    2: A a[2];
 // CHECK-NEXT:    3:  (CXXConstructExpr, [B1.4], A[0])
 // CHECK-NEXT:    4: A b[0];
-// CHECK-NEXT:    5: [B1.2].~A[2]() (Implicit destructor)
+// lifetime of b (trivial) ends first, in reverse construction order
+// CHECK-NEXT:    5: [B1.4] (Lifetime ends)
+// CHECK-NEXT:    6: [B1.2].~A[2]() (Implicit destructor)
 // lifetime of a ends when its destructors are run
-// CHECK-NEXT:    6: [B1.2] (Lifetime ends)
-// lifetime of b ends when its storage duration ends
-// CHECK-NEXT:    7: [B1.4] (Lifetime ends)
+// CHECK-NEXT:    7: [B1.2] (Lifetime ends)
 // CHECK-NEXT:    Preds (1): B2
 // CHECK-NEXT:    Succs (1): B0
 // CHECK:      [B0 (EXIT)]
@@ -814,9 +812,10 @@ void test_for_inc_conditional() {
 // CHECK-NEXT:    6: a
 // CHECK-NEXT:    7: [B1.6].p
 // CHECK-NEXT:    8: [B1.7] = [B1.5]
-// CHECK-NEXT:    9: [B1.2].~A() (Implicit destructor)
-// CHECK-NEXT:   10: [B1.2] (Lifetime ends)
-// CHECK-NEXT:   11: [B1.3] (Lifetime ends)
+// n (trivial) is destroyed before a, in reverse construction order
+// CHECK-NEXT:    9: [B1.3] (Lifetime ends)
+// CHECK-NEXT:   10: [B1.2].~A() (Implicit destructor)
+// CHECK-NEXT:   11: [B1.2] (Lifetime ends)
 // CHECK-NEXT:    Preds (1): B2
 // CHECK-NEXT:    Succs (1): B0
 // CHECK:       [B0 (EXIT)]
