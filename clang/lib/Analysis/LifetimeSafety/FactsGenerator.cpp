@@ -1057,30 +1057,35 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         // NOT kill -- the object may hold other borrows), so the view now
         // carries the borrow and a use of it after that borrow's source expires
         // is reported.
-        // A view member may also live in a [[gsl::Pointer]] BASE CLASS of a
-        // non-gsl most-derived receiver (`struct D : ViewBase { int extra; };
-        // d.p = &local`). There the receiver `GslBase` recovered above is `d`
-        // (type D, not a gsl::Pointer), but the member's DECLARING class
-        // (`ViewBase`) is -- so the leaf treatment still applies and the store
-        // must not be silently dropped. Recognize that via the declaring class.
-        // A view member may also live in a [[gsl::Pointer]] BASE CLASS of a
-        // non-gsl most-derived receiver (`struct D : ViewBase { int extra; };
-        // d.p = &local`). There the receiver `GslBase` recovered above is `d`
-        // (type D, not a gsl::Pointer), but the member's DECLARING class
-        // (`ViewBase`) is -- so the leaf treatment still applies and the store
-        // must not be silently dropped. Recognize that specific case (member
-        // declared in a gsl::Pointer that is a *different* class than the
-        // receiver, i.e. a base subobject); a member of the receiver's own
-        // gsl::Pointer class is already handled by the receiver-type test.
-        const RecordDecl *MemberClass = LF->getParent();
-        QualType RecvTy = Base->getType().getNonReferenceType();
+        //
+        // The member may not be declared directly in the receiver's static type:
+        // it can live in a [[gsl::Pointer]] BASE CLASS of a non-gsl derived
+        // receiver (`struct D : ViewBase {}; d.p = &local`) and/or in an
+        // ANONYMOUS struct/union nested inside one. Find the member's enclosing
+        // gsl::Pointer by walking its declaring record outward through enclosing
+        // anonymous records; the leaf treatment applies whenever such a record
+        // exists. Exclude the case where that gsl::Pointer is the receiver's own
+        // static class (a direct/anon member of a gsl::Pointer receiver), which
+        // the receiver-type test below already handles -- merging there would
+        // change its established (dangling-field) diagnostic.
+        const RecordDecl *GslEnclosing = nullptr;
+        for (const RecordDecl *R = LF->getParent(); R;) {
+          if (isGslPointerType(AC.getASTContext().getCanonicalTagType(R))) {
+            GslEnclosing = R;
+            break;
+          }
+          if (!R->isAnonymousStructOrUnion())
+            break;
+          R = dyn_cast_or_null<RecordDecl>(R->getDeclContext());
+        }
+        QualType RecvTy =
+            GslBase->IgnoreImpCasts()->getType().getNonReferenceType();
         if (RecvTy->isPointerType())
           RecvTy = RecvTy->getPointeeType();
         const RecordDecl *RecvClass = RecvTy->getAsRecordDecl();
         bool MemberInGslPointerBase =
-            MemberClass && RecvClass &&
-            MemberClass->getCanonicalDecl() != RecvClass->getCanonicalDecl() &&
-            isGslPointerType(AC.getASTContext().getCanonicalTagType(MemberClass));
+            GslEnclosing && RecvClass &&
+            GslEnclosing->getCanonicalDecl() != RecvClass->getCanonicalDecl();
         if (isGslPointerType(
                 GslBase->IgnoreImpCasts()->getType().getNonReferenceType()) ||
             MemberInGslPointerBase) {
