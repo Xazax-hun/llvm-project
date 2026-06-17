@@ -1032,6 +1032,22 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
       if (OriginNode *Container = getOriginNode(*Base)) {
         CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
             ME_LHS, RHSNode->getOriginID(), Container->getOriginID()));
+        // See through anonymous struct/union members: for `v.p` where `p` lives
+        // in an anonymous struct inside a [[gsl::Pointer]] `V`, the assigned
+        // member's base is the unnamed anonymous-record subobject (whose type is
+        // not a gsl::Pointer), so testing the immediate base's type would miss
+        // that `p` is transitively a member of the gsl::Pointer `v`. Peel
+        // anonymous-record member accesses to reach the real enclosing object.
+        const Expr *GslBase = Base;
+        while (const auto *BME = dyn_cast<MemberExpr>(GslBase->IgnoreImpCasts())) {
+          const auto *BFD = dyn_cast<FieldDecl>(BME->getMemberDecl());
+          const RecordType *RT =
+              BFD ? BFD->getType()->getAs<RecordType>() : nullptr;
+          if (RT && RT->getDecl()->isAnonymousStructOrUnion())
+            GslBase = BME->getBase();
+          else
+            break;
+        }
         // Soundness: when the enclosing object is itself a view (gsl::Pointer) --
         // a leaf in the origin tree whose members are not tracked per field -- a
         // store into its borrow-holding member otherwise lands on a transient
@@ -1041,7 +1057,8 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         // NOT kill -- the object may hold other borrows), so the view now
         // carries the borrow and a use of it after that borrow's source expires
         // is reported.
-        if (isGslPointerType(Base->getType().getNonReferenceType())) {
+        if (isGslPointerType(
+                GslBase->IgnoreImpCasts()->getType().getNonReferenceType())) {
           // Merge into the OUTERMOST tracked object, not the immediate base.
           // For a nested store like `v.inner.q = &local` (where both `Outer v`
           // and its `Inner inner` member are gsl::Pointer leaves), `Container`
