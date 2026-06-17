@@ -1978,7 +1978,19 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     // handling used for self-referential field stores.)
     QualType RecvTy = Args[0]->IgnoreImpCasts()->getType().getNonReferenceType();
     bool OwnerReceiver = isGslOwnerType(RecvTy);
-    if ((OwnerReceiver || recordHasGslOwnerField(RecvTy)) &&
+    // A virtual call dispatched through a base reference/pointer hides the
+    // dynamic type: an override in a derived class may reallocate an owner field
+    // the static (base) type does not declare, and IgnoreImpCasts can only
+    // recover the base static type (the reference's declared type), not the
+    // runtime type. We cannot enumerate the open world of derived classes
+    // intra-procedurally, so conservatively assume a non-const virtual call on a
+    // polymorphic receiver may mutate an owner. (Like every assumed-invalidation
+    // this only warns when a borrow into the receiver is live across the call --
+    // i.e. a borrow obtained from the polymorphic object itself.)
+    const CXXRecordDecl *RecvRD = RecvTy->getAsCXXRecordDecl();
+    bool MaybeDynamicOwner =
+        Method->isVirtual() && RecvRD && RecvRD->isPolymorphic();
+    if ((OwnerReceiver || recordHasGslOwnerField(RecvTy) || MaybeDynamicOwner) &&
         !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
         invalidate(L->getOriginID());

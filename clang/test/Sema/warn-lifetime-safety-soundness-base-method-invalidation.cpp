@@ -76,3 +76,47 @@ struct PlainDerived : Base {
     return *p;
   }
 };
+
+//===----------------------------------------------------------------------===//
+// Virtual dispatch through a base reference/pointer.
+//
+// When a non-const virtual method is called through a base reference whose
+// static type declares no owner field, the dynamic type may be a derived class
+// that overrides the method to mutate an owner field -- and IgnoreImpCasts can
+// only recover the base static type (the reference's declared type), not the
+// runtime type. The open world of derived classes cannot be enumerated
+// intra-procedurally, so a non-const virtual call on a polymorphic receiver is
+// conservatively assumed to mutate an owner. It only warns when a borrow into
+// the receiver is live across the call.
+//===----------------------------------------------------------------------===//
+
+struct Iface {
+  virtual const int *view() const [[clang::lifetimebound]] = 0;
+  virtual void mutate() = 0;       // non-const virtual: may reallocate in an override
+  virtual void inspect() const = 0; // const virtual: cannot mutate
+  virtual ~Iface() = default;
+};
+struct Impl : Iface {
+  MyBuf buf;
+  const int *view() const [[clang::lifetimebound]] override { return buf.data(); }
+  void mutate() override { buf.grow(); }
+  void inspect() const override {}
+};
+
+int virtual_dispatch() {
+  Impl impl;
+  Iface &i = impl;         // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  const int *p = i.view();
+  i.mutate();              // expected-note {{assumed to be invalidated by this operation}}
+  return *p;
+}
+
+// Negative: a const virtual call between the borrow and the use cannot mutate.
+int virtual_const_ok() {
+  Impl impl;
+  Iface &i = impl;
+  const int *p = i.view();
+  i.inspect(); // no-warning: const
+  return *p;
+}
+
