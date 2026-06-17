@@ -1,7 +1,7 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify %s
 
 // An RAII guard that is a [[gsl::Pointer]] capturing a mutable owner (via a
-// lifetime_capture_by(this) / owner-pointer constructor) may mutate or free
+// lifetimebound / owner-pointer constructor) may mutate or free
 // that owner in its out-of-line destructor (`~Guard() { o->grow(); }`), which
 // the intra-procedural analysis cannot see. The guard's destruction is treated
 // as an assumed invalidation of the borrows it carries on the captured owner,
@@ -16,7 +16,7 @@ struct [[gsl::Owner(int)]] Owner {
 
 struct [[gsl::Pointer]] Guard {
   Owner *o;
-  Guard(Owner *oo [[clang::lifetime_capture_by(this)]]);
+  Guard(Owner *oo [[clang::lifetimebound]]);
   ~Guard(); // non-trivial: may mutate *o
 };
 

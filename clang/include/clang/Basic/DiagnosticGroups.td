@@ -921,6 +921,20 @@ programming model.
   }];
 }
 
+def LifetimeSafetyCtorCapture
+    : DiagGroup<"lifetime-safety-ctor-capture"> {
+  code Documentation = [{
+Warns on '[[clang::lifetime_capture_by(this)]]' applied to a constructor
+parameter. A constructor capturing a borrow into the object it constructs is
+exactly the relationship [[clang::lifetimebound]] expresses, and unlike
+'lifetime_capture_by(this)' on a constructor -- which the analysis does not
+model and which lands the borrow on a member origin where it can be silently
+dropped -- a [[clang::lifetimebound]] constructor parameter is tracked
+precisely. The construct is therefore rejected under the safe programming
+model; annotate the parameter [[clang::lifetimebound]] instead.
+  }];
+}
+
 def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                         [// The strict bug-finding warnings
                                          // (use-after-scope/free,
@@ -952,6 +966,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyOwnerCapture,
                                          LifetimeSafetySelfReferential,
                                          LifetimeSafetyGlobalCapture,
+                                         LifetimeSafetyCtorCapture,
                                          // An annotation that cannot be verified
                                          // (a [[noescape]] parameter that
                                          // escapes, or a [[lifetimebound]] whose

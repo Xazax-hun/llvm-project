@@ -2,17 +2,20 @@
 
 // A constructor temporary of a borrow-holding non-gsl record (`Box(&x)`, where
 // `struct Box { int* p; }` has a capturing constructor) is untracked: the
-// captured borrow is dropped (lifetime_capture_by on a constructor is
-// unmodeled) and the record's ownership is unknown. A local/member declaration
-// of such a type, and a call result, are reported -- but a bare constructor
-// temporary that is member-accessed / returned / stored was covered by neither.
-// Its only backstop was lost-loan on the dropped borrow, which a control-flow
-// merge supplying a valid loan masks -> silent use-after-scope. The constructor
-// temporary is now flagged unknown-ownership directly.
+// record's ownership is unknown (it is neither [[gsl::Owner]] nor
+// [[gsl::Pointer]]), so the captured borrow is dropped. A local/member
+// declaration of such a type, and a call result, are reported -- but a bare
+// constructor temporary that is member-accessed / returned / stored was covered
+// by neither. Its only backstop was lost-loan on the dropped borrow, which a
+// control-flow merge supplying a valid loan masks -> silent use-after-scope.
+// The constructor temporary is now flagged unknown-ownership directly. (The
+// constructor parameter, being an unannotated indirection, is independently
+// flagged -- 'lifetime_capture_by(this)' on a constructor is rejected, so a
+// realistic such Box carries no lifetime annotation.)
 
 struct Box {
   int *p;
-  Box(int *q [[clang::lifetime_capture_by(this)]]) : p(q) {}
+  Box(int *q) : p(q) {} // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}}
 };
 
 int g_real;
@@ -21,7 +24,8 @@ int *gp;
 void member_access_of_ctor_temporary(bool c) {
   if (c) {
     int x = 42;
-    gp = Box(&x).p; // expected-warning {{type 'Box' can hold a borrow but is annotated neither}}
+    gp = Box(&x).p; // expected-warning {{type 'Box' can hold a borrow but is annotated neither}} \
+                    // expected-warning {{argument is bound to a parameter that can hold a borrow but is not annotated}}
   } else {
     gp = &g_real; // a valid loan on the other path masks the dropped borrow
   }
@@ -31,7 +35,7 @@ void member_access_of_ctor_temporary(bool c) {
 Box returns_ctor_temporary() {
   int x = 42;
   return Box(&x); // expected-warning {{type 'Box' can hold a borrow but is annotated neither}} \
-                  // expected-warning {{address of stack memory associated with local variable 'x' returned}}
+                  // expected-warning {{argument is bound to a parameter that can hold a borrow but is not annotated}}
 }
 
 // Negative: a named declaration is reported once, at the declaration -- not
@@ -39,7 +43,8 @@ Box returns_ctor_temporary() {
 // a second time).
 Box named_then_returned() {
   int x = 42;
-  Box b(&x); // expected-warning {{type 'Box' can hold a borrow but is annotated neither}}
+  Box b(&x); // expected-warning {{type 'Box' can hold a borrow but is annotated neither}} \
+             // expected-warning {{argument is bound to a parameter that can hold a borrow but is not annotated}}
   return b;  // no second warning (copy/move construct)
 }
 

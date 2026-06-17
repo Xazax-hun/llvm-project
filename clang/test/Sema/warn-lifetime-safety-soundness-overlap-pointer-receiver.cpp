@@ -8,7 +8,7 @@ volatile char sink;
 
 // The argument-overlap check must reach through a `gsl::Pointer` receiver: a
 // wrapper that points AT an owner (here `string* p`, bound via a
-// `lifetime_capture_by(this)` constructor) holds the borrow into that owner on
+// `lifetimebound` constructor) holds the borrow into that owner on
 // its POINTEE origin, one indirection level in -- not on the wrapper's own
 // origin. A non-const method that mutates the pointee owner while a co-argument
 // view aliases it is an aliasing hazard, even though the view is not live after
@@ -16,7 +16,7 @@ volatile char sink;
 
 struct [[gsl::Pointer]] W {
   string *p;
-  W(string &s [[clang::lifetime_capture_by(this)]]) : p(&s) {}
+  W(string &s [[clang::lifetimebound]]); // captures &s into the pointee origin
   void grow_and_use(string_view v [[clang::noescape]]) {
     p->push_back('z'); // reallocates *p
     sink = *v.data();  // v aliased *p -> dangling

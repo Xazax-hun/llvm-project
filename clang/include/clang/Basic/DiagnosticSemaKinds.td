@@ -11271,6 +11271,13 @@ def warn_lifetime_safety_owner_captures_borrow
               "tracked">,
       InGroup<LifetimeSafetyOwnerCapture>,
       DefaultIgnore;
+def warn_lifetime_safety_ctor_captures_borrow
+    : Warning<"'lifetime_capture_by(this)' on a constructor is not supported by "
+              "lifetime safety; annotate the parameter with "
+              "'[[clang::lifetimebound]]' instead to express that the "
+              "constructed object may refer to it">,
+      InGroup<LifetimeSafetyCtorCapture>,
+      DefaultIgnore;
 def warn_lifetime_safety_const_indirect_mutation
     : Warning<"this const member function mutates an owner through a "
               "pointer member; 'const' does not protect the pointee, so "

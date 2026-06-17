@@ -4491,11 +4491,21 @@ void Sema::LazyProcessLifetimeCaptureByParams(FunctionDecl *FD) {
       // supported -- an owner owns its contents, and a borrow stashed in its
       // (opaque) members cannot be tracked once the owner is passed elsewhere.
       // Use a [[gsl::Pointer]] (view) type to hold a borrow instead.
-      if (Name == "this")
-        if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
-            MD && MD->getParent() && MD->getParent()->hasAttr<OwnerAttr>())
+      //
+      // 'lifetime_capture_by(this)' on a *constructor* is likewise unmodeled:
+      // the captured borrow lands on a member origin where a sibling member's
+      // valid loan can silently mask the dangling one. That relationship is
+      // exactly what [[clang::lifetimebound]] expresses (and the analysis does
+      // track a lifetimebound constructor parameter), so redirect to it.
+      if (Name == "this") {
+        if (isa<CXXConstructorDecl>(FD))
+          Diag(CapturedBy->getArgLocs()[I],
+               diag::warn_lifetime_safety_ctor_captures_borrow);
+        else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+                 MD && MD->getParent() && MD->getParent()->hasAttr<OwnerAttr>())
           Diag(CapturedBy->getArgLocs()[I],
                diag::warn_lifetime_safety_owner_captures_borrow);
+      }
       CapturedBy->setParamIdx(I, It->second);
     }
   }
