@@ -510,6 +510,19 @@ void FactsGenerator::VisitCXXConstructExpr(const CXXConstructExpr *CCE) {
   handleFunctionCall(CCE, CCE->getConstructor(),
                      {CCE->getArgs(), CCE->getNumArgs()},
                      /*IsGslConstruction=*/false);
+  // Soundness: a constructor temporary of a borrow-holding non-gsl record
+  // (e.g. `Box(&local)` where `struct Box { int* p; }` with a capturing ctor)
+  // is, like an escaping aggregate temporary, untracked -- the borrow it
+  // captures is dropped (capture_by on a constructor is unmodeled) and the
+  // record's ownership is unknown. Reported at a local/member declaration and a
+  // call result, but a bare constructor temporary that is member-accessed /
+  // returned / stored is covered by neither, so flag it here (the
+  // declaration-initializer form is skipped via the parent walk). A copy/move
+  // construction is excluded -- it does not create a new borrow-holder, it
+  // copies an existing (already-reported) one, so flagging it would
+  // double-report (e.g. on `return p;`).
+  if (!CCE->getConstructor()->isCopyOrMoveConstructor())
+    maybeReportUntrackedAggregateTemporary(CCE);
 }
 
 void FactsGenerator::VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE) {
