@@ -1057,8 +1057,33 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         // NOT kill -- the object may hold other borrows), so the view now
         // carries the borrow and a use of it after that borrow's source expires
         // is reported.
+        // A view member may also live in a [[gsl::Pointer]] BASE CLASS of a
+        // non-gsl most-derived receiver (`struct D : ViewBase { int extra; };
+        // d.p = &local`). There the receiver `GslBase` recovered above is `d`
+        // (type D, not a gsl::Pointer), but the member's DECLARING class
+        // (`ViewBase`) is -- so the leaf treatment still applies and the store
+        // must not be silently dropped. Recognize that via the declaring class.
+        // A view member may also live in a [[gsl::Pointer]] BASE CLASS of a
+        // non-gsl most-derived receiver (`struct D : ViewBase { int extra; };
+        // d.p = &local`). There the receiver `GslBase` recovered above is `d`
+        // (type D, not a gsl::Pointer), but the member's DECLARING class
+        // (`ViewBase`) is -- so the leaf treatment still applies and the store
+        // must not be silently dropped. Recognize that specific case (member
+        // declared in a gsl::Pointer that is a *different* class than the
+        // receiver, i.e. a base subobject); a member of the receiver's own
+        // gsl::Pointer class is already handled by the receiver-type test.
+        const RecordDecl *MemberClass = LF->getParent();
+        QualType RecvTy = Base->getType().getNonReferenceType();
+        if (RecvTy->isPointerType())
+          RecvTy = RecvTy->getPointeeType();
+        const RecordDecl *RecvClass = RecvTy->getAsRecordDecl();
+        bool MemberInGslPointerBase =
+            MemberClass && RecvClass &&
+            MemberClass->getCanonicalDecl() != RecvClass->getCanonicalDecl() &&
+            isGslPointerType(AC.getASTContext().getCanonicalTagType(MemberClass));
         if (isGslPointerType(
-                GslBase->IgnoreImpCasts()->getType().getNonReferenceType())) {
+                GslBase->IgnoreImpCasts()->getType().getNonReferenceType()) ||
+            MemberInGslPointerBase) {
           // Merge into the OUTERMOST tracked object, not the immediate base.
           // For a nested store like `v.inner.q = &local` (where both `Outer v`
           // and its `Inner inner` member are gsl::Pointer leaves), `Container`
