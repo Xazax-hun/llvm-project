@@ -99,7 +99,12 @@ private:
 
   void handlePointerArithmetic(const BinaryOperator *BO);
 
-  void handlePlacementNew(const CXXNewExpr *NE, OriginNode *NewNode);
+  /// Models a non-allocating placement-new (`new (buf, ...) T`) by forwarding
+  /// the placement buffer's loan to the result. Returns true if it forwarded
+  /// (i.e. the operator-new is the standard non-allocating form whose first
+  /// placement parameter is `void*`); false otherwise (an allocating placement
+  /// form such as nothrow-new, which the caller handles as a fresh allocation).
+  bool handlePlacementNew(const CXXNewExpr *NE, OriginNode *NewNode);
 
   void handleCXXCtorInitializer(const CXXCtorInitializer *CII);
 

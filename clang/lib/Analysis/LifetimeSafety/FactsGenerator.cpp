@@ -1471,23 +1471,28 @@ void FactsGenerator::VisitArraySubscriptExpr(const ArraySubscriptExpr *ASE) {
       Dst->getOriginID(), Src->getOriginID(), /*Kill=*/true));
 }
 
-void FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
+bool FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
                                         OriginNode *NewNode) {
-  // Model only the standard single-argument placement new form, where the
-  // placement argument corresponds to a void* allocation-function parameter.
-  // Other placement forms, such as std::nothrow, are not modeled as providing
-  // storage for the returned pointer.
-  if (NE->getNumPlacementArgs() != 1)
-    return;
+  // Model the standard non-allocating placement-new form, whose allocation
+  // function takes the storage as a `void*` parameter (the first parameter
+  // after the size) and returns it. Extra placement arguments (tag types,
+  // allocator state, etc.) may follow -- e.g. `new (buf, Tag{}) T` -- but the
+  // first placement argument is still the storage buffer, so forward its loan
+  // regardless of how many placement arguments there are. An allocating
+  // placement form (e.g. `new (std::nothrow) T`, whose first placement
+  // parameter is not `void*`) genuinely allocates fresh storage and is handled
+  // by the caller.
+  if (NE->getNumPlacementArgs() < 1)
+    return false;
 
   const FunctionDecl *OperatorNew = NE->getOperatorNew();
   if (OperatorNew->getNumParams() <= 1)
-    return;
+    return false;
 
   const auto *Arg =
       OperatorNew->getParamDecl(1)->getType()->getAs<PointerType>();
   if (!Arg || !Arg->isVoidPointerType())
-    return;
+    return false;
 
   // Use the placement argument before the implicit conversion to void*, so
   // inner origins are still available.
@@ -1497,23 +1502,26 @@ void FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
       PlacementArg->getType()->isVoidPointerType())
     PlacementArg = ICE->getSubExpr();
   OriginNode *PlacementNode = getOriginNode(*PlacementArg);
-  // FIXME: General placement arguments need separate handling to overwrite
-  // the right origins.
 
   // The pointer returned by placement new comes from the placement
   // argument.
   if (PlacementNode)
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         NewNode->getOriginID(), PlacementNode->getOriginID(), true));
+  return true;
 }
 
 void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
   OriginNode *NewNode = getOriginNode(*NE);
   const Expr *Init = NE->getInitializer();
 
-  if (NE->getNumPlacementArgs() == 1) {
-    handlePlacementNew(NE, NewNode);
-  } else {
+  // A non-allocating placement-new forwards its buffer's loan (so freeing the
+  // buffer dangles a borrow into the placed object). Any other new -- a plain
+  // allocating new, or an allocating placement form (nothrow) -- gets a fresh
+  // heap-allocation loan. (A single non-void* placement arg, e.g. nothrow, is
+  // left with no loan here so a later use trips the lost-loan backstop, the
+  // prior behavior.)
+  if (!handlePlacementNew(NE, NewNode) && NE->getNumPlacementArgs() != 1) {
     const Loan *L = createLoan(FactMgr, NE);
     CurrentBlockFacts.push_back(
         FactMgr.createFact<IssueFact>(L->getID(), NewNode->getOriginID()));
