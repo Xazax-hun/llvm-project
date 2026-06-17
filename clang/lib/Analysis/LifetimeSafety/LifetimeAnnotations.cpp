@@ -602,6 +602,12 @@ bool isUnknownOwnershipType(QualType QT,
     auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
       for (const FieldDecl *F : R->fields()) {
         QualType FT = F->getType();
+        // Peel array dimensions so a C-array member `P arr[N]` is treated like
+        // the scalar member `P` -- a ConstantArrayType is not pointer-like and
+        // its getAsCXXRecordDecl() is null, so an array-of-pointers/views member
+        // would otherwise hide the borrow the record holds.
+        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+          FT = AT->getElementType();
         if (isPointerLikeType(FT) || FT->isReferenceType() ||
             isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
           return true;

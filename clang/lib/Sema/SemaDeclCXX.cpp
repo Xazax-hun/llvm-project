@@ -7141,6 +7141,13 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
     llvm::DenseMap<const Type *, bool> Cache;
     for (const auto *F : Record->fields()) {
       QualType FT = F->getType();
+      // Peel C-array dimensions so an array member `T arr[N]` is treated like
+      // the scalar member `T`. A ConstantArrayType is neither an owner-/pointer-
+      // of-indirection nor a class template specialization, so an
+      // array-of-owner-of-indirection / array-of-views member would otherwise
+      // slip through every check below.
+      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+        FT = AT->getElementType();
       if (lifetimes::isGslOwnerOfIndirection(FT, Cache))
         Diag(F->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
             << FT << F->getSourceRange();
