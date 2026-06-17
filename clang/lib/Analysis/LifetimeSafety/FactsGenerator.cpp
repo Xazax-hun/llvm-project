@@ -1051,9 +1051,17 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
           // dropped (reads of the real objects route elsewhere), so reject the
           // store as unroutable (the same one-way-merge limitation handled for
           // `!LHSNode` above), rather than tracking it unsoundly.
-          if (FactMgr.getOriginMgr().isStableStorageOrigin(MergeTarget))
-            flow(MergeTarget->getPointeeChild(), RHSNode, /*Kill=*/false);
+          OriginNode *MergePointee = MergeTarget->getPointeeChild();
+          if (FactMgr.getOriginMgr().isStableStorageOrigin(MergeTarget) &&
+              MergePointee && MergePointee->getLength() == RHSNode->getLength())
+            flow(MergePointee, RHSNode, /*Kill=*/false);
           else if (hasOrigins(LHSExpr->getType()))
+            // Either the object is a transient selecting base, or the stored
+            // value's pointee chain does not match the view's (a multi-level
+            // indirection member such as a `const char**` member of a
+            // gsl::Pointer leaf -- which the single-borrow view model cannot
+            // track and which would otherwise trip flow()'s length invariant).
+            // Flag the unsupported store rather than tracking it unsoundly.
             CurrentBlockFacts.push_back(
                 FactMgr.createFact<UntrackedConstructFact>(
                     UntrackedConstructReason::UnsupportedStoreDestination,
