@@ -1968,8 +1968,17 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   // (`!isConst()`).
   if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
       !Args.empty()) {
-    bool OwnerReceiver = isGslOwnerType(Args[0]->getType());
-    if ((OwnerReceiver || recordHasGslOwnerField(Args[0]->getType())) &&
+    // Use the most-derived receiver type, not the static type at the call site.
+    // When a derived object's owner field is mutated through a method inherited
+    // from (or dispatched on) a base class, the implicit object argument carries
+    // a derived-to-base cast, so Args[0]->getType() is the *base* -- which may
+    // not declare the owner field, causing the invalidation to be skipped. Strip
+    // the implicit casts to recover the derived object's type so that
+    // recordHasGslOwnerField sees the field. (Matches the most-derived-receiver
+    // handling used for self-referential field stores.)
+    QualType RecvTy = Args[0]->IgnoreImpCasts()->getType().getNonReferenceType();
+    bool OwnerReceiver = isGslOwnerType(RecvTy);
+    if ((OwnerReceiver || recordHasGslOwnerField(RecvTy)) &&
         !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
         invalidate(L->getOriginID());
