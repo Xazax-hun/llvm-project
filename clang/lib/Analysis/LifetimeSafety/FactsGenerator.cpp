@@ -1433,9 +1433,33 @@ void FactsGenerator::handleGslAggregateInit(
   OriginNode *Dst = getRValueOrigins(AggExpr, getOriginNode(*AggExpr));
   if (!Dst)
     return;
+  // Map initializers to fields so a reference member can be handled specially.
+  // The inits are in field order (Sema reorders designated inits and fills
+  // defaults); this alignment holds for a non-union record without base
+  // subobjects (a base would prepend an init with no matching field).
+  const CXXRecordDecl *RD = AggExpr->getType()->getAsCXXRecordDecl();
+  bool CanZipFields = RD && !RD->isUnion() && RD->getNumBases() == 0;
+  RecordDecl::field_iterator FieldIt =
+      RD ? RD->field_begin() : RecordDecl::field_iterator();
+  RecordDecl::field_iterator FieldEnd =
+      RD ? RD->field_end() : RecordDecl::field_iterator();
   bool First = true;
   for (const Expr *Init : Inits) {
-    OriginNode *InitNode = getRValueOrigins(Init, getOriginNode(*Init));
+    const FieldDecl *FD =
+        (CanZipFields && FieldIt != FieldEnd) ? *FieldIt : nullptr;
+    if (RD && FieldIt != FieldEnd)
+      ++FieldIt;
+    // A reference member (`const T& r`) binds to the initializer's lvalue
+    // storage -- a borrow of it, like `&lvalue`. The init expression is the
+    // referent glvalue, so getRValueOrigins would peel its storage origin away
+    // (a non-pointer referent then has no rvalue origin and the borrow is
+    // dropped, silently when a sibling member's loan masks the empty origin).
+    // Use the unpeeled storage origin instead, so the leaf view carries the
+    // reference's borrow.
+    bool RefMember = FD && FD->getType()->isReferenceType();
+    OriginNode *InitNode = RefMember
+                               ? getOriginNode(*Init)
+                               : getRValueOrigins(Init, getOriginNode(*Init));
     // Only flow an initializer of matching indirection depth (a borrow the leaf
     // object holds); a non-pointer member (`unsigned n`) has no origin, and a
     // depth mismatch is handled by the multi-level-indirection rule elsewhere.
