@@ -829,6 +829,16 @@ so a borrow that dangles only along an exception path may be missed.
   }];
 }
 
+def LifetimeSafetyInlineAsm : DiagGroup<"lifetime-safety-inline-asm"> {
+  code Documentation = [{
+Warns on an inline assembly statement ('asm(...)' / '__asm'). The analysis cannot
+model what the assembly does: an output operand can reseat a pointer to anything
+(so a stale borrow on it would be wrongly trusted), and an input or
+memory-clobbering operand can move or invalidate a borrow, with no visible flow.
+The construct is rejected under the safe programming model.
+  }];
+}
+
 def LifetimeSafetyTypePunning : DiagGroup<"lifetime-safety-type-punning"> {
   code Documentation = [{
 Warns on a union member access or a 'reinterpret_cast'. Both reinterpret the
@@ -973,6 +983,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyNakedDelete,
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
+                                         LifetimeSafetyInlineAsm,
                                          LifetimeSafetyTypePunning,
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyPointerOfIndirection,

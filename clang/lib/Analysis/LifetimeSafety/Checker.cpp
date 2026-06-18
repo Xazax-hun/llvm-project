@@ -894,6 +894,10 @@ public:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportException(UCF->getConstructLoc());
       break;
+    case UntrackedConstructReason::InlineAsm:
+      if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
+        SemaHelper->reportInlineAsm(UCF->getConstructLoc());
+      break;
     case UntrackedConstructReason::ViewOnMutableGlobal:
       SemaHelper->reportViewOnMutableGlobal(E);
       break;

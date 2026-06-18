@@ -297,6 +297,11 @@ public:
   // so a borrow that dangles only along an exception path can be missed.
   virtual void reportException(SourceLocation Loc) {}
 
+  // Reports an inline assembly statement. The analysis cannot model what the asm
+  // does -- an output operand can reseat a pointer, and an input/memory clobber
+  // can move or invalidate a borrow -- so it is rejected.
+  virtual void reportInlineAsm(SourceLocation Loc) {}
+
   // Reports a member access on a union. Different union members alias the same
   // storage, so a borrow into one member can be invalidated by writing another;
   // the analysis keys borrows by field identity and does not model this.

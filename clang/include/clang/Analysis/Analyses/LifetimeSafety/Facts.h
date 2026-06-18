@@ -474,6 +474,12 @@ enum class UntrackedConstructReason : uint8_t {
   /// it should carry is silently dropped. Flagging it keeps the soundness model
   /// from silently failing on a construct it does not model.
   UnmodeledExpr,
+  /// An inline assembly statement (`asm(...)`). The analysis does not model what
+  /// the asm does: an output operand can reseat a pointer to anything, and an
+  /// input/memory-clobbering operand can move or invalidate a borrow, with no
+  /// visible flow. A stale loan on an asm-reseated pointer would otherwise be
+  /// trusted. The construct is rejected under the safe programming model.
+  InlineAsm,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

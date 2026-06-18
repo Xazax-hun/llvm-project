@@ -1648,6 +1648,21 @@ void FactsGenerator::VisitStmtExpr(const StmtExpr *SE) {
   handleUse(SE);
 }
 
+void FactsGenerator::VisitGCCAsmStmt(const GCCAsmStmt *AS) {
+  // Inline assembly is opaque to the analysis: an output operand can reseat a
+  // pointer to anything (so a stale loan on it would be wrongly trusted), and an
+  // input or memory-clobbering operand can move or invalidate a borrow, with no
+  // modeled flow. Reject the construct under the safe programming model.
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      UntrackedConstructReason::InlineAsm, AS->getAsmLoc()));
+}
+
+void FactsGenerator::VisitMSAsmStmt(const MSAsmStmt *AS) {
+  // Microsoft-style `__asm` blocks are equally opaque; reject them too.
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      UntrackedConstructReason::InlineAsm, AS->getAsmLoc()));
+}
+
 void FactsGenerator::handleTryStatements() {
   const Stmt *Body = AC.getBody();
   if (!Body)

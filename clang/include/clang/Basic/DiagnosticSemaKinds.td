@@ -11215,6 +11215,13 @@ def warn_lifetime_safety_exception
               "may be missed">,
       InGroup<LifetimeSafetyException>,
       DefaultIgnore;
+def warn_lifetime_safety_inline_asm
+    : Warning<"inline assembly is not modeled by lifetime safety analysis; an "
+              "output operand can reseat a pointer and an input or memory "
+              "clobber can move or invalidate a borrow, so a dangling use could "
+              "be missed">,
+      InGroup<LifetimeSafetyInlineAsm>,
+      DefaultIgnore;
 def warn_lifetime_safety_union
     : Warning<"union member access is not modeled by lifetime safety analysis; "
               "members alias the same storage, so a borrow into one member can "
