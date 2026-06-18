@@ -416,7 +416,18 @@ bool isGslOwnerOfIndirection(QualType QT,
         isGslOwnerOfIndirection(T, Cache))
       return true;
     const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-    return RD && RD->hasDefinition() && isUnknownOwnershipType(T, Cache);
+    if (!RD || !RD->hasDefinition())
+      return false;
+    // A callable wrapper (std::function / std::move_only_function) or a lambda
+    // can capture a borrow, which the analysis cannot track per element (the
+    // capture is type-erased). Treat it as an indirection so a container of such
+    // callables (e.g. std::vector<std::function<...>>) is rejected like a
+    // container of views -- otherwise a closure capturing a borrow stored into
+    // an element (via a braced init-list or a factory return, neither of which
+    // has a callable parameter to flag) is dropped silently.
+    if (isStdCallableWrapperType(RD) || RD->isLambda())
+      return true;
+    return isUnknownOwnershipType(T, Cache);
   };
   // A [[gsl::Owner(T)]] whose declared owned type T is itself an indirection
   // (e.g. struct [[gsl::Owner(std::string_view)]] S) holds a borrow it cannot
