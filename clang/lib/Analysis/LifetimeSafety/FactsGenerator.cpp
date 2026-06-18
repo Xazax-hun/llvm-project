@@ -2295,7 +2295,19 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
       continue;
     // Map the argument index to its declared parameter.
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
-    if (!PVD || !hasOrigins(PVD->getType()))
+    if (!PVD) {
+      // An argument passed through the C variadic ellipsis (`...`) has no
+      // declared parameter, so it cannot carry a lifetime annotation and the
+      // analysis cannot model where the callee stores it. A borrow passed this
+      // way escapes silently; reject it like an unannotated indirection
+      // parameter.
+      if (FD->isVariadic() && I >= FD->getNumParams() + IsInstance &&
+          hasOrigins(Args[I]->getType()))
+        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+            UntrackedConstructReason::UnannotatedIndirection, Args[I]));
+      continue;
+    }
+    if (!hasOrigins(PVD->getType()))
       continue;
     if (PVD->hasAttr<clang::LifetimeBoundAttr>() ||
         PVD->hasAttr<clang::NoEscapeAttr>() ||
