@@ -1558,9 +1558,19 @@ void FactsGenerator::VisitLambdaExpr(const LambdaExpr *LE) {
               Cap.getCapturedVar()->getType().getNonReferenceType()) >= 1)
         CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
             UntrackedConstructReason::LambdaRefCaptureIndirection, Init));
-    if (!Init)
-      continue;
-    OriginNode *InitNode = getOriginNode(*Init);
+    OriginNode *InitNode = nullptr;
+    if (Cap.getCaptureKind() == LCK_This) {
+      // A `[this]` capture stores a borrow of the enclosing object into the
+      // closure. Flow the `this` origin (which carries the object's loan) into
+      // the lambda so an escaping this-capturing closure is caught by the escape
+      // machinery -- and a co-captured benign loan cannot mask it. The `this`
+      // CXXThisExpr's own origin node is empty (the seeded loan lives on the
+      // dedicated this-origin), so use that directly.
+      if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+        InitNode = *ThisOrigins;
+    } else if (Init) {
+      InitNode = getOriginNode(*Init);
+    }
     if (!InitNode)
       continue;
     // FIXME: Consider flowing all origin levels once lambdas support more than

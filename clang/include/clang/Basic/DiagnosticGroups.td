@@ -1003,6 +1003,18 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyNoescape,
                                          LifetimeSafetyLifetimeboundViolation,
                                          LifetimeSafetyImmortalViolation,
+                                         // A borrow of `this`/a parameter that
+                                         // escapes (via return or a field) from
+                                         // an unannotated function is a soundness
+                                         // hole: the escape is real but the
+                                         // contract is undeclared, so callers
+                                         // cannot track it. The intra-TU
+                                         // lifetimebound suggestion marks exactly
+                                         // these unannotated escapes (including
+                                         // ones a return-type check misses, e.g.
+                                         // a closure capturing [this] returned by
+                                         // value), so it belongs in the model.
+                                         LifetimeSafetyIntraTUSuggestions,
                                          // An override that drops a 'noescape'
                                          // its overridden method advertises is a
                                          // soundness hole: callers dispatching

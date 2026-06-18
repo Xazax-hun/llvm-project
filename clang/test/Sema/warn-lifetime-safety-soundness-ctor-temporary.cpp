@@ -14,8 +14,9 @@
 // realistic such Box carries no lifetime annotation.)
 
 struct Box {
-  int *p;
-  Box(int *q) : p(q) {} // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}}
+  int *p; // expected-note {{escapes to this field}}
+  Box(int *q) : p(q) {} // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}} \
+                        // expected-warning {{parameter in intra-TU function should be marked [[clang::lifetimebound]]}}
 };
 
 int g_real;

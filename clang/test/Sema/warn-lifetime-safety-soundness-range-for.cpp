@@ -83,8 +83,9 @@ void vector_value_ctor() {
 // A gsl::Pointer (view) is not an STL container; building one from a pointer
 // captures it. The capture is modeled by GSL construction tracking, and the
 // unannotated parameter it flows from is still surfaced at the definition.
-std::string_view view_from_ptr(const char *p) { // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}}
-  return p;
+std::string_view view_from_ptr(const char *p) { // expected-warning {{parameter that can hold a borrow is not annotated for lifetime safety}} \
+                                                 // expected-warning {{parameter in intra-TU function should be marked [[clang::lifetimebound]]}}
+  return p; // expected-note {{param returned here}}
 }
 
 // A non-STL user type constructor is not exempt either.
