@@ -115,6 +115,33 @@ static const Loan *createLoan(FactManager &FactMgr, const CXXNewExpr *NE) {
   return FactMgr.getLoanMgr().createLoan(Path, NE);
 }
 
+/// `this->arr[i]` (and nested array subscripts, through parens/implicit casts)
+/// denotes the array member `this->arr`: all elements share the array's single
+/// origin, so a per-element access/store/mutation is one of the member itself.
+/// Peels array subscripts to the underlying lvalue and returns it as a
+/// MemberExpr (whose member type may be an array -- peel it with
+/// arrayElementType), or null. Centralizes array-element normalization for the
+/// AST-shape-based checks (const-subversion, self-referential store) so it is
+/// done once rather than at every site.
+static const MemberExpr *memberThroughArraySubscripts(const Expr *E) {
+  E = E->IgnoreParenImpCasts();
+  while (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+    const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
+    if (!Base->getType()->isArrayType())
+      break; // a subscript of a pointer is an ordinary indirection, not this.
+    E = Base;
+  }
+  return dyn_cast<MemberExpr>(E);
+}
+
+/// Peels array dimensions: `T[N]` / `T[N][M]` -> `T`. The element type a member
+/// access through array subscripts effectively yields.
+static QualType arrayElementType(QualType T) {
+  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
+    T = AT->getElementType();
+  return T;
+}
+
 /// Returns true if `QT` is a mutable [[gsl::Owner]] (peeling arrays): a borrow
 /// of such a field can be invalidated by reallocating it. A `const` owner can
 /// never be reallocated, so it is excluded.
@@ -825,11 +852,12 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     // handleConstSubversion; the `ptr->method()` arrow form is handled there.
     if (const auto *EnclMD = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
         EnclMD && EnclMD->isConst())
-      if (const auto *ME = dyn_cast<MemberExpr>(SubExpr->IgnoreParenImpCasts());
+      if (const auto *ME = memberThroughArraySubscripts(SubExpr);
           ME && isThisExpr(ME->getBase()))
         if (const auto *FieldD = dyn_cast<FieldDecl>(ME->getMemberDecl());
-            FieldD && FieldD->getType()->isPointerType() &&
-            isGslOwnerType(FieldD->getType()->getPointeeType()) &&
+            FieldD && arrayElementType(FieldD->getType())->isPointerType() &&
+            isGslOwnerType(
+                arrayElementType(FieldD->getType())->getPointeeType()) &&
             !isConstConsumed(UO, AC.getParentMap()))
           CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
               UntrackedConstructReason::ConstMethodIndirectMutation, UO));
@@ -1016,10 +1044,10 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // detection is loan-based (the checker intersects the stored value's loans
   // with the enclosing object's), so it sees borrows laundered through function
   // calls and is independent of the assignment's syntactic shape.
-  if (const auto *ME_LHS = dyn_cast<MemberExpr>(LHSExpr))
+  if (const auto *ME_LHS = memberThroughArraySubscripts(LHSExpr))
     if (const auto *LF = dyn_cast<FieldDecl>(ME_LHS->getMemberDecl());
-        LF && (isGslPointerType(LF->getType()) ||
-               LF->getType()->isPointerOrReferenceType())) {
+        LF && (isGslPointerType(arrayElementType(LF->getType())) ||
+               arrayElementType(LF->getType())->isPointerOrReferenceType())) {
       // Use the static type of the *receiver object* as the enclosing object,
       // not the type that declares the member. When the member lives in a base
       // class, `ME_LHS->getBase()` is the receiver implicitly cast to that base
@@ -2412,12 +2440,15 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
   if (!Method || Args.empty())
     return;
   // The receiver, after stripping the load of the pointer member, should be
-  // `this->m`.
-  const auto *ME = dyn_cast<MemberExpr>(Args[0]->IgnoreParenImpCasts());
+  // `this->m` (or `this->arr[i]`, which denotes the array member `this->arr`).
+  const auto *ME = memberThroughArraySubscripts(Args[0]);
   const FieldDecl *FieldD =
       ME && isThisExpr(ME->getBase())
           ? dyn_cast<FieldDecl>(ME->getMemberDecl())
           : nullptr;
+  // The effective member type (an array-of-pointer member hands out a pointer
+  // element).
+  QualType FieldTy = FieldD ? arrayElementType(FieldD->getType()) : QualType();
 
   // (1) Smart-pointer dereference: `operator->`/`operator*` on an owning
   // smart-pointer data member of `this`. `const` does not propagate through the
@@ -2425,7 +2456,7 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
   // are const.
   OverloadedOperatorKind OO = Method->getOverloadedOperator();
   if (OO == OO_Arrow || OO == OO_Star) {
-    if (!FieldD || !isGslOwnerType(FieldD->getType())) // owning smart pointer
+    if (!FieldD || !isGslOwnerType(FieldTy)) // owning smart pointer
       return;
     // The pointee must be an owner -- or transitively contain a mutable owner
     // field -- i.e. something a sibling accessor can hand out a borrow into
@@ -2454,8 +2485,8 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
   // is a mutation. (Const-method calls are read-only; the `*ptr` deref forms go
   // through VisitUnaryOperator.)
   if (Method->isInstance() && !Method->isConst() && !isa<CXXConstructorDecl>(FD) &&
-      FieldD && FieldD->getType()->isPointerType() &&
-      isGslOwnerType(FieldD->getType()->getPointeeType()))
+      FieldD && FieldTy->isPointerType() &&
+      isGslOwnerType(FieldTy->getPointeeType()))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::ConstMethodIndirectMutation, Call));
 }
