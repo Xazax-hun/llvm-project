@@ -552,17 +552,33 @@ static QualType findNestedOwnerOrPointerOfIndirectionImpl(
     IsPointer = true;
     return QT;
   }
-  const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
-      QT->getAsCXXRecordDecl());
-  if (!CTSD)
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
     return QualType();
   if (!Visited.insert(QT.getCanonicalType().getTypePtr()).second)
     return QualType();
-  for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray())
-    if (QualType Found =
-            findIndirectionInTemplateArg(Arg, Cache, Visited, IsPointer);
+  // Descend the template arguments of a non-owner aggregate such as
+  // std::pair/std::tuple/std::unique_ptr, whose arguments nothing else inspects.
+  if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
+    for (const TemplateArgument &Arg : CTSD->getTemplateArgs().asArray())
+      if (QualType Found =
+              findIndirectionInTemplateArg(Arg, Cache, Visited, IsPointer);
+          !Found.isNull())
+        return Found;
+  // Descend plain (non-template) data members: a user aggregate `struct Outer {
+  // Inner inner; }` whose member is itself (or transitively contains) an owner-/
+  // pointer-of-indirection is just as untrackable, but the field walk that flags
+  // the inner record's own definition is suppressed in system headers, so the
+  // borrow would slip when Outer is used (local/parameter/return/member).
+  for (const FieldDecl *F : RD->fields()) {
+    QualType FT = F->getType();
+    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+      FT = AT->getElementType();
+    if (QualType Found = findNestedOwnerOrPointerOfIndirectionImpl(
+            FT, Cache, Visited, IsPointer);
         !Found.isNull())
       return Found;
+  }
   return QualType();
 }
 
