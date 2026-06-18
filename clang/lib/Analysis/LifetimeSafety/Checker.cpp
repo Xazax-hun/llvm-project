@@ -193,7 +193,8 @@ private:
   llvm::DenseSet<const Expr *> ReportedSelfRefStores;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
   /// after the precise warnings are finalized.
-  llvm::SmallVector<std::pair<LoanID, const Stmt *>> PendingAssumedInval;
+  llvm::SmallVector<std::tuple<LoanID, const Stmt *, const Expr *>>
+      PendingAssumedInval;
   const LoanPropagationAnalysis &LoanPropagation;
   const MovedLoansAnalysis &MovedLoans;
   const LiveOriginsAnalysis &LiveOrigins;
@@ -462,6 +463,26 @@ public:
   /// This method identifies origins that are live at the point of invalidation
   /// and checks if they hold loans that are invalidated by the operation
   /// (e.g., iterators into a vector that is being pushed to).
+  // True if origin `OID` is a borrow *into* an object of record `ObjRD` (a
+  // view, or a raw pointer/reference whose pointee is some sub-buffer), as
+  // opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
+  // which a field mutation does not dangle, and which is how the object's own
+  // `this`/variable origin presents -- so this also excludes the receiver
+  // itself from being reported as a borrow into itself).
+  bool originBorrowsInto(OriginID OID, const CXXRecordDecl *ObjRD) const {
+    const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+    if (!Ty)
+      return false;
+    QualType QT(Ty, 0);
+    if (isGslPointerType(QT))
+      return true; // a view (string_view/span/iterator)
+    if (!QT->isPointerType() && !QT->isReferenceType())
+      return false;
+    const CXXRecordDecl *PointeeRD = QT->getPointeeType()->getAsCXXRecordDecl();
+    return !ObjRD || !PointeeRD ||
+           PointeeRD->getCanonicalDecl() != ObjRD->getCanonicalDecl();
+  }
+
   void checkInvalidation(const InvalidateOriginFact *IOF) {
     OriginID InvalidatedOrigin = IOF->getInvalidatedOrigin();
     /// Get loans directly pointing to the invalidated container
@@ -487,18 +508,7 @@ public:
     // opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
     // which a field mutation does not dangle).
     auto OriginBorrowsInto = [&](OriginID OID, const CXXRecordDecl *ObjRD) {
-      const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
-      if (!Ty)
-        return false;
-      QualType QT(Ty, 0);
-      if (isGslPointerType(QT))
-        return true; // a view (string_view/span/iterator)
-      if (!QT->isPointerType() && !QT->isReferenceType())
-        return false;
-      const CXXRecordDecl *PointeeRD =
-          QT->getPointeeType()->getAsCXXRecordDecl();
-      return !PointeeRD ||
-             PointeeRD->getCanonicalDecl() != ObjRD->getCanonicalDecl();
+      return originBorrowsInto(OID, ObjRD);
     };
     // For each live origin, check if it holds an invalidated loan and report.
     LivenessMap Origins = LiveOrigins.getLiveOriginsAt(IOF);
@@ -611,24 +621,48 @@ public:
       return false;
     };
     for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
+      // Among this origin's invalidated loans, prefer one with a precise anchor
+      // (an issuing expression or a placeholder parameter) so the diagnostic
+      // points at the borrow. Only if none exists fall back to the `$this`
+      // placeholder loan (a borrow laundered through a lifetimebound accessor of
+      // `this`, which carries neither anchor), reported at the use that keeps it
+      // live. The fallback applies only to a borrow *into* the object: the
+      // object's own `this` origin is a pointer *at* the whole object and is
+      // live throughout every method, so reporting it would fire at each
+      // self-mutation.
+      LoanID ReportLoan;
+      bool HaveReport = false;
+      const Expr *FallbackUse = nullptr;
       for (LoanID LiveLoanID : LoanPropagation.getLoans(OID, IOF)) {
         const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
         if (!IsInvalidated(L))
           continue;
-        // Only a loan with a reportable anchor (an issuing expression or a
-        // placeholder parameter) can produce a diagnostic; skip e.g. the `$this`
-        // placeholder loan, which carries neither.
-        if (!L->getIssuingExpr() &&
-            !L->getAccessPath().getAsPlaceholderParam())
-          continue;
-        // Report each invalidated view (origin) at most once per operation: a
-        // multi-level field borrow (`o.inner.s`) carries both the field loan
-        // and the enclosing-object loan, but it is a single captured value.
-        if (ReportedAssumedInval.insert({LiveLoanID.Value, IOF->getInvalidationStmt()})
-                .second)
-          PendingAssumedInval.push_back({LiveLoanID, IOF->getInvalidationStmt()});
-        break;
+        if (L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam()) {
+          // Precise anchor: prefer it and stop looking.
+          ReportLoan = LiveLoanID;
+          HaveReport = true;
+          FallbackUse = nullptr;
+          break;
+        }
+        if (!HaveReport &&
+            originBorrowsInto(OID,
+                              invalidatedObjectRecord(L->getAccessPath())))
+          if (const auto *UF =
+                  LiveInfo.CausingFact.dyn_cast<const UseFact *>()) {
+            ReportLoan = LiveLoanID;
+            HaveReport = true;
+            FallbackUse = UF->getUseExpr();
+          }
       }
+      if (!HaveReport)
+        continue;
+      // Report each invalidated view (origin) at most once per operation: a
+      // multi-level field borrow (`o.inner.s`) carries both the field loan
+      // and the enclosing-object loan, but it is a single captured value.
+      if (ReportedAssumedInval.insert({ReportLoan.Value, IOF->getInvalidationStmt()})
+              .second)
+        PendingAssumedInval.push_back(
+            {ReportLoan, IOF->getInvalidationStmt(), FallbackUse});
     }
   }
 
@@ -637,7 +671,7 @@ public:
   void issueAssumedInvalidations() {
     if (!SemaHelper)
       return;
-    for (auto &[LID, OperationStmt] : PendingAssumedInval) {
+    for (auto &[LID, OperationStmt, FallbackUse] : PendingAssumedInval) {
       // If this borrow is already reported as a known invalidation, the
       // lower-confidence assumed warning would be redundant.
       auto It = FinalWarningsMap.find(LID);
@@ -649,6 +683,10 @@ public:
       else if (const ParmVarDecl *PVD =
                    L->getAccessPath().getAsPlaceholderParam())
         SemaHelper->reportAssumedInvalidation(PVD, OperationStmt);
+      else if (FallbackUse)
+        // The `$this` placeholder loan (laundered through a lifetimebound
+        // accessor of `this`): anchor at the use that keeps the borrow live.
+        SemaHelper->reportAssumedInvalidation(FallbackUse, OperationStmt);
     }
   }
 
@@ -991,7 +1029,7 @@ public:
           continue;
         // Reuse the assumed-invalidation reporting (the operation is the call).
         if (ReportedAssumedInval.insert({BL.Value, Op}).second)
-          PendingAssumedInval.push_back({BL, Op});
+          PendingAssumedInval.push_back({BL, Op, /*FallbackUse=*/nullptr});
         break; // one report per captured value
       }
     }
@@ -1170,6 +1208,12 @@ public:
             // Use-after-invalidation of a parameter.
             SemaHelper->reportUseAfterInvalidation(
                 InvalidatedPVD, UF->getUseExpr(), Warning.InvalidatedByExpr);
+          else
+            // A loan with no natural anchor -- the `$this` placeholder loan from
+            // a lifetimebound accessor of `this`, invalidated by a self-mutation
+            // -- is anchored at the use that keeps the borrow live.
+            SemaHelper->reportUseAfterInvalidation(
+                UF->getUseExpr(), UF->getUseExpr(), Warning.InvalidatedByExpr);
 
         } else
           // Scope-based expiry (use-after-scope).

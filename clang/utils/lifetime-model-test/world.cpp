@@ -138,13 +138,18 @@ void World::collideBulletsAsteroids() {
     std::uint32_t hitSlot = 0;
     for (std::int32_t dy = -1; dy <= 1 && !found; ++dy) {
       for (std::int32_t dx = -1; dx <= 1 && !found; ++dx) {
-        // `entries` is a view into the grid (bound to grid_); the scan never
-        // mutates anything, so it stays valid throughout.
+        // `entries` is a view into the grid (bound to grid_). The scan is
+        // read-only, so access the asteroid pool through a const reference: the
+        // const `aliveAt`/`at` overloads are not assumed to mutate. A non-const
+        // member call (the mutable `at`) is conservatively assumed to mutate
+        // `this`, which would invalidate this grid view -- a borrow into a
+        // sibling member of the same object.
+        const auto &asteroids = asteroids_;
         std::span<const std::uint32_t> entries = grid_.cell(cx + dx, cy + dy);
         for (std::uint32_t slot : entries) {
-          if (!asteroids_.aliveAt(slot))
+          if (!asteroids.aliveAt(slot))
             continue;
-          const Asteroid &a = asteroids_.at(slot);
+          const Asteroid &a = asteroids.at(slot);
           Vec2 d = toroidalDelta(bpos, a.pos, w, h);
           if (length2(d) <= a.radius * a.radius) {
             hitSlot = slot;
@@ -172,11 +177,15 @@ void World::collideShipAsteroids() {
   bool hit = false;
   for (std::int32_t dy = -1; dy <= 1 && !hit; ++dy) {
     for (std::int32_t dx = -1; dx <= 1 && !hit; ++dx) {
+      // Read-only scan: const-access the asteroid pool (see
+      // collideBulletsAsteroids) so the const `aliveAt`/`at` overloads are
+      // selected and the grid view stays valid across the scan.
+      const auto &asteroids = asteroids_;
       std::span<const std::uint32_t> entries = grid_.cell(cx + dx, cy + dy);
       for (std::uint32_t slot : entries) {
-        if (!asteroids_.aliveAt(slot))
+        if (!asteroids.aliveAt(slot))
           continue;
-        const Asteroid &a = asteroids_.at(slot);
+        const Asteroid &a = asteroids.at(slot);
         Vec2 d = toroidalDelta(ship_.pos, a.pos, w, h);
         const float rr = a.radius + kShipRadius;
         if (length2(d) <= rr * rr) {
