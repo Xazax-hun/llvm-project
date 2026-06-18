@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify %s
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-owner-of-indirection -verify %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify=expected,soundness %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-owner-of-indirection -verify=expected %s
 
 // Under the safe programming model a [[gsl::Owner]] container whose element
 // type is an indirection (a pointer, reference, or [[gsl::Pointer]]) is
@@ -90,7 +90,7 @@ void owner_of_unknown_ownership() {
 // Annotated element types are trusted (the model does not verify an owner
 // actually manages its memory), so they are NOT rejected here.
 struct [[gsl::Owner]] AnnotatedOwner {
-  std::string_view sv;
+  std::string_view sv; // soundness-warning {{public data member 'sv' of a [[gsl::Owner]] type can hold a borrow}}
 };
 struct [[gsl::Pointer]] AnnotatedPointer {
   std::string_view sv;
@@ -116,10 +116,10 @@ void owner_of_incomplete() {
 // indirections. This also makes an owner *of* such a type (e.g.
 // unique_ptr<OwnsView>) rejected via the recursive element check.
 struct [[gsl::Owner(std::string_view)]] OwnsView {
-  std::string_view sv;
+  std::string_view sv; // soundness-warning {{public data member 'sv' of a [[gsl::Owner]] type can hold a borrow}}
 };
 struct [[gsl::Owner(int *)]] OwnsPtr {
-  int *p;
+  int *p; // soundness-warning {{public data member 'p' of a [[gsl::Owner]] type can hold a borrow}}
 };
 // As a parameter (carries a placeholder loan, so no lost-loan noise under the
 // umbrella) and as a container element.

@@ -9,7 +9,8 @@
 // was silent (a real use-after-scope). All spellings are now treated alike.
 
 struct [[gsl::Owner]] Holder {
-  const int *p = nullptr; // expected-note 3 {{this field dangles}}
+  const int *p = nullptr; // expected-note 3 {{this field dangles}} \
+                          // expected-warning {{public data member 'p' of a [[gsl::Owner]] type can hold a borrow}}
 
   // (*this).p : deref of this.
   int via_deref() {
@@ -41,7 +42,8 @@ struct [[gsl::Owner]] Holder {
 
 // Base-class field stored through a derived-to-base cast of `this`.
 struct [[gsl::Owner]] Base {
-  const int *q = nullptr; // expected-note 2 {{this field dangles}}
+  const int *q = nullptr; // expected-note 2 {{this field dangles}} \
+                          // expected-warning {{public data member 'q' of a [[gsl::Owner]] type can hold a borrow}}
 };
 struct [[gsl::Owner]] Derived : Base {
   // static_cast<Base*>(this)->q

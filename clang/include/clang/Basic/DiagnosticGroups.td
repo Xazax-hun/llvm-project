@@ -896,6 +896,21 @@ hold a borrow.
   }];
 }
 
+def LifetimeSafetyOwnerPublicPointer
+    : DiagGroup<"lifetime-safety-owner-public-pointer"> {
+  code Documentation = [{
+Warns on a public data member of a [[gsl::Owner]] type that can hold a borrow (a
+raw pointer, reference, or [[gsl::Pointer]] view). An owner is expected to
+encapsulate the resource it owns, and lifetime safety treats an owner's contents
+as opaque (the owner is a leaf in the origin tree). A public borrow-holding
+member lets external code store a borrow into it that the analysis cannot track,
+so it can dangle undetected -- the type is not a sound owner. Make the member
+private (an owner should encapsulate its resource), or use a [[gsl::Pointer]]
+(view) type if the object is meant to hold a borrow. Rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetySelfReferential
     : DiagGroup<"lifetime-safety-self-referential"> {
   code Documentation = [{
@@ -964,6 +979,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyViewOnMutableGlobal,
                                          LifetimeSafetyConstSubversion,
                                          LifetimeSafetyOwnerCapture,
+                                         LifetimeSafetyOwnerPublicPointer,
                                          LifetimeSafetySelfReferential,
                                          LifetimeSafetyGlobalCapture,
                                          LifetimeSafetyCtorCapture,

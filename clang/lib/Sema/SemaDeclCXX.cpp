@@ -7122,6 +7122,30 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
         Diag(F->getLocation(), diag::warn_lifetime_safety_mutable_field)
             << F << F->getSourceRange();
 
+  // Lifetime safety (safe programming model): a [[gsl::Owner]] is expected to
+  // encapsulate the resource it owns. A *public* data member that can hold a
+  // borrow (a raw pointer, reference, or [[gsl::Pointer]] view) breaks that
+  // abstraction: external code can store a borrow into it, and the analysis
+  // treats an owner's contents as opaque (it is a leaf in the origin tree), so
+  // such a stored borrow is not tracked and can dangle silently -- the type is
+  // not a sound owner. A real owner keeps its resource handle private.
+  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
+      !getDiagnostics().isIgnored(
+          diag::warn_lifetime_safety_owner_public_pointer,
+          Record->getLocation()) &&
+      lifetimes::isGslOwnerType(Context.getCanonicalTagType(Record)))
+    for (const auto *F : Record->fields()) {
+      if (F->getAccess() != AS_public)
+        continue;
+      QualType FT = F->getType();
+      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+        FT = AT->getElementType();
+      if ((FT->isPointerType() && !FT->isFunctionPointerType()) ||
+          FT->isReferenceType() || lifetimes::isGslPointerType(FT))
+        Diag(F->getLocation(), diag::warn_lifetime_safety_owner_public_pointer)
+            << F << F->getSourceRange();
+    }
+
   // Lifetime safety (safe programming model): a data member whose type is an
   // owner-of-indirection (e.g. std::vector<std::string_view>, or
   // std::unique_ptr<T> where T holds a borrow) or a view-of-indirection is not

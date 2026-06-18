@@ -11271,6 +11271,14 @@ def warn_lifetime_safety_owner_captures_borrow
               "tracked">,
       InGroup<LifetimeSafetyOwnerCapture>,
       DefaultIgnore;
+def warn_lifetime_safety_owner_public_pointer
+    : Warning<"public data member %0 of a [[gsl::Owner]] type can hold a borrow; "
+              "an owner should encapsulate its resource, and lifetime safety "
+              "treats an owner's contents as opaque, so a borrow stored through "
+              "this member is not tracked and can dangle (make it private, or "
+              "use a [[gsl::Pointer]] view type to hold a borrow)">,
+      InGroup<LifetimeSafetyOwnerPublicPointer>,
+      DefaultIgnore;
 def warn_lifetime_safety_ctor_captures_borrow
     : Warning<"'lifetime_capture_by(this)' on a constructor is not supported by "
               "lifetime safety; annotate the parameter with "
