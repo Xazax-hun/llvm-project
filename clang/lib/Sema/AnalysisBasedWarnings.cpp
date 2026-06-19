@@ -2910,17 +2910,15 @@ static void
 LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
                          clang::lifetimes::LifetimeSafetyStats &LSStats) {
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyTUAnalysis");
-  CallGraph CG;
-  CG.addToCallGraph(TU);
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
-  for (auto *Node : llvm::post_order(&CG)) {
-    const clang::FunctionDecl *CanonicalFD =
-        dyn_cast_or_null<clang::FunctionDecl>(Node->getDecl());
-    if (!CanonicalFD)
-      continue;
-    const FunctionDecl *FD = CanonicalFD->getDefinition();
-    if (!FD)
-      continue;
+
+  // Analyze a single function definition. Tracks which canonical decls have
+  // already been analyzed so each is analyzed at most once (a function can be
+  // reached both by the call-graph walk and the supplementary sweep below).
+  llvm::SmallPtrSet<const Decl *, 32> Analyzed;
+  auto Analyze = [&](const FunctionDecl *FD) {
+    if (!FD || !Analyzed.insert(FD->getCanonicalDecl()).second)
+      return;
     AnalysisDeclContext AC(nullptr, FD);
     AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
     AC.getCFGBuildOptions().AddLifetime = true;
@@ -2934,7 +2932,36 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
       // No CFG: surface the skip so it is not a silent gap in coverage.
       SemaHelper.reportAnalysisBailout(FD,
                                        lifetimes::BailoutReason::CFGUnavailable);
+  };
+
+  // Primary pass: walk the call graph in post order so a callee is analyzed
+  // before its callers, making a callee's inferred annotations visible.
+  CallGraph CG;
+  CG.addToCallGraph(TU);
+  for (auto *Node : llvm::post_order(&CG)) {
+    const auto *CanonicalFD =
+        dyn_cast_or_null<clang::FunctionDecl>(Node->getDecl());
+    if (!CanonicalFD)
+      continue;
+    Analyze(CanonicalFD->getDefinition());
   }
+
+  // Supplementary sweep: the call graph reaches functions only through
+  // declaration traversal and the bodies of functions it has already added; it
+  // does not descend into statements such as a namespace-scope variable
+  // initializer (CallGraph::TraverseStmt is a no-op). A lambda call operator
+  // defined in such an initializer is therefore never added to the graph, and
+  // a real lifetime bug in its body would be a silent coverage gap. Sweep every
+  // callable in the TU and analyze any the call graph missed. These are not
+  // call-graph reachable from the analyzed callers, so their (absence of)
+  // ordering does not affect inference visibility.
+  CallableVisitor(
+      [&](const Decl *D) {
+        if (const auto *FD = dyn_cast<FunctionDecl>(D))
+          Analyze(FD);
+      },
+      TU->getOwningModule())
+      .TraverseTranslationUnitDecl(TU);
 }
 
 static bool shouldRunUnsafeBufferUsageAnalysis(const Sema &S,
