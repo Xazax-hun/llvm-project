@@ -333,7 +333,8 @@ public:
   // (e.g. 'std::string_view sv = some_global_string;'). The global can be
   // mutated elsewhere -- invalidating the view -- which the intra-procedural
   // analysis cannot track.
-  virtual void reportViewOnMutableGlobal(const Expr *E) {}
+  virtual void reportViewOnMutableGlobal(SourceLocation Loc, QualType ViewTy,
+                                         SourceRange Range) {}
 
   // Reports a `const` member function that mutates an owner reached through the
   // pointee of an owning smart-pointer data member. `const` does not protect the

@@ -825,9 +825,11 @@ public:
   /// accessor), so this loan-based pass covers the raw pointer/reference forms
   /// and the GSL view forms uniformly. A pointer *at* the object (`&g`) is not a
   /// borrow into its contents and stays valid, so it is excluded.
+  ///
+  /// `OID` is the borrowing value's origin; `Loc`/`Range` anchor the diagnostic.
   void flagBorrowFromMutableGlobal(OriginID OID, ProgramPoint PP,
-                                   const Expr *Anchor) {
-    if (!SemaHelper || !Anchor)
+                                   SourceLocation Loc, SourceRange Range) {
+    if (!SemaHelper || Loc.isInvalid())
       return;
     // A raw pointer/reference value, or a gsl::Pointer view.
     const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
@@ -855,9 +857,9 @@ public:
           Pointee.getCanonicalType().getUnqualifiedType() ==
               VD->getType().getCanonicalType().getUnqualifiedType())
         continue; // pointer/reference AT the object, not into it
-      if (!ReportedMutableGlobalLocs.insert(Anchor->getExprLoc()).second)
+      if (!ReportedMutableGlobalLocs.insert(Loc).second)
         return;
-      SemaHelper->reportViewOnMutableGlobal(Anchor);
+      SemaHelper->reportViewOnMutableGlobal(Loc, ValueTy, Range);
       return;
     }
   }
@@ -869,24 +871,41 @@ public:
     // owner->view conversion at a view's construction is itself a use whose
     // expression is implicit-wrapped; skip it so the borrow is reported at the
     // real use, not twice (once at construction, once at the use).
-    if (UF->isImplicit())
-      return;
     const Expr *Use = UF->getUseExpr();
     if (!Use)
       return;
     if (const OriginNode *OL = UF->getUsedOrigins())
-      flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use);
+      flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use->getExprLoc(),
+                                  Use->getSourceRange());
   }
 
-  /// The escape (return) form: `int *f() { return &g[0]; }`, or a view return
-  /// `std::string_view f() { return g_table[i]; }`. A view return is wrapped in
-  /// an implicit owner->view conversion, so strip to the underlying borrow
-  /// expression for a stable, precise report location.
+  /// The escape forms. A return -- `int *f() { return &g[0]; }`, or a view
+  /// return `std::string_view f() { return g_table[i]; }` (the latter wrapped in
+  /// an implicit owner->view conversion, stripped for a precise location). Also
+  /// a store into a field or global: a view cached into the member of a
+  /// [[gsl::Owner]], or assigned to global storage, borrows from the mutable
+  /// global just the same -- and there is no later *use* of it in this function
+  /// (the dangling read is elsewhere, through the owner's opaque member), so the
+  /// escape is the only point the borrow is visible. Anchored at the
+  /// field/global declaration since the store expression is not available at the
+  /// function-exit escape point.
   void checkBorrowFromMutableGlobal(const OriginEscapesFact *OEF) {
+    OriginID OID = OEF->getEscapedOriginID();
     if (const auto *RE = dyn_cast<ReturnEscapeFact>(OEF)) {
       const Expr *Ret = RE->getReturnExpr();
-      flagBorrowFromMutableGlobal(OEF->getEscapedOriginID(), OEF,
-                                  Ret ? Ret->IgnoreImplicit() : nullptr);
+      if (Ret)
+        Ret = Ret->IgnoreImplicit();
+      flagBorrowFromMutableGlobal(
+          OID, OEF, Ret ? Ret->getExprLoc() : SourceLocation(),
+          Ret ? Ret->getSourceRange() : SourceRange());
+    } else if (const auto *FE = dyn_cast<FieldEscapeFact>(OEF)) {
+      const FieldDecl *FD = FE->getFieldDecl();
+      flagBorrowFromMutableGlobal(OID, OEF, FD->getLocation(),
+                                  FD->getSourceRange());
+    } else if (const auto *GE = dyn_cast<GlobalEscapeFact>(OEF)) {
+      const VarDecl *VD = GE->getGlobal();
+      flagBorrowFromMutableGlobal(OID, OEF, VD->getLocation(),
+                                  VD->getSourceRange());
     }
   }
 
@@ -938,7 +957,11 @@ public:
         SemaHelper->reportInlineAsm(UCF->getConstructLoc());
       break;
     case UntrackedConstructReason::ViewOnMutableGlobal:
-      SemaHelper->reportViewOnMutableGlobal(E);
+      // Currently the view-on-mutable-global diagnostic is emitted loan-based
+      // (checkBorrowFromMutableGlobal), not via this fact; kept for completeness.
+      if (E)
+        SemaHelper->reportViewOnMutableGlobal(E->getExprLoc(), E->getType(),
+                                              E->getSourceRange());
       break;
     case UntrackedConstructReason::ConstMethodIndirectMutation:
       SemaHelper->reportConstMethodIndirectMutation(E);

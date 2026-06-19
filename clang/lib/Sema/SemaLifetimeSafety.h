@@ -653,9 +653,10 @@ public:
         << (ReportType.isNull() ? E->getType() : ReportType)
         << E->getSourceRange();
   }
-  void reportViewOnMutableGlobal(const Expr *E) override {
-    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_view_on_mutable_global)
-        << E->getType() << E->getSourceRange();
+  void reportViewOnMutableGlobal(SourceLocation Loc, QualType ViewTy,
+                                 SourceRange Range) override {
+    S.Diag(Loc, diag::warn_lifetime_safety_view_on_mutable_global)
+        << ViewTy << Range;
   }
   void reportConstMethodIndirectMutation(const Expr *E) override {
     S.Diag(E->getExprLoc(),

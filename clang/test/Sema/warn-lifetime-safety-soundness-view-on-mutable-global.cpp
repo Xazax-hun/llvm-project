@@ -79,4 +79,42 @@ void element_of_local() {
   (void)v; // no-warning (local, not a global)
 }
 
+// A view cached into the member of a [[gsl::Owner]] still borrows from the
+// mutable global, but the owner's contents are opaque to the use/escape pass and
+// the dangling read happens in another function (through the owner's member),
+// which the intra-procedural analysis cannot follow. The borrow is caught
+// loan-based when the view member escapes at function exit still holding a loan
+// rooted at the global; the diagnostic anchors at the member declaration (the
+// store expression is not available at the escape point).
+
+struct [[gsl::Owner]] CachingOwner {
+private:
+  std::string_view cache; // expected-warning {{borrows from a mutable global or static object}}
+
+public:
+  void refresh() { cache = g_str; }
+};
+
+// The same for a view cached from an ELEMENT of a global container. Here the
+// element reference `g_table[i]` (a `const std::string &`) is itself a borrow
+// into the global, reported at the use, in addition to the member escape.
+struct [[gsl::Owner]] CachingOwner2 {
+private:
+  std::string_view cache; // expected-warning {{borrows from a mutable global or static object}}
+
+public:
+  void refresh(int i) { cache = g_table[i]; } // expected-warning {{borrows from a mutable global or static object}}
+};
+
+// Negative: caching a view of a CONST global into an owner member is safe.
+struct [[gsl::Owner]] CachingOwnerConst {
+private:
+  std::string_view cache; // no-warning
+
+public:
+  void refresh() { cache = g_const; }
+};
+
+
+
 
