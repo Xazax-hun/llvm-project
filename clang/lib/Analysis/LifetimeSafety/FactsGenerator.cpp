@@ -15,6 +15,7 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/ParentMap.h"
+#include "clang/AST/StmtObjC.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
@@ -1641,13 +1642,25 @@ void FactsGenerator::handleTryStatements() {
     const Stmt *S = Worklist.pop_back_val();
     if (!S || isa<LambdaExpr>(S))
       continue;
+    // Any construct that introduces exception-handling / unwinding control flow
+    // the analysis does not model. The handler resumes after the stack has
+    // unwound (with destructors having run), an edge the CFG does not carry, so
+    // a borrow that dangles only along that path would be silently missed.
+    // This mirrors VisitCXXThrowExpr for bare C++ `throw`, but is spelled as an
+    // AST walk so it also covers constructs that may not surface as their own
+    // CFG element: C++ `try`, Objective-C `@try`/`@throw`, and SEH `__try`.
+    SourceLocation ExcLoc;
     if (const auto *TS = dyn_cast<CXXTryStmt>(S))
-      // A `try`/`catch` introduces exception-handling control flow that the
-      // analysis does not model (the handler resumes after the stack has
-      // unwound, with destructors having run). Surface it so a dangling borrow
-      // along a handler path is not silently missed.
+      ExcLoc = TS->getTryLoc();
+    else if (const auto *OT = dyn_cast<ObjCAtTryStmt>(S))
+      ExcLoc = OT->getAtTryLoc();
+    else if (const auto *OT = dyn_cast<ObjCAtThrowStmt>(S))
+      ExcLoc = OT->getThrowLoc();
+    else if (const auto *ST = dyn_cast<SEHTryStmt>(S))
+      ExcLoc = ST->getTryLoc();
+    if (ExcLoc.isValid())
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::Exception, TS->getTryLoc()));
+          UntrackedConstructReason::Exception, ExcLoc));
     Worklist.append(S->child_begin(), S->child_end());
   }
 }
