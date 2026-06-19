@@ -14885,8 +14885,19 @@ void Sema::addLifetimeBoundToImplicitThis(CXXMethodDecl *MD) {
   QualType AttributedType =
       Context.getAttributedType(Attr, MethodType, MethodType);
   TypeLocBuilder TLB;
-  if (TypeSourceInfo *TSI = MD->getTypeSourceInfo())
+  // The AttributedTypeLoc pushed below wraps `MethodType` (its modified type),
+  // so the TypeLoc beneath it must have exactly that type. Reuse the method's
+  // existing TypeLoc only when it matches; otherwise synthesize a trivial one.
+  // They diverge for a deduced (`auto`) return type -- the source info keeps the
+  // written `auto` while getType() is the deduced type -- which previously
+  // tripped the TypeLocBuilder invariant when this ran during inference.
+  TypeSourceInfo *TSI = MD->getTypeSourceInfo();
+  if (TSI && TSI->getType() == MethodType)
     TLB.pushFullCopy(TSI->getTypeLoc());
+  else
+    TLB.pushFullCopy(
+        Context.getTrivialTypeSourceInfo(MethodType, MD->getLocation())
+            ->getTypeLoc());
   AttributedTypeLoc TyLoc = TLB.push<AttributedTypeLoc>(AttributedType);
   TyLoc.setAttr(Attr);
   MD->setType(AttributedType);
