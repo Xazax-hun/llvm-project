@@ -1397,21 +1397,30 @@ void FactsGenerator::handleGslAggregateInit(
   if (!Dst)
     return;
   // Map initializers to fields so a reference member can be handled specially.
-  // The inits are in field order (Sema reorders designated inits and fills
-  // defaults); this alignment holds for a non-union record without base
-  // subobjects (a base would prepend an init with no matching field).
+  // The inits are in subobject order: base-subobject initializers first (in
+  // base declaration order), then fields (Sema reorders designated inits and
+  // fills defaults). An aggregate's bases are always public and non-virtual, so
+  // the leading `getNumBases()` inits are the bases; skip past them to align the
+  // field iterator. (Brace elision only affects nested subaggregate members,
+  // not this base/field split.)
   const CXXRecordDecl *RD = AggExpr->getType()->getAsCXXRecordDecl();
-  bool CanZipFields = RD && !RD->isUnion() && RD->getNumBases() == 0;
+  bool CanZipFields = RD && !RD->isUnion();
+  unsigned NumBaseInits = CanZipFields ? RD->getNumBases() : 0;
   RecordDecl::field_iterator FieldIt =
       RD ? RD->field_begin() : RecordDecl::field_iterator();
   RecordDecl::field_iterator FieldEnd =
       RD ? RD->field_end() : RecordDecl::field_iterator();
   bool First = true;
+  unsigned Index = 0;
   for (const Expr *Init : Inits) {
-    const FieldDecl *FD =
-        (CanZipFields && FieldIt != FieldEnd) ? *FieldIt : nullptr;
-    if (RD && FieldIt != FieldEnd)
+    // A base-subobject initializer has no matching field; flow it as an rvalue
+    // (a base may itself be a [[gsl::Pointer]] carrying a borrow) without
+    // advancing the field iterator.
+    const FieldDecl *FD = nullptr;
+    if (Index++ >= NumBaseInits && CanZipFields && FieldIt != FieldEnd) {
+      FD = *FieldIt;
       ++FieldIt;
+    }
     // A reference member (`const T& r`) binds to the initializer's lvalue
     // storage -- a borrow of it, like `&lvalue`. The init expression is the
     // referent glvalue, so getRValueOrigins would peel its storage origin away

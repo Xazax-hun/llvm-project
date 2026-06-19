@@ -63,3 +63,34 @@ struct [[gsl::Pointer]] HolderOK {
     return v.p[0]; // no-warning
   }
 };
+
+//===----------------------------------------------------------------------===//
+// Reference members and base subobjects.
+//===----------------------------------------------------------------------===//
+
+// A reference member binds to the initializer's storage (a borrow of it). The
+// init expression is the referent glvalue, so it must use the unpeeled origin;
+// otherwise the borrow is dropped. With a base subobject present, the field
+// iterator must skip the leading base initializer to still recognize the
+// reference field -- otherwise the borrow was silently dropped and, masked by a
+// sibling pointer member's valid loan, the dangling reference was missed.
+int g_ok = 99;
+struct Base {};
+struct [[gsl::Pointer]] RefView : Base {
+  const int *p;
+  const int &r;
+};
+
+const int &ref_with_base_dangles() {
+  int local = 5;
+  RefView v{Base{}, &g_ok, local}; // expected-warning {{stack memory associated with local variable 'local' is returned}}
+  return v.r;                      // expected-note {{returned here}}
+}
+
+// Negative: the same shape with a long-lived (global) reference stays silent.
+int g_other = 7;
+const int &ref_with_base_ok() {
+  RefView v{Base{}, &g_ok, g_other};
+  return v.r; // no-warning
+}
+
