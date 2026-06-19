@@ -2912,14 +2912,15 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyTUAnalysis");
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
 
-  // Analyze a single function definition. Tracks which canonical decls have
-  // already been analyzed so each is analyzed at most once (a function can be
-  // reached both by the call-graph walk and the supplementary sweep below).
+  // Analyze a single callable definition (a function, Objective-C method, or
+  // block). Tracks which canonical decls have already been analyzed so each is
+  // analyzed at most once (a callable can be reached both by the call-graph
+  // walk and the supplementary sweep below).
   llvm::SmallPtrSet<const Decl *, 32> Analyzed;
-  auto Analyze = [&](const FunctionDecl *FD) {
-    if (!FD || !Analyzed.insert(FD->getCanonicalDecl()).second)
+  auto Analyze = [&](const Decl *D) {
+    if (!D || !Analyzed.insert(D->getCanonicalDecl()).second)
       return;
-    AnalysisDeclContext AC(nullptr, FD);
+    AnalysisDeclContext AC(nullptr, D);
     AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
     AC.getCFGBuildOptions().AddLifetime = true;
     AC.getCFGBuildOptions().AddParameterLifetimes = true;
@@ -2930,7 +2931,7 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
       runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
     else
       // No CFG: surface the skip so it is not a silent gap in coverage.
-      SemaHelper.reportAnalysisBailout(FD,
+      SemaHelper.reportAnalysisBailout(D,
                                        lifetimes::BailoutReason::CFGUnavailable);
   };
 
@@ -2949,18 +2950,15 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
   // Supplementary sweep: the call graph reaches functions only through
   // declaration traversal and the bodies of functions it has already added; it
   // does not descend into statements such as a namespace-scope variable
-  // initializer (CallGraph::TraverseStmt is a no-op). A lambda call operator
-  // defined in such an initializer is therefore never added to the graph, and
-  // a real lifetime bug in its body would be a silent coverage gap. Sweep every
-  // callable in the TU and analyze any the call graph missed. These are not
+  // initializer (CallGraph::TraverseStmt is a no-op), and it tracks only
+  // FunctionDecls -- never Objective-C methods or blocks. A lambda call operator
+  // defined in an initializer, or any Objective-C method body, would therefore
+  // be a silent coverage gap (a real lifetime bug there goes unanalyzed). Sweep
+  // every callable in the TU (CallableVisitor yields functions, Objective-C
+  // methods, and blocks) and analyze any the call graph missed. These are not
   // call-graph reachable from the analyzed callers, so their (absence of)
   // ordering does not affect inference visibility.
-  CallableVisitor(
-      [&](const Decl *D) {
-        if (const auto *FD = dyn_cast<FunctionDecl>(D))
-          Analyze(FD);
-      },
-      TU->getOwningModule())
+  CallableVisitor([&](const Decl *D) { Analyze(D); }, TU->getOwningModule())
       .TraverseTranslationUnitDecl(TU);
 }
 
