@@ -13,6 +13,7 @@
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 namespace clang ::lifetimes {
 
@@ -149,6 +150,25 @@ QualType findNestedOwnerOrPointerOfIndirection(
 // pointer to a non-const gsl::Owner. Passing such a pointer to a function is
 // assumed to invalidate borrows into the pointed-to owner.
 bool pointsToMutableOwner(QualType GslPointerType);
+
+// Returns true if QT is a mutable [[gsl::Owner]] (peeling references and array
+// dimensions): a borrow of such storage can be invalidated by reallocating it.
+// A `const` owner can never be reallocated, so it is excluded.
+bool isMutableOwnerType(QualType QT);
+
+// Returns true if `RD` has a reachable mutable owner data member -- directly,
+// transitively (a field whose own record contains one), through a base class,
+// or through a non-const pointer/reference/gsl::Pointer member whose pointee is
+// (or contains) a mutable owner. A non-const member call on such an object may
+// reallocate that owner, invalidating a view into it. `Visited` cuts cycles.
+bool recordContainsMutableOwner(
+    const CXXRecordDecl *RD, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited);
+
+// As recordContainsMutableOwner, but takes the receiver type of a member call:
+// peels a reference and the `this` pointer to reach the record. Used by the safe
+// model to treat a non-const member call on an object as invalidating views into
+// its (possibly transitive / inherited) owner fields.
+bool recordHasGslOwnerField(QualType QT);
 
 // Returns true if QT is a user-defined record type that can hold a borrow (has
 // a pointer/reference/gsl::Pointer member, transitively) but is annotated

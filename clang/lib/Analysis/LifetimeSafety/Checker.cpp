@@ -605,6 +605,45 @@ public:
         LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF);
     if (DirectlyInvalidatedLoans.isEmpty())
       return;
+    // For a loan-gated invalidation (emitted for a receiver whose static type
+    // did not reveal an owner -- e.g. a non-const call through a base reference
+    // `Base& b = d; b.grow();`), confirm via the loans the receiver actually
+    // carries: act only if the receiver DENOTES a mutable owner. That means a
+    // loan it holds points at an object that is-a the receiver's own type (the
+    // receiver is that object, possibly viewed as a base) AND that object is (or
+    // contains) a mutable owner. This is what the receiver refers to (robust to
+    // references/pointers/ternaries the static type cannot express), while
+    // excluding a sub-object receiver that merely holds a borrow into some
+    // containing owner (`a.pos = ...` where `a` is a reference into a container).
+    if (IOF->requiresOwnerLoanTarget()) {
+      const Type *RecvT =
+          FactMgr.getOriginMgr().getOrigin(IOF->getInvalidatedOrigin()).Ty;
+      QualType RecvQT = RecvT ? QualType(RecvT, 0).getNonReferenceType()
+                              : QualType();
+      if (!RecvQT.isNull() && RecvQT->isPointerType())
+        RecvQT = RecvQT->getPointeeType();
+      const CXXRecordDecl *RecvRD =
+          RecvQT.isNull() ? nullptr : RecvQT->getAsCXXRecordDecl();
+      bool DenotesOwner = false;
+      for (LoanID InvalidID : DirectlyInvalidatedLoans) {
+        const AccessPath &AP =
+            FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
+        const CXXRecordDecl *RT = invalidatedObjectRecord(AP);
+        if (!RT || !RecvRD)
+          continue;
+        bool IsA = RT->getCanonicalDecl() == RecvRD->getCanonicalDecl() ||
+                   (RT->hasDefinition() && RecvRD->hasDefinition() &&
+                    RT->isDerivedFrom(RecvRD));
+        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+        if (IsA &&
+            (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited))) {
+          DenotesOwner = true;
+          break;
+        }
+      }
+      if (!DenotesOwner)
+        return;
+    }
     auto IsInvalidated = [&](const Loan *L) {
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const AccessPath &AP =

@@ -699,6 +699,65 @@ bool pointsToMutableOwner(QualType GslPointerType) {
   return Found;
 }
 
+bool isMutableOwnerType(QualType QT) {
+  QT = QT.getNonReferenceType();
+  while (QT->isArrayType())
+    QT = QT->getAsArrayTypeUnsafe()->getElementType();
+  return isGslOwnerType(QT) && !QT.isConstQualified();
+}
+
+bool recordContainsMutableOwner(
+    const CXXRecordDecl *RD,
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (!Visited.insert(RD->getCanonicalDecl()).second)
+    return false;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (recordContainsMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
+      return true;
+  for (const FieldDecl *FD : RD->fields()) {
+    QualType DeclT = FD->getType();
+    if (isMutableOwnerType(DeclT))
+      return true;
+    // A non-const pointer/reference member whose pointee is (or contains) a
+    // mutable owner: the owner can be reallocated through the indirection
+    // (`v->push_back(...)`). A const pointee cannot be mutated, so it is
+    // excluded.
+    if (DeclT->isPointerType() || DeclT->isReferenceType()) {
+      QualType Pointee = DeclT->getPointeeType();
+      if (!Pointee.isConstQualified() &&
+          (isMutableOwnerType(Pointee) ||
+           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
+        return true;
+    }
+    // A gsl::Pointer member (e.g. an iterator) that exposes mutable access to a
+    // non-const owner pointee.
+    if (isGslPointerType(DeclT.getNonReferenceType()) &&
+        pointsToMutableOwner(DeclT.getNonReferenceType()))
+      return true;
+    // Recurse into a non-owner record field (e.g. an aggregate sub-object that
+    // itself holds an owner). Owners are leaves -- we never descend into them.
+    QualType FT = DeclT.getNonReferenceType();
+    while (FT->isArrayType())
+      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    if (!isGslOwnerType(FT) &&
+        recordContainsMutableOwner(FT->getAsCXXRecordDecl(), Visited))
+      return true;
+  }
+  return false;
+}
+
+bool recordHasGslOwnerField(QualType QT) {
+  QT = QT.getNonReferenceType();
+  // The implicit object argument of a member call is the `this` pointer
+  // (type `S*`); peel it to reach the record.
+  if (QT->isPointerType())
+    QT = QT->getPointeeType();
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+  return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Visited);
+}
+
 static StringRef getName(const CXXRecordDecl &RD) {
   if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(&RD))
     return CTSD->getSpecializedTemplate()->getName();

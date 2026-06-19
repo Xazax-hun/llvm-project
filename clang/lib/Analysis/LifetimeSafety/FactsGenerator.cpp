@@ -142,77 +142,6 @@ static QualType arrayElementType(QualType T) {
   return T;
 }
 
-/// Returns true if `QT` is a mutable [[gsl::Owner]] (peeling arrays): a borrow
-/// of such a field can be invalidated by reallocating it. A `const` owner can
-/// never be reallocated, so it is excluded.
-static bool isMutableOwnerType(QualType QT) {
-  QT = QT.getNonReferenceType();
-  while (QT->isArrayType())
-    QT = QT->getAsArrayTypeUnsafe()->getElementType();
-  return isGslOwnerType(QT) && !QT.isConstQualified();
-}
-
-/// Returns true if `RD` has a reachable mutable owner data member -- directly,
-/// transitively (a field whose own record contains one), through a base class,
-/// or through a non-const pointer/reference/gsl::Pointer member whose pointee is
-/// (or contains) a mutable owner. A non-const member call on such an object may
-/// reallocate that owner -- directly (`std::vector<int> v; ... v.push_back(...)`)
-/// or through the indirection (`std::vector<int>* v; ... v->push_back(...)`) --
-/// invalidating a view into it. `Visited` cuts cycles.
-static bool recordContainsMutableOwner(
-    const CXXRecordDecl *RD, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
-  if (!RD || !RD->hasDefinition())
-    return false;
-  if (!Visited.insert(RD->getCanonicalDecl()).second)
-    return false;
-  for (const CXXBaseSpecifier &B : RD->bases())
-    if (recordContainsMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
-      return true;
-  for (const FieldDecl *FD : RD->fields()) {
-    QualType DeclT = FD->getType();
-    if (isMutableOwnerType(DeclT))
-      return true;
-    // A non-const pointer/reference member whose pointee is (or contains) a
-    // mutable owner: the owner can be reallocated through the indirection
-    // (`v->push_back(...)`). A const pointee cannot be mutated, so it is
-    // excluded. Recurse with the shared `Visited` set (do not call
-    // paramMayMutateOwner, which would start a fresh set and could loop).
-    if (DeclT->isPointerType() || DeclT->isReferenceType()) {
-      QualType Pointee = DeclT->getPointeeType();
-      if (!Pointee.isConstQualified() &&
-          (isMutableOwnerType(Pointee) ||
-           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
-        return true;
-    }
-    // A gsl::Pointer member (e.g. an iterator) that exposes mutable access to a
-    // non-const owner pointee.
-    if (isGslPointerType(DeclT.getNonReferenceType()) &&
-        pointsToMutableOwner(DeclT.getNonReferenceType()))
-      return true;
-    // Recurse into a non-owner record field (e.g. an aggregate sub-object that
-    // itself holds an owner). Owners are leaves -- we never descend into them.
-    QualType FT = DeclT.getNonReferenceType();
-    while (FT->isArrayType())
-      FT = FT->getAsArrayTypeUnsafe()->getElementType();
-    if (!isGslOwnerType(FT) &&
-        recordContainsMutableOwner(FT->getAsCXXRecordDecl(), Visited))
-      return true;
-  }
-  return false;
-}
-
-/// Used by the safe model to treat a non-const member call on an object as
-/// invalidating views into its (possibly transitive / inherited) owner fields.
-static bool recordHasGslOwnerField(QualType QT) {
-  QT = QT.getNonReferenceType();
-  // The implicit object argument of a member call is the `this` pointer
-  // (type `S*`); peel it to reach the record.
-  if (QT->isPointerType())
-    QT = QT->getPointeeType();
-  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-  return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Visited);
-}
-
 /// Returns true if a parameter of type `PT` lets the call mutate the owner the
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
@@ -1975,9 +1904,10 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
-  auto invalidate = [&](OriginID OID) {
-    CurrentBlockFacts.push_back(
-        FactMgr.createFact<InvalidateOriginFact>(OID, Call, /*Assumed=*/true));
+  auto invalidate = [&](OriginID OID, bool RequireOwnerLoanTarget = false) {
+    CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+        OID, Call, /*Assumed=*/true, /*Deallocation=*/false,
+        /*MutatedField=*/nullptr, RequireOwnerLoanTarget));
   };
   // A gsl::Pointer object/argument carries the borrows it holds on its pointee
   // origin(s). Invalidate the *entire* pointee chain, not just the first level:
@@ -1985,10 +1915,11 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   // by-value gsl::Pointer) reaches the borrowed owner several pointee levels
   // down, so a borrow taken directly from the aliased owner lives deeper than
   // getPointeeChild() once.
-  auto invalidatePointeeChain = [&](OriginNode *L) {
+  auto invalidatePointeeChain = [&](OriginNode *L,
+                                    bool RequireOwnerLoanTarget = false) {
     for (OriginNode *Pointee = L->getPointeeChild(); Pointee;
          Pointee = Pointee->getPointeeChild())
-      invalidate(Pointee->getOriginID());
+      invalidate(Pointee->getOriginID(), RequireOwnerLoanTarget);
   };
   // Mutating an owner *through a member* (`w.in.grow()`) can invalidate a
   // borrow that flowed into an enclosing object rather than the receiver
@@ -2002,10 +1933,11 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   // base expression -- robust to forms like `(c ? a.f : b.f).g`. Invalidation
   // matches by exact borrowed-storage (AccessPath) identity, so an enclosing
   // object that holds no aliasing borrow yields nothing.
-  auto invalidateEnclosingObjects = [&](OriginNode *L) {
+  auto invalidateEnclosingObjects = [&](OriginNode *L,
+                                        bool RequireOwnerLoanTarget = false) {
     for (OriginNode *P = L->getParent(); P; P = P->getParent()) {
-      invalidate(P->getOriginID());
-      invalidatePointeeChain(P);
+      invalidate(P->getOriginID(), RequireOwnerLoanTarget);
+      invalidatePointeeChain(P, RequireOwnerLoanTarget);
     }
   };
 
@@ -2022,31 +1954,34 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   if (IsInstance && !Method->isConst() && !isInvalidationMethod(*Method) &&
       !Args.empty()) {
     // Use the most-derived receiver type, not the static type at the call site.
-    // When a derived object's owner field is mutated through a method inherited
-    // from (or dispatched on) a base class, the implicit object argument carries
-    // a derived-to-base cast, so Args[0]->getType() is the *base* -- which may
-    // not declare the owner field, causing the invalidation to be skipped. Strip
-    // the implicit casts to recover the derived object's type so that
-    // recordHasGslOwnerField sees the field. (Matches the most-derived-receiver
-    // handling used for self-referential field stores.)
+    // The receiver's *static* type does not always reveal an owner the call may
+    // mutate: a method may be reached through a base reference/pointer (`Base& b
+    // = d; b.grow();`), a ternary, etc., whose static type is an owner-less base
+    // while the receiver's loan actually points at a derived owner. So:
+    //  - If the static type already shows an owner (or owner-containing record),
+    //    or the call is a virtual dispatch on a polymorphic receiver (the
+    //    dynamic type may add an owner), emit unconditionally (as before).
+    //  - Otherwise, for any other record receiver, still emit -- but mark it
+    //    RequireOwnerLoanTarget so the checker only acts on it when a loan the
+    //    receiver actually carries points at a mutable owner. This is loan-based
+    //    (what the receiver refers to), robust to references/pointers/ternaries.
     QualType RecvTy = Args[0]->IgnoreImpCasts()->getType().getNonReferenceType();
     bool OwnerReceiver = isGslOwnerType(RecvTy);
-    // A virtual call dispatched through a base reference/pointer hides the
-    // dynamic type: an override in a derived class may reallocate an owner field
-    // the static (base) type does not declare, and IgnoreImpCasts can only
-    // recover the base static type (the reference's declared type), not the
-    // runtime type. We cannot enumerate the open world of derived classes
-    // intra-procedurally, so conservatively assume a non-const virtual call on a
-    // polymorphic receiver may mutate an owner. (Like every assumed-invalidation
-    // this only warns when a borrow into the receiver is live across the call --
-    // i.e. a borrow obtained from the polymorphic object itself.)
-    const CXXRecordDecl *RecvRD = RecvTy->getAsCXXRecordDecl();
+    // For an arrow receiver (`p->grow()`) the implicit object argument is the
+    // pointer; peel it to reach the record (recordHasGslOwnerField already peels
+    // it internally for the owner test).
+    QualType RecvRecordTy =
+        RecvTy->isPointerType() ? RecvTy->getPointeeType() : RecvTy;
+    const CXXRecordDecl *RecvRD = RecvRecordTy->getAsCXXRecordDecl();
     bool MaybeDynamicOwner =
         Method->isVirtual() && RecvRD && RecvRD->isPolymorphic();
-    if ((OwnerReceiver || recordHasGslOwnerField(RecvTy) || MaybeDynamicOwner) &&
+    bool StaticallyOwner =
+        OwnerReceiver || recordHasGslOwnerField(RecvTy) || MaybeDynamicOwner;
+    if ((StaticallyOwner || RecvRD) &&
         !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
-        invalidate(L->getOriginID());
+        bool RequireOwnerLoan = !StaticallyOwner;
+        invalidate(L->getOriginID(), RequireOwnerLoan);
         // When the receiver is a gsl::Pointer object (a view/wrapper that
         // reaches a mutable owner through what it points at, e.g. a wrapper
         // holding `std::vector<int>* v`), the borrows it carries also live on
@@ -2055,8 +1990,8 @@ void FactsGenerator::handleAssumedInvalidatingCall(
         // carries the object's loan). Mirrors shouldTrackPointerImplicitObjectArg
         // in handleFunctionCall.
         if (isGslPointerType(Args[0]->getType().getNonReferenceType()))
-          invalidatePointeeChain(L);
-        invalidateEnclosingObjects(L);
+          invalidatePointeeChain(L, RequireOwnerLoan);
+        invalidateEnclosingObjects(L, RequireOwnerLoan);
       }
   }
   // The implicit object argument (I == 0 for implicit-this instance methods) is

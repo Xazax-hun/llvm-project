@@ -306,6 +306,15 @@ class InvalidateOriginFact : public Fact {
   /// carries the enclosing-object loan (needed for accessor verification),
   /// which must not be treated as invalidated by a field mutation.
   const FieldDecl *MutatedField;
+  /// When true, this assumed invalidation was emitted for a receiver whose
+  /// *static* type does not reveal an owner (e.g. a non-const call through a
+  /// base reference/pointer `Base& b = d; b.grow();`, or any other record
+  /// receiver). The checker only acts on it if a loan the receiver actually
+  /// carries points at a mutable owner -- a loan-based confirmation of what the
+  /// receiver refers to, robust to references/pointers/ternaries that the static
+  /// receiver type cannot express. (Dynamic dispatch is handled separately and
+  /// conservatively, without this flag.)
+  bool RequireOwnerLoanTarget;
 
 public:
   static bool classof(const Fact *F) {
@@ -314,10 +323,12 @@ public:
 
   InvalidateOriginFact(OriginID OID, const Stmt *InvalidationOp,
                        bool Assumed = false, bool Deallocation = false,
-                       const FieldDecl *MutatedField = nullptr)
+                       const FieldDecl *MutatedField = nullptr,
+                       bool RequireOwnerLoanTarget = false)
       : Fact(Kind::InvalidateOrigin), OID(OID),
         InvalidationOp(InvalidationOp), Assumed(Assumed),
-        Deallocation(Deallocation), MutatedField(MutatedField) {}
+        Deallocation(Deallocation), MutatedField(MutatedField),
+        RequireOwnerLoanTarget(RequireOwnerLoanTarget) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   /// The invalidating operation as a statement (never null). Use this for the
@@ -331,6 +342,7 @@ public:
   bool isAssumed() const { return Assumed; }
   bool isDeallocation() const { return Deallocation; }
   const FieldDecl *getMutatedField() const { return MutatedField; }
+  bool requiresOwnerLoanTarget() const { return RequireOwnerLoanTarget; }
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };
