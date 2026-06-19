@@ -16,6 +16,20 @@ public:
   }
 };
 
+// The owner-ness of a class-template specialization is recognized via the
+// primary template, even when the explicit specialization does not spell the
+// attribute itself. The ban must honor that same fallback -- testing the
+// attribute directly on the specialization's record was a soundness bypass
+// (the captured borrow lands in the owner's opaque member, untracked, and a
+// truthful 'noescape' on the owner-ref params silences every other net).
+template <class T> struct [[gsl::Owner]] OwnerTmpl { T v; };
+template <> struct OwnerTmpl<int> {
+  const int *p = nullptr;
+
+public:
+  void set(const int *q [[clang::lifetime_capture_by(this)]]) { p = q; } // expected-warning {{'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not supported}}
+};
+
 //===----------------------------------------------------------------------===//
 // Negatives.
 //===----------------------------------------------------------------------===//
@@ -42,3 +56,13 @@ class Plain {
 public:
   void stash(string_view s [[clang::lifetime_capture_by(this)]]) { v = s; } // no-warning
 };
+
+// A specialization of a non-owner primary template is likewise not an owner.
+template <class T> struct PlainTmpl { T v; };
+template <> struct PlainTmpl<int> {
+  const int *p = nullptr;
+
+public:
+  void set(const int *q [[clang::lifetime_capture_by(this)]]) { p = q; } // no-warning
+};
+

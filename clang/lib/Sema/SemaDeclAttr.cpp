@@ -25,6 +25,7 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/Type.h"
+#include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/Cuda.h"
 #include "clang/Basic/DarwinSDKInfo.h"
@@ -4502,7 +4503,8 @@ void Sema::LazyProcessLifetimeCaptureByParams(FunctionDecl *FD) {
           Diag(CapturedBy->getArgLocs()[I],
                diag::warn_lifetime_safety_ctor_captures_borrow);
         else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
-                 MD && MD->getParent() && MD->getParent()->hasAttr<OwnerAttr>())
+                 MD && MD->getParent() &&
+                 lifetimes::isGslOwnerType(MD->getParent()))
           Diag(CapturedBy->getArgLocs()[I],
                diag::warn_lifetime_safety_owner_captures_borrow);
       }
