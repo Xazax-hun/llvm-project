@@ -15,6 +15,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/Checker.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
@@ -201,6 +202,7 @@ private:
   FactManager &FactMgr;
   LifetimeSafetySemaHelper *SemaHelper;
   ASTContext &AST;
+  ParentMap &PM;
   const Decl *FD;
 
   static SourceLocation
@@ -225,7 +227,7 @@ public:
                   LifetimeSafetySemaHelper *SemaHelper)
       : LoanPropagation(LoanPropagation), MovedLoans(MovedLoans),
         LiveOrigins(LiveOrigins), FactMgr(FM), SemaHelper(SemaHelper),
-        AST(ADC.getASTContext()), FD(ADC.getDecl()) {
+        AST(ADC.getASTContext()), PM(ADC.getParentMap()), FD(ADC.getDecl()) {
     for (const CFGBlock *B : *ADC.getAnalysis<PostOrderCFGView>())
       for (const Fact *F : FactMgr.getFacts(B))
         if (const auto *EF = F->getAs<ExpireFact>())
@@ -816,27 +818,39 @@ public:
     }
   }
 
-  /// Soundness: a pointer/reference/view that borrows *into* a mutable global or
+  /// Soundness: a pointer/reference/view that borrows from a mutable global or
   /// static owner (e.g. `int *p = &g[0];`, `p = g.data();`, `string_view sv =
-  /// g_str;`, `string_view sv = g_table[i];`) can be invalidated by a mutation
-  /// of that owner from anywhere -- another function or translation unit the
-  /// intra-procedural analysis cannot see. The borrow surfaces as a loan rooted
-  /// at the global owner regardless of how it was reached (direct, element, or
-  /// accessor), so this loan-based pass covers the raw pointer/reference forms
-  /// and the GSL view forms uniformly. A pointer *at* the object (`&g`) is not a
-  /// borrow into its contents and stays valid, so it is excluded.
+  /// g_str;`, `std::string& f(){ return g_s; }`, `W* pw(){ return &g; }`) aliases
+  /// that owner invisibly to the caller: a mutation of the owner from anywhere --
+  /// another function or translation unit the intra-procedural analysis cannot
+  /// see -- can invalidate a view derived from it, and the borrow can dangle.
+  /// The borrow surfaces as a loan rooted at the global, so this loan-based pass
+  /// flags every such borrow (raw pointer/reference and GSL view forms) uniformly
+  /// once the global is, or transitively contains, a mutable owner.
+  ///
+  /// The one permitted interaction with a mutable global is a method call on it
+  /// (`global.method()`); that receiver is exempted at the use site (see
+  /// `isStableGlobalMethodReceiver`), and a borrow the method *returns* is checked
+  /// at its own use/escape.
   ///
   /// `OID` is the borrowing value's origin; `Loc`/`Range` anchor the diagnostic.
+  /// `ValueTyHint`, when non-null, is the type of the borrow the caller receives
+  /// (e.g. a function's return type) -- used so a reference/pointer RETURN of the
+  /// whole owner (`std::string& f(){ return g_s; }`) is recognized, where the
+  /// escaping origin is typed as the owner value rather than a reference.
   void flagBorrowFromMutableGlobal(OriginID OID, ProgramPoint PP,
-                                   SourceLocation Loc, SourceRange Range) {
+                                   SourceLocation Loc, SourceRange Range,
+                                   QualType ValueTyHint = QualType()) {
     if (!SemaHelper || Loc.isInvalid())
       return;
     // A raw pointer/reference value, or a gsl::Pointer view.
-    const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
-    if (!Ty)
-      return;
-
-    QualType ValueTy(Ty, 0);
+    QualType ValueTy = ValueTyHint;
+    if (ValueTy.isNull()) {
+      const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+      if (!Ty)
+        return;
+      ValueTy = QualType(Ty, 0);
+    }
     if (!ValueTy->isPointerType() && !ValueTy->isReferenceType() &&
         !isGslPointerType(ValueTy))
       return;
@@ -852,11 +866,11 @@ public:
       QualType GlobalTy = AST.getBaseElementType(VD->getType());
       if (GlobalTy.isConstQualified())
         continue;
+      // The global must itself be a mutable owner, or a record that transitively
+      // contains one (`struct W { std::string s; } g_w;`). A global with no owner
+      // anywhere (a plain scalar, `int g_int`, `int g_arr[8]`) has no
+      // reallocatable buffer and no aliasing hazard, so it is not flagged.
       bool DirectOwner = isGslOwnerType(GlobalTy);
-      // A global that is not itself an owner but is a record transitively
-      // containing a mutable owner (`struct W { std::string s; } g_w;`): a
-      // borrow into the owner's buffer anchors its loan at the whole `g_w`
-      // object, so the owner-ness must be detected through the wrapper.
       bool WrapsOwner = false;
       if (!DirectOwner)
         if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
@@ -865,31 +879,18 @@ public:
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
-      // The loan must be a borrow *into* the owner's contents, not the value of
-      // the owner itself: `&g[0]`/`g.data()` borrow into `g`, whereas `&g` is a
-      // pointer at the object whose storage is stable. The pointee type differs
-      // from the (element) owner type in the former. A pointer/reference at an
-      // array element object (`&g_arr[i]`, pointee == element type) or at the
-      // whole array (pointee == the array type) is likewise stable. (A
-      // gsl::Pointer view always views the contents, never "is" the owner, so
-      // its non-pointer value type has a null pointee and falls through.)
-      QualType Pointee = ValueTy->getPointeeType();
-      if (!Pointee.isNull() &&
-          (Pointee.getCanonicalType().getUnqualifiedType() ==
-               GlobalTy.getCanonicalType().getUnqualifiedType() ||
-           Pointee.getCanonicalType().getUnqualifiedType() ==
-               VD->getType().getCanonicalType().getUnqualifiedType()))
-        continue; // pointer/reference AT a stable object, not into a buffer
-      // For the wrapper case the loan root is the whole object, so the loan path
-      // no longer records which sub-object is borrowed. Flag a gsl::Pointer view
-      // (it views an owner's buffer) or a raw pointer/reference *into* a buffer
-      // (pointee is the owner's element/char type, e.g. `g_w.owner.data()`), but
-      // not a pointer/reference *at* an owner sub-object (pointee is itself an
-      // owner -- its object storage is stable inline in the wrapper, only its
-      // buffer moves; e.g. a `std::string&` bound to `g_w.owner`).
-      if (WrapsOwner && !isGslPointerType(ValueTy) && !Pointee.isNull() &&
-          isGslOwnerType(Pointee))
-        continue;
+      // Any pointer/reference/view borrow of a global that is or contains a
+      // mutable owner is flagged: it aliases that owner invisibly to the caller,
+      // so a mutation of the owner elsewhere (another function or TU) can
+      // invalidate a view derived from it, and the borrow itself can dangle.
+      // This is intentionally broad -- the one permitted interaction with a
+      // mutable global is a method call on it (`g.method()`), exempted earlier at
+      // the use site (`isStableGlobalMethodReceiver`); a borrow the method
+      // *returns* is checked at its own use/escape. (A reference to a stable
+      // non-owner scalar member, `int& g.counter`, does not itself dangle, but it
+      // is indistinguishable here from a raw pointer into an owner's buffer
+      // returned by an accessor (`g.data()`), so it is flagged too; annotate the
+      // accessor [[clang::lifetime_immortal]] if the contract permits it.)
       if (!ReportedMutableGlobalLocs.insert(Loc).second)
         return;
       SemaHelper->reportViewOnMutableGlobal(Loc, ValueTy, Range);
@@ -907,9 +908,77 @@ public:
     const Expr *Use = UF->getUseExpr();
     if (!Use)
       return;
+    // Reading a by-value owner (`return g_s;` -- a copy) is not a borrow: the
+    // caller gets a copy, and the read is materialized as a `const Owner&`
+    // copy-constructor binding that would otherwise look like a reference borrow.
+    // Skip a use that designates a by-value owner object; a view / reference /
+    // pointer *derived* from the owner is flagged at its own use or escape.
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(Use->IgnoreParenCasts()))
+      if (const ValueDecl *D = DRE->getDecl();
+          D && !D->getType()->isReferenceType() &&
+          !D->getType()->isPointerType() && isGslOwnerType(D->getType()))
+        return;
+    // The one permitted interaction with a mutable global is a method call on
+    // it (`g.method()` / `g.owner.append()`). The receiver of such a call is a
+    // transient access, not a borrow the caller keeps, so do not flag it -- any
+    // borrow the method *returns* is checked at its own use/escape. This is only
+    // for a *direct* designation of the global; a receiver that selects or
+    // computes a borrow (`(c ? g1 : g2).method()`, `getRef().method()`) does
+    // extract one and is still flagged.
+    if (isStableGlobalMethodReceiver(Use))
+      return;
     if (const OriginNode *OL = UF->getUsedOrigins())
       flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use->getExprLoc(),
                                   Use->getSourceRange());
+  }
+
+  /// True if `Use` is the implicit object argument (receiver) of a member call
+  /// AND is a direct designation of a stable object -- a chain of variable
+  /// reference / member access / array subscript / pointer dereference, with no
+  /// selecting or borrow-producing node (conditional, comma, call). Such a
+  /// receiver merely names where the global lives; it is the permitted
+  /// `global.method()` form. A non-direct receiver computes a borrow and is not
+  /// exempt.
+  bool isStableGlobalMethodReceiver(const Expr *Use) {
+    // Climb past value-preserving wrappers (implicit casts / parens /
+    // materialized temporaries) that the front end inserts between the receiver
+    // expression and the MemberExpr -- e.g. a NoOp cast adding `const` for a
+    // const method (`g` -> `const W` lvalue -> `g.method`). Without this, the
+    // `DeclRefExpr` receiver's immediate parent is the cast, not the call.
+    const Stmt *Cur = Use;
+    const Stmt *Parent = PM.getParent(Cur);
+    while (Parent && (isa<ImplicitCastExpr>(Parent) || isa<ParenExpr>(Parent) ||
+                      isa<MaterializeTemporaryExpr>(Parent))) {
+      Cur = Parent;
+      Parent = PM.getParent(Cur);
+    }
+    // The receiver must be the base of the MemberExpr that is the callee of a
+    // member call -- i.e. the implicit object argument.
+    const auto *ME = dyn_cast_or_null<MemberExpr>(Parent);
+    if (!ME)
+      return false;
+    const auto *MCE = dyn_cast_or_null<CXXMemberCallExpr>(PM.getParent(ME));
+    if (!MCE || MCE->getCallee()->IgnoreParens() != ME)
+      return false;
+    return isStableDesignation(Use);
+  }
+
+  /// A statically-known designation of storage: only variable references, member
+  /// accesses, array subscripts, pointer dereferences, `this`, and value-preserving
+  /// wrappers (parens / casts / temporaries). Anything that selects between or
+  /// computes a borrow (conditional, comma, a call result) is excluded.
+  static bool isStableDesignation(const Expr *E) {
+    E = E->IgnoreParenCasts();
+    if (isa<DeclRefExpr>(E) || isa<CXXThisExpr>(E))
+      return true;
+    if (const auto *ME = dyn_cast<MemberExpr>(E))
+      return isStableDesignation(ME->getBase());
+    if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E))
+      return isStableDesignation(ASE->getBase());
+    if (const auto *UO = dyn_cast<UnaryOperator>(E))
+      return UO->getOpcode() == UO_Deref &&
+             isStableDesignation(UO->getSubExpr());
+    return false;
   }
 
   /// The escape forms. A return -- `int *f() { return &g[0]; }`, or a view
@@ -928,9 +997,18 @@ public:
       const Expr *Ret = RE->getReturnExpr();
       if (Ret)
         Ret = Ret->IgnoreImplicit();
+      // Use the function's return type as the borrow's value type: a
+      // reference/pointer return of the whole owner (`std::string& f(){ return
+      // g_s; }`) escapes the owner's own origin (typed as the owner value), so
+      // the return type is what tells us the caller receives a reference. A
+      // by-value owner return copies and does not escape the owner origin, so it
+      // never reaches here.
+      QualType RetTy;
+      if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
+        RetTy = Fn->getReturnType();
       flagBorrowFromMutableGlobal(
           OID, OEF, Ret ? Ret->getExprLoc() : SourceLocation(),
-          Ret ? Ret->getSourceRange() : SourceRange());
+          Ret ? Ret->getSourceRange() : SourceRange(), RetTy);
     } else if (const auto *FE = dyn_cast<FieldEscapeFact>(OEF)) {
       const FieldDecl *FD = FE->getFieldDecl();
       flagBorrowFromMutableGlobal(OID, OEF, FD->getLocation(),

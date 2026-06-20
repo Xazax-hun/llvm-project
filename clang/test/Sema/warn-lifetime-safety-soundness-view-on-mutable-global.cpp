@@ -3,9 +3,14 @@
 
 #include "Inputs/lifetime-analysis.h"
 
-// A view (gsl::Pointer) created from a mutable global/static owner can be
-// invalidated by mutating that owner elsewhere (another function or TU), which
-// the intra-procedural analysis cannot see. Flag it. A const owner is safe.
+// A pointer/reference/view that borrows from a mutable global or static owner
+// aliases that owner invisibly to the caller: a mutation of the owner elsewhere
+// (another function or TU) the intra-procedural analysis cannot see can
+// invalidate a view derived from it, and the borrow can dangle. The model bans
+// any such borrow once the global is, or transitively contains, a mutable owner.
+// A const owner is safe. The one permitted interaction is a method call on the
+// global (`g.method()`): the receiver is exempt, but a borrow the method returns
+// is checked at its own use/escape.
 
 std::string g_str;
 const std::string g_const;
@@ -38,8 +43,12 @@ void raw_into_global_local() {
   (void)p; // expected-warning {{borrows from a mutable global or static object}}
 }
 
+// A pointer to the whole global owner aliases a mutable owner the caller cannot
+// see: through it the caller can mutate the owner (invalidating views) or derive
+// a dangling view, so it is flagged. (Annotate with [[clang::lifetime_immortal]]
+// if the contract is that the returned object outlives all callers.)
 std::vector<int> *pointer_at_global() {
-  return &g_vec; // no-warning (points at the object, whose storage is stable)
+  return &g_vec; // expected-warning {{borrows from a mutable global or static object}}
 }
 
 void borrow_into_local() {
@@ -152,14 +161,15 @@ public:
   void refresh() { sv = g_wrap.get(); }
 };
 
-// Negatives through the wrapper: a reference/pointer AT the owner member (its
-// object storage is stable; only its buffer moves), and a pointer at the whole
-// wrapper, are not flagged. Only a borrow into a buffer is.
+// A reference/pointer through which a mutable global owner is reachable is
+// flagged -- whether the borrowed thing is the owner member itself, or the whole
+// wrapper object (the caller can mutate the owner through it, invalidating views
+// it derives). A non-owner wrapper that *contains* an owner counts.
 std::string &ref_at_wrapped_owner() {
-  return g_wrap.owner; // no-warning (reference at the stable owner object)
+  return g_wrap.owner; // expected-warning {{borrows from a mutable global or static object}}
 }
 Wrapper *ptr_at_wrapper() {
-  return &g_wrap; // no-warning (points at the wrapper object)
+  return &g_wrap; // expected-warning {{borrows from a mutable global or static object}}
 }
 
 // Negative: a wrapper with no owner (only stable scalars) is not flagged.
@@ -170,6 +180,21 @@ struct PlainWrapper {
 PlainWrapper g_plain;
 const int *from_plain_wrapper() {
   return g_plain.get(); // no-warning (no reallocatable storage)
+}
+
+// A reference to a non-owner scalar member of an owner-containing global. The
+// `int` itself is stable (it lives inline in `g_wc`, only the owner's buffer
+// moves), so this reference does not dangle -- but at the loan level it is
+// indistinguishable from a raw pointer into the owner's buffer returned by an
+// accessor (`g_wc.owner.data()`), so the broad rule flags it too. Mark such an
+// accessor [[clang::lifetime_immortal]] if the reference is known to be safe.
+struct WithCounter {
+  std::string owner;
+  int counter;
+};
+WithCounter g_wc;
+int &ref_at_nonowner_member() {
+  return g_wc.counter; // expected-warning {{borrows from a mutable global or static object}}
 }
 
 //===----------------------------------------------------------------------===//
@@ -185,17 +210,58 @@ std::string_view view_of_array_element() {
   return g_owner_arr[2]; // expected-warning {{borrows from a mutable global or static object}}
 }
 
-// Negatives: a pointer/reference AT an array element object (its storage is
-// stable inline in the array; only its buffer moves) is not flagged.
+// A pointer/reference to an array element that IS a mutable owner reaches that
+// owner (the caller can mutate it / derive a dangling view), so it is flagged.
 std::string *ptr_at_array_element() {
-  return &g_owner_arr[2]; // no-warning
+  return &g_owner_arr[2]; // expected-warning {{borrows from a mutable global or static object}}
 }
 std::string &ref_at_array_element() {
-  return g_owner_arr[2]; // no-warning
+  return g_owner_arr[2]; // expected-warning {{borrows from a mutable global or static object}}
 }
 
 // Negative: a global array of non-owners is not flagged.
 int g_int_arr[8];
 int *ptr_into_int_array() {
   return &g_int_arr[0]; // no-warning (not an owner; stable global storage)
+}
+
+//===----------------------------------------------------------------------===//
+// The permitted interaction: a method call on the global.
+//===----------------------------------------------------------------------===//
+
+struct Owning {
+  std::string s;
+  void mutate() { s.push_back('x'); }       // non-const
+  std::string_view view() const [[clang::lifetimebound]] { return s; }
+};
+Owning g_own;
+
+// A method call on the global is the one allowed way to interact with it: the
+// receiver is a transient access, not a borrow the caller keeps. The receiver is
+// not flagged -- neither for a mutating method nor for a borrow-returning one.
+void method_call_on_global() {
+  g_own.mutate();    // no-warning (receiver is not a borrow)
+  g_own.s.clear();   // no-warning (owner member method call)
+}
+
+// But a borrow the method *returns* is still flagged at its own use/escape.
+std::string_view returned_borrow_flagged() {
+  return g_own.view(); // expected-warning {{borrows from a mutable global or static object}}
+}
+void sv_sink(std::string_view sv [[clang::noescape]]);
+void returned_borrow_used_locally() {
+  std::string_view v = g_own.view();
+  sv_sink(v); // expected-warning {{borrows from a mutable global or static object}}
+}
+
+// A receiver that *selects* or *computes* a borrow is not the simple
+// `global.method()` form -- it extracts a borrow first, so it is flagged.
+Owning g_own2;
+void selecting_receiver(bool c) {
+  (c ? g_own : g_own2).mutate(); // expected-warning {{borrows from a mutable global or static object}}
+}
+
+// Negative: reading a by-value owner is a copy, not a borrow.
+std::string copy_of_global() {
+  return g_str; // no-warning (by-value copy, no borrow escapes)
 }
