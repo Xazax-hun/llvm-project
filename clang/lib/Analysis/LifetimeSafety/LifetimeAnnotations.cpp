@@ -601,6 +601,31 @@ QualType findNestedOwnerOrPointerOfIndirection(
 }
 
 
+// A lambda closure HOLDS a borrow when any of its captures is one: a
+// by-reference capture (a reference field), a by-value capture of a
+// pointer/view, a `this` capture (a pointer field), or a nested borrow-capturing
+// closure. `isUnknownOwnershipType` treats every lambda as known-safe (line
+// below) because a lambda *value* is modeled directly (its captures flow into
+// the closure's origin). But when a closure is a *member* of an aggregate, that
+// modeling does not reach it, and the aggregate's ownership is judged from its
+// fields -- so the containing record must see the captured borrow. This inspects
+// the capture fields the lambda exemption would otherwise skip.
+static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
+                                 llvm::DenseMap<const Type *, bool> &Cache) {
+  for (const FieldDecl *F : Lambda->fields()) {
+    QualType FT = F->getType();
+    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+      FT = AT->getElementType();
+    if (isPointerLikeType(FT) || FT->isReferenceType() ||
+        isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
+      return true;
+    if (const CXXRecordDecl *FRD = FT->getAsCXXRecordDecl())
+      if (FRD->isLambda() && lambdaCapturesBorrow(FRD, Cache))
+        return true;
+  }
+  return false;
+}
+
 bool isUnknownOwnershipType(QualType QT,
                             llvm::DenseMap<const Type *, bool> &Cache) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
@@ -638,6 +663,12 @@ bool isUnknownOwnershipType(QualType QT,
         if (isPointerLikeType(FT) || FT->isReferenceType() ||
             isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
           return true;
+        // A closure-typed member that captures a borrow makes the record
+        // borrow-holding. isUnknownOwnershipType(closure) is exempt (a lambda
+        // value is modeled directly), so inspect the captures explicitly here.
+        if (const CXXRecordDecl *FRD = FT->getAsCXXRecordDecl())
+          if (FRD->isLambda() && lambdaCapturesBorrow(FRD, Cache))
+            return true;
       }
       return false;
     };
