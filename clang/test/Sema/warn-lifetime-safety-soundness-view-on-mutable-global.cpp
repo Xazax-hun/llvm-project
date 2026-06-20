@@ -120,20 +120,27 @@ public:
 //===----------------------------------------------------------------------===//
 
 // A view can borrow the buffer of an owner that is a member of a non-owner
-// global record (`struct W { std::string s; } g_w;`). A [[lifetimebound]]
-// accessor returning a view of the member anchors the loan at the whole `g_w`
+// global record (`struct W { std::string s; } g_w;`). An accessor returning a
+// view (or a raw pointer into the buffer) anchors the loan at the whole `g_w`
 // object, whose type is not itself a gsl::Owner -- so the owner-ness is detected
-// through the wrapper (the record transitively contains a mutable owner). The
-// view still borrows reallocatable storage and is flagged.
+// through the wrapper (the record transitively contains a mutable owner). A
+// gsl::Pointer view, or a raw pointer/reference *into* the buffer, is flagged.
 
 struct Wrapper {
   std::string owner;
   std::string_view get() const [[clang::lifetimebound]] { return owner; }
+  const char *data() const [[clang::lifetimebound]] { return owner.data(); }
 };
 Wrapper g_wrap;
 
 std::string_view from_wrapped_global() {
   return g_wrap.get(); // expected-warning {{borrows from a mutable global or static object}}
+}
+
+// A raw pointer into the wrapped owner's buffer is flagged too (the pointee is
+// the element/char type, not an owner).
+const char *raw_into_wrapped_global() {
+  return g_wrap.data(); // expected-warning {{borrows from a mutable global or static object}}
 }
 
 // Cached into a [[gsl::Owner]] member (escape form), reported at the member.
@@ -147,7 +154,7 @@ public:
 
 // Negatives through the wrapper: a reference/pointer AT the owner member (its
 // object storage is stable; only its buffer moves), and a pointer at the whole
-// wrapper, are not flagged. Only a view into a buffer is.
+// wrapper, are not flagged. Only a borrow into a buffer is.
 std::string &ref_at_wrapped_owner() {
   return g_wrap.owner; // no-warning (reference at the stable owner object)
 }

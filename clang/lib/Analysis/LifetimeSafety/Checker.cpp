@@ -849,19 +849,13 @@ public:
       bool DirectOwner = isGslOwnerType(GlobalTy);
       // A global that is not itself an owner but is a record transitively
       // containing a mutable owner (`struct W { std::string s; } g_w;`): a
-      // [[lifetimebound]] accessor returning a view of `s` anchors the loan at
-      // the whole `g_w` object, so the owner-ness must be detected through the
-      // wrapper. The loan path no longer records which sub-object is borrowed,
-      // so only a gsl::Pointer *view* (which views an owner's reallocatable
-      // buffer) is flagged here -- a raw pointer/reference could equally be at a
-      // stable scalar member or at the owner object itself, neither of which
-      // dangles.
+      // borrow into the owner's buffer anchors its loan at the whole `g_w`
+      // object, so the owner-ness must be detected through the wrapper.
       bool WrapsOwner = false;
       if (!DirectOwner)
         if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
           llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-          WrapsOwner = recordContainsMutableOwner(RD, Visited) &&
-                       isGslPointerType(ValueTy);
+          WrapsOwner = recordContainsMutableOwner(RD, Visited);
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
@@ -875,7 +869,17 @@ public:
       if (!Pointee.isNull() &&
           Pointee.getCanonicalType().getUnqualifiedType() ==
               GlobalTy.getCanonicalType().getUnqualifiedType())
-        continue; // pointer/reference AT the object, not into it
+        continue; // pointer/reference AT the global object, not into it
+      // For the wrapper case the loan root is the whole object, so the loan path
+      // no longer records which sub-object is borrowed. Flag a gsl::Pointer view
+      // (it views an owner's buffer) or a raw pointer/reference *into* a buffer
+      // (pointee is the owner's element/char type, e.g. `g_w.owner.data()`), but
+      // not a pointer/reference *at* an owner sub-object (pointee is itself an
+      // owner -- its object storage is stable inline in the wrapper, only its
+      // buffer moves; e.g. a `std::string&` bound to `g_w.owner`).
+      if (WrapsOwner && !isGslPointerType(ValueTy) && !Pointee.isNull() &&
+          isGslOwnerType(Pointee))
+        continue;
       if (!ReportedMutableGlobalLocs.insert(Loc).second)
         return;
       SemaHelper->reportViewOnMutableGlobal(Loc, ValueTy, Range);
