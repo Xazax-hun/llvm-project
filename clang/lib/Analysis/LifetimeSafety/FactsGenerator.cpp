@@ -503,8 +503,25 @@ void FactsGenerator::VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE) {
 void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
   // Flows origins from the initializer expression to the field.
   // Example: `MyObj(std::string s) : view(s) {}`
-  if (const FieldDecl *FD = CII->getAnyMember())
-    killAndFlowOrigin(*FD, *CII->getInit());
+  const FieldDecl *FD = CII->getAnyMember();
+  if (!FD)
+    return;
+  killAndFlowOrigin(*FD, *CII->getInit());
+  // Soundness: a member-initializer is a store into the member, just like
+  // `this->view = init;` in the constructor body. Record a FieldStore for a
+  // view/pointer member so the checker can detect a self-referential object --
+  // one whose member borrows a sibling member of the same object (e.g.
+  // `S() : view(buf) {}`). Without this only the body-store spelling was caught.
+  // The detection is loan-based (the checker intersects the stored value's loans
+  // with the enclosing `this` object's), so it is independent of the init shape.
+  if (isGslPointerType(arrayElementType(FD->getType())) ||
+      arrayElementType(FD->getType())->isPointerOrReferenceType())
+    if (std::optional<OriginNode *> ThisOrigins =
+            FactMgr.getOriginMgr().getThisOrigins())
+      if (OriginNode *InitNode = getOriginNode(*CII->getInit()))
+        CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
+            CII->getInit(), InitNode->getOriginID(),
+            (*ThisOrigins)->getOriginID()));
 }
 
 void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {

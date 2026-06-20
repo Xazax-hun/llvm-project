@@ -154,3 +154,21 @@ struct DerivedExternal : Base {
   }
 };
 
+
+// A self-referential binding established in the constructor MEMBER-INITIALIZER
+// list (not the body) is detected too: the member-init is a store into the
+// member just like `view = buf;` in the body.
+struct InitListSelfRef {
+  string buf;
+  string_view view;
+  InitListSelfRef()
+      : buf("long heap-backed content exceeding the small-string buffer"),
+        view(buf) {} // expected-warning {{self-referential}}
+};
+
+// Negative: a member-initializer binding the view to a constructor PARAMETER
+// (an external object, not a sibling member) is not self-referential.
+struct InitListExternal {
+  string_view view;
+  InitListExternal(string_view ext [[clang::lifetimebound]]) : view(ext) {} // no-warning
+};
