@@ -843,9 +843,15 @@ public:
     for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
       const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
-      if (!VD || !VD->hasGlobalStorage() || VD->getType().isConstQualified())
+      if (!VD || !VD->hasGlobalStorage())
         continue;
-      QualType GlobalTy = VD->getType();
+      // Peel array dimensions: a global array of owners (`std::string g[4]`)
+      // owns reallocatable storage per element, but the loan roots at the array
+      // variable whose own type is the array, not an owner. Test the element
+      // type for owner-ness (and its constness -- a const element is safe).
+      QualType GlobalTy = AST.getBaseElementType(VD->getType());
+      if (GlobalTy.isConstQualified())
+        continue;
       bool DirectOwner = isGslOwnerType(GlobalTy);
       // A global that is not itself an owner but is a record transitively
       // containing a mutable owner (`struct W { std::string s; } g_w;`): a
@@ -862,14 +868,18 @@ public:
       // The loan must be a borrow *into* the owner's contents, not the value of
       // the owner itself: `&g[0]`/`g.data()` borrow into `g`, whereas `&g` is a
       // pointer at the object whose storage is stable. The pointee type differs
-      // from the global's own type in the former. (A gsl::Pointer view always
-      // views the contents, never "is" the owner, so its non-pointer value type
-      // has a null pointee and naturally falls through this guard.)
+      // from the (element) owner type in the former. A pointer/reference at an
+      // array element object (`&g_arr[i]`, pointee == element type) or at the
+      // whole array (pointee == the array type) is likewise stable. (A
+      // gsl::Pointer view always views the contents, never "is" the owner, so
+      // its non-pointer value type has a null pointee and falls through.)
       QualType Pointee = ValueTy->getPointeeType();
       if (!Pointee.isNull() &&
-          Pointee.getCanonicalType().getUnqualifiedType() ==
-              GlobalTy.getCanonicalType().getUnqualifiedType())
-        continue; // pointer/reference AT the global object, not into it
+          (Pointee.getCanonicalType().getUnqualifiedType() ==
+               GlobalTy.getCanonicalType().getUnqualifiedType() ||
+           Pointee.getCanonicalType().getUnqualifiedType() ==
+               VD->getType().getCanonicalType().getUnqualifiedType()))
+        continue; // pointer/reference AT a stable object, not into a buffer
       // For the wrapper case the loan root is the whole object, so the loan path
       // no longer records which sub-object is borrowed. Flag a gsl::Pointer view
       // (it views an owner's buffer) or a raw pointer/reference *into* a buffer

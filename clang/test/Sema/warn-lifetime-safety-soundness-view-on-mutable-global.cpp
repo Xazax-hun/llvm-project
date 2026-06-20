@@ -172,7 +172,30 @@ const int *from_plain_wrapper() {
   return g_plain.get(); // no-warning (no reallocatable storage)
 }
 
+//===----------------------------------------------------------------------===//
+// Global ARRAY of owners.
+//===----------------------------------------------------------------------===//
 
+// A global array of owners owns reallocatable storage per element; a view of an
+// element borrows that buffer. The loan roots at the array variable, whose own
+// type is the array (not an owner), so the element type must be tested.
+std::string g_owner_arr[4];
 
+std::string_view view_of_array_element() {
+  return g_owner_arr[2]; // expected-warning {{borrows from a mutable global or static object}}
+}
 
+// Negatives: a pointer/reference AT an array element object (its storage is
+// stable inline in the array; only its buffer moves) is not flagged.
+std::string *ptr_at_array_element() {
+  return &g_owner_arr[2]; // no-warning
+}
+std::string &ref_at_array_element() {
+  return g_owner_arr[2]; // no-warning
+}
 
+// Negative: a global array of non-owners is not flagged.
+int g_int_arr[8];
+int *ptr_into_int_array() {
+  return &g_int_arr[0]; // no-warning (not an owner; stable global storage)
+}
