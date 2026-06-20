@@ -919,13 +919,12 @@ public:
           !D->getType()->isPointerType() && isGslOwnerType(D->getType()))
         return;
     // The one permitted interaction with a mutable global is a method call on
-    // it (`g.method()` / `g.owner.append()`). The receiver of such a call is a
+    // the global itself (`g.method()` / `g.owner.append()`). The receiver is a
     // transient access, not a borrow the caller keeps, so do not flag it -- any
-    // borrow the method *returns* is checked at its own use/escape. This is only
-    // for a *direct* designation of the global; a receiver that selects or
-    // computes a borrow (`(c ? g1 : g2).method()`, `getRef().method()`) does
-    // extract one and is still flagged.
-    if (isStableGlobalMethodReceiver(Use))
+    // borrow the method *returns* is checked at its own use/escape. This applies
+    // only when the receiver *is* the global owner; a separate borrow of it (a
+    // local view `sv` bound to `g`, used as `sv.front()`) is still flagged.
+    if (isMutableGlobalMethodReceiver(Use))
       return;
     if (const OriginNode *OL = UF->getUsedOrigins())
       flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use->getExprLoc(),
@@ -933,13 +932,15 @@ public:
   }
 
   /// True if `Use` is the implicit object argument (receiver) of a member call
-  /// AND is a direct designation of a stable object -- a chain of variable
-  /// reference / member access / array subscript / pointer dereference, with no
-  /// selecting or borrow-producing node (conditional, comma, call). Such a
-  /// receiver merely names where the global lives; it is the permitted
-  /// `global.method()` form. A non-direct receiver computes a borrow and is not
-  /// exempt.
-  bool isStableGlobalMethodReceiver(const Expr *Use) {
+  /// whose receiver *is* a mutable-owner global itself -- the permitted
+  /// `global.method()` form (`g.mutate()`, `g.owner.append()`, `g_arr[i].m()`).
+  /// The receiver must be a direct designation (variable / member / subscript /
+  /// deref chain, no selecting or borrow-producing node) ROOTED at a mutable
+  /// global owner. A receiver that is a separate borrow of the global -- a local
+  /// view `sv` bound to `g`, where `sv.front()` reads the dangling buffer -- is
+  /// NOT exempt: its root is a local, not the global owner. Likewise a selecting
+  /// receiver (`(c ? g1 : g2).method()`) computes a borrow and is not exempt.
+  bool isMutableGlobalMethodReceiver(const Expr *Use) {
     // Climb past value-preserving wrappers (implicit casts / parens /
     // materialized temporaries) that the front end inserts between the receiver
     // expression and the MemberExpr -- e.g. a NoOp cast adding `const` for a
@@ -960,24 +961,45 @@ public:
     const auto *MCE = dyn_cast_or_null<CXXMemberCallExpr>(PM.getParent(ME));
     if (!MCE || MCE->getCallee()->IgnoreParens() != ME)
       return false;
-    return isStableDesignation(Use);
+    // The receiver designation must root at the global owner itself.
+    return isMutableOwnerGlobal(
+        dyn_cast_or_null<VarDecl>(stableDesignationRoot(Use)));
   }
 
-  /// A statically-known designation of storage: only variable references, member
-  /// accesses, array subscripts, pointer dereferences, `this`, and value-preserving
-  /// wrappers (parens / casts / temporaries). Anything that selects between or
-  /// computes a borrow (conditional, comma, a call result) is excluded.
-  static bool isStableDesignation(const Expr *E) {
+  /// If `E` is a statically-known designation of storage -- a chain of variable
+  /// reference / member access / array subscript / pointer dereference, with no
+  /// selecting or borrow-producing node (conditional, comma, call) -- return the
+  /// entity its leaf names (a `VarDecl`/`FieldDecl`); otherwise null. `this` is a
+  /// designation but names no decl, so it yields null (never a global match).
+  static const ValueDecl *stableDesignationRoot(const Expr *E) {
     E = E->IgnoreParenCasts();
-    if (isa<DeclRefExpr>(E) || isa<CXXThisExpr>(E))
-      return true;
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(E))
+      return DRE->getDecl();
     if (const auto *ME = dyn_cast<MemberExpr>(E))
-      return isStableDesignation(ME->getBase());
+      return stableDesignationRoot(ME->getBase());
     if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E))
-      return isStableDesignation(ASE->getBase());
+      return stableDesignationRoot(ASE->getBase());
     if (const auto *UO = dyn_cast<UnaryOperator>(E))
-      return UO->getOpcode() == UO_Deref &&
-             isStableDesignation(UO->getSubExpr());
+      return UO->getOpcode() == UO_Deref ? stableDesignationRoot(UO->getSubExpr())
+                                         : nullptr;
+    return nullptr;
+  }
+
+  /// True if `VD` is a non-const global/static variable that is, or transitively
+  /// contains, a mutable owner -- the subject of the borrow-from-mutable-global
+  /// rule (array dimensions peeled; a const element/object is excluded).
+  bool isMutableOwnerGlobal(const VarDecl *VD) {
+    if (!VD || !VD->hasGlobalStorage())
+      return false;
+    QualType GlobalTy = AST.getBaseElementType(VD->getType());
+    if (GlobalTy.isConstQualified())
+      return false;
+    if (isGslOwnerType(GlobalTy))
+      return true;
+    if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+      return recordContainsMutableOwner(RD, Visited);
+    }
     return false;
   }
 

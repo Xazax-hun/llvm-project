@@ -265,3 +265,13 @@ void selecting_receiver(bool c) {
 std::string copy_of_global() {
   return g_str; // no-warning (by-value copy, no borrow escapes)
 }
+
+// The method-call exemption is ONLY for the global owner itself as receiver. A
+// separate borrow OF the global -- a local view bound to it -- used as a member
+// call receiver is still flagged: the receiver is the held borrow `v`, not the
+// global. (Otherwise `v.front()` after a cross-function mutation of `g_str`
+// would be a silent use-after-free.)
+void view_receiver_is_flagged() {
+  std::string_view v = g_str; // (silent at construction; the borrow is reported at the use)
+  (void)v.size();             // expected-warning {{borrows from a mutable global or static object}}
+}
