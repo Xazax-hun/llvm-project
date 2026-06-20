@@ -1185,18 +1185,23 @@ public:
     }
 
     // The implicit object is also a parameter: an instance member function
-    // (including a conversion operator) whose return type is an indirection
-    // (pointer, reference, or gsl::Pointer) must declare where that borrow comes
-    // from -- otherwise a (frequently implicit, e.g. `int* p = obj;`) call site
-    // cannot track it. Require [[clang::lifetimebound]] on the implicit object
-    // (or on a parameter the borrow may come from instead) or
-    // [[clang::lifetime_immortal]] on the function. Standard-library accessors
-    // are modeled via GSL recognition and are exempt.
+    // (including a conversion operator) whose return value is a borrow-carrying
+    // value must declare where that borrow comes from -- otherwise a (frequently
+    // implicit, e.g. `int* p = obj;`) call site cannot track it. This covers a
+    // pointer/reference/gsl::Pointer return and, more generally, any return type
+    // that can hold a borrow -- in particular a lambda's operator() returning a
+    // closure that captures by reference (the returned closure depends on the
+    // implicit object's captures, but is not a pointer-like type). Require
+    // [[clang::lifetimebound]] on the implicit object (or on a parameter the
+    // borrow may come from instead) or [[clang::lifetime_immortal]] on the
+    // function. Standard-library accessors are modeled via GSL recognition and
+    // are exempt.
     const auto *MD = dyn_cast<CXXMethodDecl>(Fn);
     if (!MD || !MD->isInstance() || isInStlNamespace(MD->getParent()))
       return;
     QualType RetTy = MD->getReturnType();
-    if (!isPointerLikeType(RetTy) && !RetTy->isReferenceType())
+    if (!isPointerLikeType(RetTy) && !RetTy->isReferenceType() &&
+        !FactMgr.getOriginMgr().hasOrigins(RetTy))
       return;
     if (implicitObjectParamIsLifetimeBound(MD) ||
         MD->hasAttr<LifetimeImmortalAttr>())

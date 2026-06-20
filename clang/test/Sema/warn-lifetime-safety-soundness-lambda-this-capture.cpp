@@ -21,7 +21,10 @@ struct W {
   }
 
   // A plain `[this]` capture that escapes is flagged too (no masking needed).
-  auto plain() { // expected-warning {{implicit this in intra-TU function should be marked [[clang::lifetimebound]]}}
+  // The closure return type carries a borrow of `this`, so -- like a pointer
+  // return -- it must be annotated; both the requirement and the suggestion fire.
+  auto plain() { // expected-warning {{implicit this in intra-TU function should be marked [[clang::lifetimebound]]}} \
+                 // expected-warning {{member function returning '(lambda at}}
     return [this]() { sink = x; }; // expected-note {{param returned here}}
   }
 };
