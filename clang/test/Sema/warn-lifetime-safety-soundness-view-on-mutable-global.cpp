@@ -115,6 +115,57 @@ public:
   void refresh() { cache = g_const; }
 };
 
+//===----------------------------------------------------------------------===//
+// The global owner reached through a non-owner WRAPPER.
+//===----------------------------------------------------------------------===//
+
+// A view can borrow the buffer of an owner that is a member of a non-owner
+// global record (`struct W { std::string s; } g_w;`). A [[lifetimebound]]
+// accessor returning a view of the member anchors the loan at the whole `g_w`
+// object, whose type is not itself a gsl::Owner -- so the owner-ness is detected
+// through the wrapper (the record transitively contains a mutable owner). The
+// view still borrows reallocatable storage and is flagged.
+
+struct Wrapper {
+  std::string owner;
+  std::string_view get() const [[clang::lifetimebound]] { return owner; }
+};
+Wrapper g_wrap;
+
+std::string_view from_wrapped_global() {
+  return g_wrap.get(); // expected-warning {{borrows from a mutable global or static object}}
+}
+
+// Cached into a [[gsl::Owner]] member (escape form), reported at the member.
+struct [[gsl::Owner]] WrapCache {
+private:
+  std::string_view sv; // expected-warning {{borrows from a mutable global or static object}}
+
+public:
+  void refresh() { sv = g_wrap.get(); }
+};
+
+// Negatives through the wrapper: a reference/pointer AT the owner member (its
+// object storage is stable; only its buffer moves), and a pointer at the whole
+// wrapper, are not flagged. Only a view into a buffer is.
+std::string &ref_at_wrapped_owner() {
+  return g_wrap.owner; // no-warning (reference at the stable owner object)
+}
+Wrapper *ptr_at_wrapper() {
+  return &g_wrap; // no-warning (points at the wrapper object)
+}
+
+// Negative: a wrapper with no owner (only stable scalars) is not flagged.
+struct PlainWrapper {
+  int value;
+  const int *get() const [[clang::lifetimebound]] { return &value; }
+};
+PlainWrapper g_plain;
+const int *from_plain_wrapper() {
+  return g_plain.get(); // no-warning (no reallocatable storage)
+}
+
+
 
 
 

@@ -843,8 +843,27 @@ public:
     for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
       const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
-      if (!VD || !VD->hasGlobalStorage() || VD->getType().isConstQualified() ||
-          !isGslOwnerType(VD->getType()))
+      if (!VD || !VD->hasGlobalStorage() || VD->getType().isConstQualified())
+        continue;
+      QualType GlobalTy = VD->getType();
+      bool DirectOwner = isGslOwnerType(GlobalTy);
+      // A global that is not itself an owner but is a record transitively
+      // containing a mutable owner (`struct W { std::string s; } g_w;`): a
+      // [[lifetimebound]] accessor returning a view of `s` anchors the loan at
+      // the whole `g_w` object, so the owner-ness must be detected through the
+      // wrapper. The loan path no longer records which sub-object is borrowed,
+      // so only a gsl::Pointer *view* (which views an owner's reallocatable
+      // buffer) is flagged here -- a raw pointer/reference could equally be at a
+      // stable scalar member or at the owner object itself, neither of which
+      // dangles.
+      bool WrapsOwner = false;
+      if (!DirectOwner)
+        if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
+          llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+          WrapsOwner = recordContainsMutableOwner(RD, Visited) &&
+                       isGslPointerType(ValueTy);
+        }
+      if (!DirectOwner && !WrapsOwner)
         continue;
       // The loan must be a borrow *into* the owner's contents, not the value of
       // the owner itself: `&g[0]`/`g.data()` borrow into `g`, whereas `&g` is a
@@ -855,7 +874,7 @@ public:
       QualType Pointee = ValueTy->getPointeeType();
       if (!Pointee.isNull() &&
           Pointee.getCanonicalType().getUnqualifiedType() ==
-              VD->getType().getCanonicalType().getUnqualifiedType())
+              GlobalTy.getCanonicalType().getUnqualifiedType())
         continue; // pointer/reference AT the object, not into it
       if (!ReportedMutableGlobalLocs.insert(Loc).second)
         return;
