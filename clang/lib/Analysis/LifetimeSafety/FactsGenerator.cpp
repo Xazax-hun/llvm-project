@@ -415,6 +415,19 @@ void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
   // GLValues (like EnumConstants).
   if (DRE->getFoundDecl()->isFunctionOrFunctionTemplate() || !DRE->isGLValue())
     return;
+  // A read of a structured-binding element. A scalar element (`int a` in
+  // `auto& [a, b] = obj;`) has no origin of its own, so handleUse below is a
+  // no-op and the read does not register against the decomposed object's
+  // borrow -- letting a use-after-free/scope of `obj` through the element slip
+  // (e.g. `auto& [a, b] = *heapPtr; delete heapPtr; use(a);`). Mark the
+  // decomposed object as used here so a borrow it holds stays live at this read
+  // and an expiry/invalidation of the source is reported. (For a by-value
+  // decomposition the decomposed object is an independent copy whose origin
+  // holds no borrow into the source, so this adds no false positive.)
+  if (const auto *BD = dyn_cast<BindingDecl>(DRE->getDecl()))
+    if (const ValueDecl *Decomposed = BD->getDecomposedDecl())
+      if (OriginNode *Node = getOriginNode(*Decomposed))
+        CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(DRE, Node));
   handleUse(DRE);
   // For all declarations with storage (non-references), we issue a loan
   // representing the borrow of the variable's storage itself.
