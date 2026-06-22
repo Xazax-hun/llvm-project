@@ -572,10 +572,20 @@ public:
   /// analysis cannot then prove the deallocation refers to a live, unaliased
   /// heap allocation. This is intentionally strict: every loan must be a heap
   /// allocation. Deallocations inside a destructor are exempt (freeing owned
-  /// members there is the normal ownership pattern).
+  /// members there is the normal ownership pattern) -- UNLESS the enclosing type
+  /// is a [[gsl::Pointer]] view. A view owns nothing, so its destructor must not
+  /// deallocate; a freeing view-destructor is a contract lie that silently turns
+  /// every borrow handed into the view (e.g. via aggregate initialization, which
+  /// has no constructor parameter to flag) into a dangling alias the caller
+  /// cannot see. Verify the body rather than trust the annotation (cf.
+  /// immortal-violation / lifetimebound-violation).
   void checkNakedDeallocation(const InvalidateOriginFact *IOF) {
-    if (!SemaHelper || isa_and_present<CXXDestructorDecl>(FD))
+    if (!SemaHelper)
       return;
+    if (const auto *DD = dyn_cast_or_null<CXXDestructorDecl>(FD))
+      if (const CXXRecordDecl *RD = DD->getParent();
+          !RD || !isGslPointerType(AST.getCanonicalTagType(RD)))
+        return;
     // Strict: a deallocation is safe only if every borrow flowing into it is a
     // tracked heap allocation. A non-heap loan (e.g. a stack borrow) cannot be
     // freed; an *empty* loan set means the allocation was never seen -- e.g.

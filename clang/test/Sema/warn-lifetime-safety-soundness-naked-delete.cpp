@@ -63,3 +63,32 @@ struct Cache {
     delete[] data; // expected-warning {{deleting a pointer whose allocation was not seen by lifetime safety analysis}}
   }
 };
+
+// The destructor exemption does NOT apply to a [[gsl::Pointer]] view: a view
+// owns nothing, so its destructor must not deallocate. A freeing view-destructor
+// is a contract lie -- a borrow handed into the view (e.g. by aggregate
+// initialization, which has no constructor parameter to flag) is silently turned
+// into a dangling alias the caller cannot see. Verify the body: the `delete` of
+// the (untracked) member pointer is naked.
+struct [[gsl::Pointer(int)]] BadView {
+  int *p;
+  ~BadView() { delete p; } // expected-warning {{deleting a pointer whose allocation was not seen by lifetime safety analysis}}
+};
+
+struct [[gsl::Pointer]] BadViewNoArg {
+  int *p;
+  ~BadViewNoArg() { delete[] p; } // expected-warning {{deleting a pointer whose allocation was not seen by lifetime safety analysis}}
+};
+
+// A [[gsl::Owner]]'s destructor is still exempt -- an owner is expected to free
+// the storage it owns.
+struct [[gsl::Owner(int)]] GoodOwner {
+  int *p;
+  ~GoodOwner() { delete p; } // no-warning
+};
+
+// A view with a trivial (non-freeing) destructor is fine.
+struct [[gsl::Pointer(int)]] GoodView {
+  int *p;
+};
+int sink_gv(GoodView v) { return *v.p; } // no-warning
