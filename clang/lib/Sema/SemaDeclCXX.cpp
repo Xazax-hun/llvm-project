@@ -7075,6 +7075,72 @@ ReportOverrides(Sema &S, unsigned DiagID, const CXXMethodDecl *MD,
   return IssuedDiagnostic;
 }
 
+namespace {
+/// Lifetime safety (safe programming model): for a [[gsl::Pointer]] view, no
+/// destructor that runs when the view is destroyed may deallocate -- a view owns
+/// nothing, so destroying it must free nothing. The view's OWN destructor is
+/// checked at the use site (the naked-delete pass drops its exemption for a
+/// view); this answers the complementary question for a SUBOBJECT (a base or
+/// member) whose destructor also runs.
+///
+/// Returns true if destroying an object of type `RD` MAY deallocate. Because a
+/// subobject's destructor body can live in another translation unit, the rule is
+/// conservative and cross-TU-sound. Destroying `RD` runs, in turn, `RD`'s own
+/// destructor body, then each base's and member's destructor -- so the check
+/// recurses through the whole subobject graph:
+///   - a [[gsl::Owner]] is exempt: freeing the resource it owns is its job;
+///   - a [[gsl::Pointer]] is exempt: it is independently verified by these same
+///     view rules;
+///   - a trivial destructor frees nothing;
+///   - a user-provided destructor must have a VISIBLE body that does not
+///     deallocate (otherwise -- body unseen, or it deallocates -- assume it may);
+///   - bases and members are checked recursively.
+bool destructorMayDeallocate(const CXXRecordDecl *RD, ASTContext &Ctx,
+                             llvm::SmallPtrSetImpl<const CXXRecordDecl *> &Seen) {
+  if (!RD || !RD->hasDefinition() || !Seen.insert(RD).second)
+    return false;
+  QualType T = Ctx.getCanonicalTagType(RD);
+  if (lifetimes::isGslOwnerType(T) || lifetimes::isGslPointerType(T))
+    return false;
+  const CXXDestructorDecl *DD = RD->getDestructor();
+  if (!DD || DD->isTrivial())
+    return false; // a trivial destructor (and all its subobjects) frees nothing.
+
+  // A user-written destructor body: it must be visible and free nothing.
+  if (DD->isUserProvided() && !DD->isDeleted()) {
+    const FunctionDecl *Def = nullptr;
+    if (!DD->getBody(Def) || !Def)
+      return true; // body not visible here -- could deallocate in another TU.
+    struct DeallocFinder : RecursiveASTVisitor<DeallocFinder> {
+      bool Found = false;
+      bool VisitCXXDeleteExpr(CXXDeleteExpr *) { return !(Found = true); }
+      bool VisitCallExpr(CallExpr *CE) {
+        if (const FunctionDecl *Callee = CE->getDirectCallee())
+          if (lifetimes::destructsFirstArg(*Callee))
+            return !(Found = true);
+        return true;
+      }
+    } Finder;
+    Finder.TraverseStmt(const_cast<Stmt *>(Def->getBody()));
+    if (Finder.Found)
+      return true;
+  }
+
+  // The base and member subobject destructors run too.
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (destructorMayDeallocate(B.getType()->getAsCXXRecordDecl(), Ctx, Seen))
+      return true;
+  for (const FieldDecl *F : RD->fields()) {
+    QualType FT = F->getType();
+    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+      FT = AT->getElementType();
+    if (destructorMayDeallocate(FT->getAsCXXRecordDecl(), Ctx, Seen))
+      return true;
+  }
+  return false;
+}
+} // namespace
+
 void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
   if (!Record)
     return;
@@ -7144,6 +7210,29 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
           FT->isReferenceType() || lifetimes::isGslPointerType(FT))
         Diag(F->getLocation(), diag::warn_lifetime_safety_owner_public_pointer)
             << F << F->getSourceRange();
+    }
+
+  // Lifetime safety (safe programming model): a [[gsl::Pointer]] view owns
+  // nothing, so destroying it must free nothing. Its own destructor is checked
+  // (the naked-delete pass drops the destructor exemption for a view), but a
+  // BASE subobject's destructor runs too -- and its body may be in another TU,
+  // out of the analysis's reach. A freeing base destructor under a view turns a
+  // borrow slipped into an inherited member (e.g. by aggregate base-init) into a
+  // silent dangling alias. Require each base to be a safe (non-deallocating) base
+  // for a view: itself a [[gsl::Pointer]], or with a visible destructor body that
+  // does not deallocate. Reject otherwise.
+  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
+      !getDiagnostics().isIgnored(
+          diag::warn_lifetime_safety_view_base_may_deallocate,
+          Record->getLocation()) &&
+      lifetimes::isGslPointerType(Context.getCanonicalTagType(Record)))
+    for (const CXXBaseSpecifier &B : Record->bases()) {
+      const CXXRecordDecl *Base = B.getType()->getAsCXXRecordDecl();
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Seen;
+      if (Base && destructorMayDeallocate(Base, Context, Seen))
+        Diag(Record->getLocation(),
+             diag::warn_lifetime_safety_view_base_may_deallocate)
+            << Base << Record << B.getSourceRange();
     }
 
   // Lifetime safety (safe programming model): a data member whose type is an

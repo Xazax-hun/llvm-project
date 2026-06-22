@@ -11203,6 +11203,13 @@ def warn_lifetime_safety_naked_delete
               "live, unaliased heap allocation">,
       InGroup<LifetimeSafetyNakedDelete>,
       DefaultIgnore;
+def warn_lifetime_safety_view_base_may_deallocate
+    : Warning<"base class %0 of [[gsl::Pointer]] %1 may deallocate in its "
+              "destructor; a view owns nothing, so destroying it must free "
+              "nothing -- mark the base [[gsl::Pointer]] or give it a destructor "
+              "whose visible body does not deallocate">,
+      InGroup<LifetimeSafetyNakedDelete>,
+      DefaultIgnore;
 def warn_lifetime_safety_unknown_ownership
     : Warning<"type %0 can hold a borrow but is annotated neither "
               "[[gsl::Owner]] nor [[gsl::Pointer]], so lifetime safety cannot "

@@ -92,3 +92,81 @@ struct [[gsl::Pointer(int)]] GoodView {
   int *p;
 };
 int sink_gv(GoodView v) { return *v.p; } // no-warning
+
+// A [[gsl::Pointer]] view's destructor is its OWN dtor body, but destroying it
+// also runs its base and member subobject destructors -- which may live in
+// another TU. A view must not deallocate when destroyed, so each subobject's
+// destructor must provably not deallocate: be trivial, be a [[gsl::Owner]] /
+// [[gsl::Pointer]] (an owner is meant to free; a view is itself verified), or
+// have a visible body that does not deallocate. Checked recursively at the view's
+// definition (cross-TU-sound).
+
+struct FreerBase {
+  int *p;
+  ~FreerBase() { delete p; } // freeing base, view-ness on the derived
+};
+struct [[gsl::Pointer(int)]] ViewFreeBase // expected-warning {{base class 'FreerBase' of [[gsl::Pointer]] 'ViewFreeBase' may deallocate in its destructor}}
+    : FreerBase {};
+
+// The base's destructor body is not visible here -- conservatively rejected.
+struct UnseenDtorBase {
+  int *p;
+  ~UnseenDtorBase();
+};
+struct [[gsl::Pointer(int)]] ViewUnseenBase // expected-warning {{base class 'UnseenDtorBase' of [[gsl::Pointer]] 'ViewUnseenBase' may deallocate in its destructor}}
+    : UnseenDtorBase {};
+
+// Indirect freeing base (through a plain intermediate): still caught, recursively.
+struct PlainMid : FreerBase {};
+struct [[gsl::Pointer(int)]] ViewIndirect // expected-warning {{base class 'PlainMid' of [[gsl::Pointer]] 'ViewIndirect' may deallocate in its destructor}}
+    : PlainMid {};
+
+// A freeing non-owner MEMBER of a base is caught too.
+struct Freer {
+  int *p;
+  ~Freer() { delete p; }
+};
+struct BaseWithFreerMember {
+  Freer f;
+};
+struct [[gsl::Pointer(int)]] ViewFreerMember // expected-warning {{base class 'BaseWithFreerMember' of [[gsl::Pointer]] 'ViewFreerMember' may deallocate in its destructor}}
+    : BaseWithFreerMember {};
+
+// Negatives.
+
+// A trivial base frees nothing.
+struct TrivialBase {
+  int *p;
+};
+struct [[gsl::Pointer(int)]] ViewTrivialBase : TrivialBase {}; // no-warning
+
+// A base whose visible destructor body does not deallocate.
+struct SafeBase {
+  int *p;
+  int n;
+  ~SafeBase() { n = 0; }
+};
+struct [[gsl::Pointer(int)]] ViewSafeBase : SafeBase {}; // no-warning
+
+// A base that is itself a [[gsl::Pointer]] -- independently verified.
+struct [[gsl::Pointer(int)]] ViewBase {
+  int *p;
+  ~ViewBase() {}
+};
+struct [[gsl::Pointer(int)]] ViewOfView : ViewBase {}; // no-warning
+
+// A base that owns the storage it frees ([[gsl::Owner]]) -- freeing is its job;
+// the same holds for a freeing gsl::Owner member of a base.
+struct [[gsl::Owner(int)]] OwnerBase {
+  int *p;
+  ~OwnerBase() { delete p; }
+};
+struct [[gsl::Pointer(int)]] ViewOwnerBase : OwnerBase {}; // no-warning
+
+struct BaseWithOwnerMember {
+  OwnerBase o;
+};
+struct [[gsl::Pointer(int)]] ViewOwnerMember : BaseWithOwnerMember {}; // no-warning
+
+// A non-view derived class with a freeing base is fine (not a view contract).
+struct PlainDerived : FreerBase {}; // no-warning
