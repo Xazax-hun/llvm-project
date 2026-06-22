@@ -189,4 +189,31 @@ struct [[gsl::Pointer]] WrapperView {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// `const` dropped by an explicit C-style / functional cast (not the const_cast
+// keyword, which is flagged syntactically): a const method mutating a directly-
+// owned owner field through such a cast subverts const just as a `mutable` or a
+// pointer indirection would.
+//===----------------------------------------------------------------------===//
+
+struct CastDoc {
+  Buf b;
+
+  // C-style cast dropping const on the owner field itself.
+  void grow_field_cast() const {
+    ((Buf &)b).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // C-style cast of `this` to a non-const pointer, then a field mutation.
+  void grow_this_cast() const {
+    ((CastDoc *)this)->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Functional-notation cast of `this`.
+  void grow_this_func_cast() const {
+    ((CastDoc *)(this))->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+
+  // A value-preserving cast that does NOT drop const, used read-only: fine.
+  int read_const_cast() const { return ((const Buf &)b).read(); } // no-warning
+};
+
 

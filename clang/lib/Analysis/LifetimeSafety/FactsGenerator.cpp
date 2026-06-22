@@ -143,13 +143,27 @@ static QualType arrayElementType(QualType T) {
   return T;
 }
 
+/// True if an explicit cast from `From` to `To` removes `const` from the
+/// referent/pointee -- a const-dropping cast (`(T&)cs` / `static_cast<T*>(cp)` /
+/// `const_cast` / a C-style equivalent) that hands a const method mutable access.
+static bool castDropsConst(QualType From, QualType To) {
+  auto referent = [](QualType T) {
+    T = T.getNonReferenceType();
+    if (T->isPointerType())
+      T = T->getPointeeType();
+    return T;
+  };
+  return referent(From).isConstQualified() && !referent(To).isConstQualified();
+}
+
 /// Walks a member-call receiver `E` down to `this`, returning true iff the
 /// receiver object is reached from a const `this` by crossing a pointer or
 /// reference indirection through which `const` does NOT propagate -- so a const
 /// method can mutate it. Crossings: a member ARROW whose base is not `this`
 /// (`this->ptr->field`: dereferencing a pointer member), a REFERENCE data member,
-/// a POINTER subscript, or an explicit `*ptr` deref. `CallDerefsPointer` is the
-/// call's own arrow (`this->ptr->method()`), also a crossing.
+/// a POINTER subscript, an explicit `*ptr` deref, or an explicit const-dropping
+/// cast (`(T&)member` / `(Derived*)this`). `CallDerefsPointer` is the call's own
+/// arrow (`this->ptr->method()`), also a crossing.
 ///
 /// The implicit `this->member` arrow is NOT a crossing: a const method's `this`
 /// is `const T*`, so `const` propagates through it (a `this`-rooted owner that
@@ -164,8 +178,15 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
       return Crossed;
     if (const auto *ME = dyn_cast<MemberExpr>(E)) {
       const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
-      if (ME->isArrow() && !isThisExpr(Base))
-        Crossed = true; // dereferences a pointer reached through the chain
+      // An arrow dereferences the base pointer; `const` propagates to the pointee
+      // only if the pointee is const. `this->member` in a const method has a
+      // `const` pointee (NOT a crossing). A raw pointer member, or a const-
+      // dropping cast of `this` (`((Box*)this)->m`), yields a non-const pointee --
+      // a crossing through which a const method gains mutable access.
+      if (ME->isArrow())
+        if (QualType BaseTy = ME->getBase()->getType(); BaseTy->isPointerType() &&
+            !BaseTy->getPointeeType().isConstQualified())
+          Crossed = true;
       if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
         if (FD->getType()->isReferenceType())
           Crossed = true; // a reference member -- const does not propagate
@@ -183,6 +204,17 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
       if (!Base->getType()->isArrayType())
         Crossed = true; // subscripting a pointer is an indirection
       E = Base;
+      continue;
+    }
+    // An explicit cast (C-style / static_cast / const_cast / reinterpret_cast /
+    // functional) that IgnoreParenImpCasts does not strip. Peel it to continue
+    // toward `this`; if it drops const it gives mutable access a const method
+    // should not have -- a crossing (e.g. `((std::string&)s).append()` or
+    // `((Derived*)this)->ownerField.mutate()`).
+    if (const auto *ECE = dyn_cast<ExplicitCastExpr>(E)) {
+      if (castDropsConst(ECE->getSubExpr()->getType(), ECE->getType()))
+        Crossed = true;
+      E = ECE->getSubExpr()->IgnoreParenImpCasts();
       continue;
     }
     return false; // not a `this`-rooted designation
