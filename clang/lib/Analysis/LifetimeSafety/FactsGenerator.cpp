@@ -723,7 +723,16 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
     // borrow-returning accessors relies on). Since IssueFact *replaces* an
     // origin's loan set, issue the field loan first (the MemberExpr origin is
     // fresh) and then *merge* the base flow (Kill=false) rather than replacing.
-    bool OwnerField = isMutableOwnerType(FD->getType());
+    // Issue the field-rooted owner loan only when the field access denotes
+    // STABLE storage -- i.e. the access is an lvalue (`this->buf`, a local
+    // `h.buf`). When the base is a materialized temporary, the field access is an
+    // xvalue (`Holder{}.s`): the owner subobject lives only as long as the
+    // temporary (a lifetime-extended-temporary reference does not give it
+    // borrowable storage, Origins.cpp TODO), so manufacturing a FieldDecl-rooted
+    // loan here would launder a lost loan into a tracked one that never expires.
+    // Leave such a borrow lost so it surfaces as -Wlifetime-safety-lost-loan,
+    // matching the direct `const std::string& r = std::string(...)` form.
+    bool OwnerField = isMutableOwnerType(FD->getType()) && ME->isLValue();
     if (OwnerField) {
       const Loan *L = FactMgr.getLoanMgr().createLoan(AccessPath(FD), ME);
       CurrentBlockFacts.push_back(
