@@ -140,6 +140,41 @@ struct DeepFacade {
   }
 };
 
+// The const-drop need not be a `*`/`->` on a member: any `this`-derived
+// expression with an indirection type whose pointee is non-const subverts
+// `const`. A sibling const ACCESSOR that hands out a non-const pointer/reference
+// into an owner reached from `this` (e.g. `unique_ptr::get()` re-exposed as a
+// `T*`, or a `T&` accessor) is such a crossing -- using it to mutate is flagged.
+struct AccessorFacade {
+  Ptr<Buf> owned;
+  // The accessor bodies themselves hand out mutable access to the owner from a
+  // const method (case 1: a non-const-consumed smart-pointer deref).
+  Buf *getPtr() const { return owned.operator->(); } // expected-warning {{const member function mutates an owner through a pointer member}}
+  Buf &getRef() const { return *owned; }             // expected-warning {{const member function mutates an owner through a pointer member}}
+
+  void via_ptr_arrow() const {
+    getPtr()->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_ptr_deref() const {
+    (*getPtr()).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_ref() const {
+    getRef().mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Read-only use of the accessors is fine.
+  int read_ptr() const { return getPtr()->read(); } // no-warning
+  int read_ref() const { return getRef().read(); }  // no-warning
+};
+
+// A const accessor returning a CONST pointer/reference is not a crossing.
+struct ConstAccessorFacade {
+  Ptr<Buf> owned;
+  const Buf *getPtr() const { return owned.operator->(); } // no-warning
+  const Buf &getRef() const { return *owned; }             // no-warning
+  int read_ptr() const { return getPtr()->read(); } // no-warning
+  int read_ref() const { return getRef().read(); }  // no-warning
+};
+
 
 //===----------------------------------------------------------------------===//
 // `const` does not propagate through a RAW pointer either: a const method that

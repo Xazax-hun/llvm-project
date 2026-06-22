@@ -217,6 +217,40 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
       E = ECE->getSubExpr()->IgnoreParenImpCasts();
       continue;
     }
+    // A member-call result in the chain. The principle: in a const method, no
+    // `this`-derived expression may have an indirection type with a non-const
+    // pointee. So a member accessor whose declared return type is a pointer or
+    // reference to a NON-const pointee/referent (`unique_ptr::get()` -> `T*`, a
+    // `T* getPtr() const` / `T& getRef() const`) hands out mutable access a const
+    // method should not have -- a crossing. Continue toward `this` through the
+    // call's object argument. (`operator*`/`operator->` on a smart-pointer member
+    // are owned by case (1) of handleConstSubversion; excluded here to avoid
+    // double-reporting.)
+    if (const auto *CE = dyn_cast<CallExpr>(E)) {
+      const auto *Callee = dyn_cast_or_null<FunctionDecl>(CE->getCalleeDecl());
+      if (!Callee)
+        return false;
+      if (OverloadedOperatorKind OO = Callee->getOverloadedOperator();
+          OO == OO_Star || OO == OO_Arrow)
+        return false; // smart-pointer deref -- handled by case (1).
+      // Use the DECLARED return type (a reference-returning call's expression
+      // type is the referent, so the indirection is otherwise invisible).
+      QualType RetTy = Callee->getReturnType();
+      QualType Referent;
+      if (RetTy->isReferenceType())
+        Referent = RetTy.getNonReferenceType();
+      else if (RetTy->isPointerType())
+        Referent = RetTy->getPointeeType();
+      if (!Referent.isNull() && !Referent.isConstQualified())
+        Crossed = true;
+      const Expr *Obj = nullptr;
+      if (const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE))
+        Obj = MCE->getImplicitObjectArgument();
+      if (!Obj)
+        return false; // a non-member call is not a `this`-rooted designation.
+      E = Obj->IgnoreParenImpCasts();
+      continue;
+    }
     return false; // not a `this`-rooted designation
   }
 }
@@ -907,23 +941,25 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   case UO_Deref: {
     const Expr *SubExpr = UO->getSubExpr();
     killAndFlowOrigin(*UO, *SubExpr);
-    // Const-subversion: in a const member function, `*this->rawptr` where
-    // `rawptr` is a raw pointer to an owner yields mutable access to the pointee
-    // (`const` does not propagate through a raw pointer). Flag unless the
-    // dereference is consumed const-ly (a const reference/argument, a copy, or a
-    // const member call). Mirrors the smart-pointer handling in
-    // handleConstSubversion; the `ptr->method()` arrow form is handled there.
+    // Const-subversion: in a const member function, `*expr` where `expr` is a
+    // pointer that reaches a mutable owner from `this` across a non-const-pointee
+    // indirection (`*this->rawptr`, `*getPtr()`, ...) yields mutable access the
+    // `const` should have protected. Flag unless the dereference is consumed
+    // const-ly (a const reference/argument, a copy, or a const member call). The
+    // `expr->method()` arrow form is handled in handleConstSubversion.
     if (const auto *EnclMD = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
         EnclMD && EnclMD->isConst())
-      if (const auto *ME = memberThroughArraySubscripts(SubExpr);
-          ME && isThisExpr(ME->getBase()))
-        if (const auto *FieldD = dyn_cast<FieldDecl>(ME->getMemberDecl());
-            FieldD && arrayElementType(FieldD->getType())->isPointerType() &&
-            isGslOwnerType(
-                arrayElementType(FieldD->getType())->getPointeeType()) &&
+      if (QualType PointeeTy = SubExpr->getType()->getPointeeType();
+          !PointeeTy.isNull()) {
+        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+        if ((isGslOwnerType(PointeeTy) ||
+             recordContainsMutableOwner(PointeeTy->getAsCXXRecordDecl(),
+                                        Visited)) &&
+            constDroppedReachingThis(SubExpr, /*CallDerefsPointer=*/true) &&
             !isConstConsumed(UO, AC.getParentMap()))
           CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
               UntrackedConstructReason::ConstMethodIndirectMutation, UO));
+      }
     return;
   }
   case UO_PreInc:
