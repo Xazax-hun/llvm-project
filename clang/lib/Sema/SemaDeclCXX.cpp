@@ -7214,26 +7214,40 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
 
   // Lifetime safety (safe programming model): a [[gsl::Pointer]] view owns
   // nothing, so destroying it must free nothing. Its own destructor is checked
-  // (the naked-delete pass drops the destructor exemption for a view), but a
-  // BASE subobject's destructor runs too -- and its body may be in another TU,
-  // out of the analysis's reach. A freeing base destructor under a view turns a
-  // borrow slipped into an inherited member (e.g. by aggregate base-init) into a
-  // silent dangling alias. Require each base to be a safe (non-deallocating) base
-  // for a view: itself a [[gsl::Pointer]], or with a visible destructor body that
-  // does not deallocate. Reject otherwise.
+  // (the naked-delete pass drops the destructor exemption for a view), but every
+  // BASE and MEMBER subobject destructor runs too -- and its body may be in
+  // another TU, out of the analysis's reach. A freeing subobject destructor under
+  // a view turns a borrow slipped into the view (e.g. by aggregate init) into a
+  // silent dangling alias. Require each base/member to be a safe (non-
+  // deallocating) subobject for a view: itself a [[gsl::Owner]] (freeing what it
+  // owns is its job) or [[gsl::Pointer]] (independently verified), trivially
+  // destructible, or with a visible destructor body that does not deallocate
+  // (checked recursively). Reject otherwise.
   if (!Record->isInvalidDecl() && !Record->isDependentType() &&
       !getDiagnostics().isIgnored(
           diag::warn_lifetime_safety_view_base_may_deallocate,
           Record->getLocation()) &&
-      lifetimes::isGslPointerType(Context.getCanonicalTagType(Record)))
+      lifetimes::isGslPointerType(Context.getCanonicalTagType(Record))) {
     for (const CXXBaseSpecifier &B : Record->bases()) {
       const CXXRecordDecl *Base = B.getType()->getAsCXXRecordDecl();
       llvm::SmallPtrSet<const CXXRecordDecl *, 8> Seen;
       if (Base && destructorMayDeallocate(Base, Context, Seen))
         Diag(Record->getLocation(),
              diag::warn_lifetime_safety_view_base_may_deallocate)
-            << Base << Record << B.getSourceRange();
+            << /*base*/ 0 << Base << Record << B.getSourceRange();
     }
+    for (const FieldDecl *F : Record->fields()) {
+      QualType FT = F->getType();
+      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+        FT = AT->getElementType();
+      const CXXRecordDecl *MemberRD = FT->getAsCXXRecordDecl();
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Seen;
+      if (MemberRD && destructorMayDeallocate(MemberRD, Context, Seen))
+        Diag(F->getLocation(),
+             diag::warn_lifetime_safety_view_base_may_deallocate)
+            << /*member*/ 1 << MemberRD << Record << F->getSourceRange();
+    }
+  }
 
   // Lifetime safety (safe programming model): a data member whose type is an
   // owner-of-indirection (e.g. std::vector<std::string_view>, or

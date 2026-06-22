@@ -11204,10 +11204,11 @@ def warn_lifetime_safety_naked_delete
       InGroup<LifetimeSafetyNakedDelete>,
       DefaultIgnore;
 def warn_lifetime_safety_view_base_may_deallocate
-    : Warning<"base class %0 of [[gsl::Pointer]] %1 may deallocate in its "
-              "destructor; a view owns nothing, so destroying it must free "
-              "nothing -- mark the base [[gsl::Pointer]] or give it a destructor "
-              "whose visible body does not deallocate">,
+    : Warning<"%select{base class|member}0 %1 of [[gsl::Pointer]] %2 may "
+              "deallocate in its destructor; a view owns nothing, so destroying "
+              "it must free nothing -- make the %select{base|member type}0 "
+              "[[gsl::Pointer]] or give it a destructor whose visible body does "
+              "not deallocate">,
       InGroup<LifetimeSafetyNakedDelete>,
       DefaultIgnore;
 def warn_lifetime_safety_unknown_ownership

@@ -170,3 +170,41 @@ struct [[gsl::Pointer(int)]] ViewOwnerMember : BaseWithOwnerMember {}; // no-war
 
 // A non-view derived class with a freeing base is fine (not a view contract).
 struct PlainDerived : FreerBase {}; // no-warning
+
+// The same rule applies to a view's direct MEMBER subobjects, not just bases:
+// destroying the view runs each member's destructor too.
+
+// A freeing member (directly, and nested through a plain wrapper).
+struct [[gsl::Pointer(int)]] ViewFreerMemberDirect {
+  Freer f; // expected-warning {{member 'Freer' of [[gsl::Pointer]] 'ViewFreerMemberDirect' may deallocate in its destructor}}
+  int *v;
+};
+struct WrapFreer {
+  Freer f;
+};
+struct [[gsl::Pointer(int)]] ViewFreerMemberNested {
+  WrapFreer w; // expected-warning {{member 'WrapFreer' of [[gsl::Pointer]] 'ViewFreerMemberNested' may deallocate in its destructor}}
+  int *v;
+};
+// Member whose destructor body is not visible -- conservatively rejected.
+struct UnseenFreer {
+  int *p;
+  ~UnseenFreer();
+};
+struct [[gsl::Pointer(int)]] ViewUnseenMember {
+  UnseenFreer f; // expected-warning {{member 'UnseenFreer' of [[gsl::Pointer]] 'ViewUnseenMember' may deallocate in its destructor}}
+};
+
+// Negatives for the member path.
+struct [[gsl::Pointer(int)]] ViewOwnerFieldMember {
+  OwnerBase o; // no-warning (a gsl::Owner member frees what it owns)
+  int *v;
+};
+struct [[gsl::Pointer(int)]] ViewSafeMember {
+  SafeBase s; // no-warning (visible non-deallocating destructor)
+  int *v;
+};
+struct [[gsl::Pointer(int)]] ViewTrivialMember {
+  TrivialBase t; // no-warning
+  int *v;
+};
