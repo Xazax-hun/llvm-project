@@ -199,21 +199,58 @@ struct [[gsl::Pointer]] WrapperView {
 struct CastDoc {
   Buf b;
 
-  // C-style cast dropping const on the owner field itself.
+  // C-style cast dropping const on the owner field itself. Flagged both at the
+  // cast site (a cast that casts away constness) and by the analysis (the const
+  // method mutates the owner through the cast).
   void grow_field_cast() const {
-    ((Buf &)b).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    ((Buf &)b).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+                         // expected-warning {{a cast that casts away constness}}
   }
   // C-style cast of `this` to a non-const pointer, then a field mutation.
   void grow_this_cast() const {
-    ((CastDoc *)this)->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    ((CastDoc *)this)->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+                                   // expected-warning {{a cast that casts away constness}}
   }
   // Functional-notation cast of `this`.
   void grow_this_func_cast() const {
-    ((CastDoc *)(this))->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    ((CastDoc *)(this))->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+                                     // expected-warning {{a cast that casts away constness}}
   }
 
   // A value-preserving cast that does NOT drop const, used read-only: fine.
   int read_const_cast() const { return ((const Buf &)b).read(); } // no-warning
 };
+
+//===----------------------------------------------------------------------===//
+// A C-style or functional cast that casts away constness is, like the
+// 'const_cast' keyword, flagged at the CAST SITE -- independent of how the
+// result is later used (a local pointer/reference, a helper, ...). This catches
+// const-subversion laundered past the receiver-based analysis (e.g. binding the
+// cast to a local pointer first), and a const-dropping void* roundtrip that the
+// keyword check does not see.
+//===----------------------------------------------------------------------===//
+
+void cstyle_drop_ref(const int &cr) {
+  (int &)cr = 5; // expected-warning {{a cast that casts away constness}}
+}
+void cstyle_drop_ptr(const int *cp) {
+  int *p = (int *)cp; // expected-warning {{a cast that casts away constness}}
+  *p = 5;
+}
+void cstyle_drop_void_roundtrip(const int *cp) {
+  int *p = (int *)(const void *)cp; // expected-warning {{a cast that casts away constness}}
+  *p = 5;
+}
+using IntPtr = int *;
+void functional_drop(const int *cp) {
+  IntPtr p = IntPtr(cp); // expected-warning {{a cast that casts away constness}}
+  *p = 5;
+}
+
+// Negatives: casts that do not remove const.
+int value_cast(double d) { return (int)d; }               // no-warning
+const int *add_const(int *p) { return (const int *)p; }   // no-warning
+char *reinterpret_same_const(int *p) { return (char *)p; } // no-warning
+long ptr_to_int(int *p) { return (long)p; }                // no-warning
 
 

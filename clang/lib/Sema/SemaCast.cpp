@@ -375,7 +375,7 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
     // Lifetime safety (safe programming model): 'const_cast' can subvert the
     // const-correctness the analysis relies on to assume const member functions
     // do not invalidate borrows.
-    Diag(OpLoc, diag::warn_lifetime_safety_const_cast);
+    Diag(OpLoc, diag::warn_lifetime_safety_const_cast) << /*const_cast*/ 0;
     return Op.complete(CXXConstCastExpr::Create(Context, Op.ResultType,
                                   Op.ValueKind, Op.SrcExpr.get(), DestTInfo,
                                                 OpLoc, Parens.getEnd(),
@@ -3466,6 +3466,40 @@ static void DiagnoseCastQual(Sema &Self, const ExprResult &SrcExpr,
         << TheOffendingSrcType << TheOffendingDestType << qualifiers;
 }
 
+/// DiagnoseLifetimeSafetyConstCast - A C-style or functional cast that casts
+/// away constness is semantically a const_cast, and can subvert the const-
+/// correctness lifetime safety relies on (a const member function is assumed not
+/// to invalidate borrows into the object). Warn at the cast site, mirroring the
+/// const_cast-keyword diagnostic -- location-based, so it catches the cast no
+/// matter how its result is later laundered (a local pointer/reference, a helper,
+/// etc.). Only meaningful for a pointer/reference cast where const is removed.
+static void DiagnoseLifetimeSafetyConstCast(Sema &Self,
+                                            const ExprResult &SrcExpr,
+                                            QualType DestType,
+                                            SourceLocation OpLoc) {
+  if (SrcExpr.isInvalid() ||
+      Self.getDiagnostics().isIgnored(diag::warn_lifetime_safety_const_cast,
+                                      OpLoc))
+    return;
+  QualType SrcType = SrcExpr.get()->getType();
+  // CastsAwayConstness requires pointer/member-pointer operands unless the
+  // destination is a reference.
+  if (!DestType->isReferenceType() &&
+      !((SrcType->isAnyPointerType() || SrcType->isMemberPointerType() ||
+         SrcType->isBlockPointerType()) &&
+        (DestType->isAnyPointerType() || DestType->isMemberPointerType() ||
+         DestType->isBlockPointerType())))
+    return;
+  Qualifiers CastAway;
+  if (CastsAwayConstness(Self, SrcType, DestType, /*CheckCVR=*/true,
+                         /*CheckObjCLifetime=*/false,
+                         /*TheOffendingSrcType=*/nullptr,
+                         /*TheOffendingDestType=*/nullptr, &CastAway) &&
+      CastAway.hasConst())
+    Self.Diag(OpLoc, diag::warn_lifetime_safety_const_cast)
+        << /*a cast that casts away constness*/ 1;
+}
+
 ExprResult Sema::BuildCStyleCastExpr(SourceLocation LPLoc,
                                      TypeSourceInfo *CastTypeInfo,
                                      SourceLocation RPLoc,
@@ -3486,6 +3520,9 @@ ExprResult Sema::BuildCStyleCastExpr(SourceLocation LPLoc,
 
   // -Wcast-qual
   DiagnoseCastQual(Op.Self, Op.SrcExpr, Op.DestType);
+
+  // -Wlifetime-safety-const-subversion: a C-style cast that casts away const.
+  DiagnoseLifetimeSafetyConstCast(Op.Self, Op.SrcExpr, Op.DestType, LPLoc);
 
   Op.checkQualifiedDestType();
 
@@ -3513,6 +3550,9 @@ ExprResult Sema::BuildCXXFunctionalCastExpr(TypeSourceInfo *CastTypeInfo,
 
   // -Wcast-qual
   DiagnoseCastQual(Op.Self, Op.SrcExpr, Op.DestType);
+
+  // -Wlifetime-safety-const-subversion: a functional cast that casts away const.
+  DiagnoseLifetimeSafetyConstCast(Op.Self, Op.SrcExpr, Op.DestType, LPLoc);
 
   return Op.complete(CXXFunctionalCastExpr::Create(
       Context, Op.ResultType, Op.ValueKind, CastTypeInfo, Op.Kind,

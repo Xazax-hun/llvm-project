@@ -11274,9 +11274,10 @@ def warn_lifetime_safety_mutable_field
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
 def warn_lifetime_safety_const_cast
-    : Warning<"'const_cast' can subvert the const-correctness that lifetime "
-              "safety relies on to assume const member functions do not "
-              "invalidate borrows into the object">,
+    : Warning<"%select{'const_cast'|a cast that casts away constness}0 can "
+              "subvert the const-correctness that lifetime safety relies on to "
+              "assume const member functions do not invalidate borrows into the "
+              "object">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
 def warn_lifetime_safety_owner_captures_borrow
