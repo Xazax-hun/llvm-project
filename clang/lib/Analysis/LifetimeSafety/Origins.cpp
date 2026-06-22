@@ -103,6 +103,12 @@ private:
 bool OriginManager::hasOrigins(QualType QT, bool IntrinsicOnly) const {
   if (QT->isPointerOrReferenceType() || isGslPointerType(QT))
     return true;
+  // An array of pointer-like elements is tracked with a single origin shared
+  // across all elements (indices are not disambiguated). A borrow stored into
+  // any element is merged into that origin.
+  if (QT->isArrayType())
+    return hasOrigins(QT->getAsArrayTypeUnsafe()->getElementType(),
+                      IntrinsicOnly);
   if (!IntrinsicOnly &&
       LifetimeAnnotatedOriginTypes.contains(QT.getCanonicalType().getTypePtr()))
     return true;
@@ -201,6 +207,17 @@ OriginList *OriginManager::buildListForType(QualType QT, const T *Node) {
   // `_Atomic(T)` is transparent for lifetime purposes: build the node for T.
   if (const auto *AT = QT->getAs<AtomicType>())
     return buildListForType(AT->getValueType(), Node);
+  // An array shares a single origin across all of its elements; model it as if
+  // it were one element. `arr[i]` accesses (built in getOrCreateList) reuse
+  // this same origin, so a borrow stored into any element is visible through
+  // every element. Mark it ambiguous: a store to an element is a weak update
+  // (merge, not kill), since the index is not disambiguated.
+  if (QT->isArrayType()) {
+    OriginList *List =
+        buildListForType(QT->getAsArrayTypeUnsafe()->getElementType(), Node);
+    AllOrigins[List->getOuterOriginID().Value].IsAmbiguous = true;
+    return List;
+  }
   OriginList *Head = createNode(Node, QT);
 
   if (QT->isPointerOrReferenceType()) {
@@ -278,6 +295,20 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
       Head = getOrCreateList(ReferencedDecl);
     }
     return ExprToList[E] = Head;
+  }
+
+  // An array subscript `arr[i]` accesses an element. All elements share the
+  // array's single element-origin (indices are not disambiguated), and the
+  // array's own lvalue list already has the `[storage] -> [element-value]`
+  // shape an element access needs, so reuse it directly. A borrow stored into
+  // one element is then visible through every element access. This applies only
+  // to genuine array subscripts; a subscript of a *pointer* (e.g. an `int a[]`
+  // parameter, which is really `int *`) is an ordinary indirection.
+  if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+    const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
+    if (Base->getType()->isArrayType())
+      if (OriginList *BaseList = getOrCreateList(Base))
+        return ExprToList[E] = BaseList;
   }
 
   // If E is an lvalue , it refers to storage. We model this storage as the

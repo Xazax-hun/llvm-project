@@ -2481,25 +2481,97 @@ void pointer_arithmetic_use_after_scope() {
   (void)*p3;    // expected-note {{later used here}}
 }
 
-// FIXME: Copying a pointer value out of an array element is not tracked.
+// Copying a pointer value out of an array element is tracked: all elements
+// share the array's element-origin.
 void copy_pointer_from_array_use_after_scope() {
   int* q;
   {
     int x = 0;
-    int* arr[10] = {&x};
+    int* arr[10] = {&x}; // expected-warning {{local variable 'x' does not live long enough}}
     q = arr[0];
-  }
-  (void)*q; // Should warn.
+  }         // expected-note {{destroyed here}}
+  (void)*q; // expected-note {{later used here}}
 }
 
-// FIXME: A pointer inside an array becoming dangling is not detected.
+// A pointer stored into an array element becoming dangling is detected.
 void pointer_in_array_use_after_scope() {
   int* arr[10];
   {
     int x = 0;
-    arr[0] = &x;
+    arr[0] = &x; // expected-warning {{local variable 'x' does not live long enough}}
+  }              // expected-note {{destroyed here}}
+  (void)*arr[0]; // expected-note {{later used here}}
+}
+
+// Elements share one origin, so a borrow stored at one index is seen through
+// another (a conservative over-approximation).
+void array_element_cross_index() {
+  int* arr[10];
+  {
+    int x = 0;
+    arr[0] = &x; // expected-warning {{local variable 'x' does not live long enough}}
+  }              // expected-note {{destroyed here}}
+  (void)*arr[1]; // expected-note {{later used here}}
+}
+
+// Multi-dimensional arrays of pointers collapse to a single element-origin.
+void nested_array_use_after_scope() {
+  int* arr[2][2];
+  {
+    int x = 0;
+    arr[0][1] = &x; // expected-warning {{local variable 'x' does not live long enough}}
+  }                 // expected-note {{destroyed here}}
+  (void)*arr[1][0]; // expected-note {{later used here}}
+}
+
+// A borrow to storage that outlives the use is not a dangle: no false positive.
+int array_global_int;
+void array_element_no_false_positive() {
+  int* arr[10];
+  arr[0] = &array_global_int;
+  (void)*arr[0]; // no-warning
+}
+
+// A second store to a different element is a weak update (the shared origin
+// merges), so it must not strong-update away a still-live borrow.
+void array_element_weak_update() {
+  int* arr[10];
+  {
+    int x = 0;
+    arr[0] = &x;                // expected-warning {{local variable 'x' does not live long enough}}
+    arr[1] = &array_global_int; // a second store must not drop &x
+  }                             // expected-note {{destroyed here}}
+  (void)*arr[0];                // expected-note {{later used here}}
+}
+
+// The weak update composes with the multi-dimensional collapse: a second store
+// to a different cell must not drop a still-live borrow.
+void nested_array_weak_update() {
+  int* arr[2][2];
+  {
+    int x = 0;
+    arr[0][0] = &x;                // expected-warning {{local variable 'x' does not live long enough}}
+    arr[1][1] = &array_global_int; // a second store must not drop &x
+  }                                // expected-note {{destroyed here}}
+  (void)*arr[0][0];                // expected-note {{later used here}}
+}
+
+// FIXME: A store through a may-alias lvalue (a conditional, where the
+// destination is not a single identified storage) is not modeled: the
+// conditional's operands flow into a fresh origin and the store lands there
+// instead of propagating back to the underlying array(s). This is a general
+// gap, independent of arrays (e.g. `(c ? p : q) = &local` with plain pointers
+// is also missed); fixing it needs lvalue origins that alias the underlying
+// storage plus may-alias (write-to-many) handling.
+void array_may_alias_lvalue_fixme(bool c) {
+  int* arr[10];
+  int* arr2[10];
+  {
+    int x = 0;
+    (c ? arr[0] : arr[1]) = &x; // no-warning (FIXME: should warn)
+    (c ? arr : arr2)[0] = &x;   // no-warning (FIXME: should warn)
   }
-  (void)*arr[0]; // Should warn.
+  (void)*arr[0];
 }
 
 } // namespace array

@@ -53,6 +53,11 @@ struct Origin {
   /// Null for synthetic lvalue origins (e.g., outer origin of DeclRefExpr).
   const Type *Ty;
 
+  /// Whether the storage this origin denotes is not precisely identified, so a
+  /// store through it must be a weak update (merge, not kill). Set for the
+  /// shared element-origin of an array (the index is not disambiguated).
+  bool IsAmbiguous = false;
+
   Origin(OriginID ID, const clang::ValueDecl *D, const Type *QT)
       : ID(ID), Ptr(D), Ty(QT) {}
   Origin(OriginID ID, const clang::Expr *E, const Type *QT)

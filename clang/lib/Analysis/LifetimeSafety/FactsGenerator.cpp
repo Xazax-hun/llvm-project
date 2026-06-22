@@ -432,6 +432,12 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
     LHSList = getOriginsList(*ME_LHS);
     assert(LHSList && "LHS is a MemberExpr and should have an origin list");
   }
+  // An array element access (`arr[i]`) reuses the array's shared element-origin
+  // (see getOrCreateList); fetch its list so the store is modeled.
+  if (const auto *ASE_LHS = dyn_cast<ArraySubscriptExpr>(LHSExpr);
+      ASE_LHS &&
+      ASE_LHS->getBase()->IgnoreParenImpCasts()->getType()->isArrayType())
+    LHSList = getOriginsList(*ASE_LHS);
   if (!LHSList)
     return;
   OriginList *RHSList = getOriginsList(*RHSExpr);
@@ -474,9 +480,17 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
           FactMgr.createFact<KillOriginFact>(LHSInner->getOuterOriginID()));
     return;
   }
-  // Kill the old loans of the destination origin and flow the new loans
-  // from the source origin.
-  flow(LHSList->peelOuterOrigin(), RHSList, /*Kill=*/true);
+  // Kill the old loans of the destination origin and flow the new loans from
+  // the source. A store through an ambiguous lvalue (an array element, whose
+  // index is not disambiguated) is a weak update: merge rather than kill. The
+  // ambiguity is read off the destination origin being written -- set where the
+  // origin is built (see buildListForType) -- so it stays in sync with the
+  // origin model rather than being re-derived from the assignment's AST shape.
+  OriginList *DestList = LHSList->peelOuterOrigin();
+  bool Merge = DestList && FactMgr.getOriginMgr()
+                               .getOrigin(DestList->getOuterOriginID())
+                               .IsAmbiguous;
+  flow(DestList, RHSList, /*Kill=*/!Merge);
 
   // In C, assignment expressions are not GLValues, so the assignment result has
   // the assigned value origins, not the LHS storage origin.
