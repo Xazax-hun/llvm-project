@@ -149,4 +149,44 @@ struct RawWidget {
   void run() const { pimpl->doStuff(); } // no-warning
 };
 
+//===----------------------------------------------------------------------===//
+// `const` does not propagate through the indirection even when the pointer /
+// reference member points at a NON-owner record that merely *contains* a mutable
+// owner: a const method reaching the owner through it (`this->p->ownerField.
+// mutate()`) still gets mutable access and can invalidate a borrow a sibling
+// accessor handed out. The member need not point directly at the owner.
+//===----------------------------------------------------------------------===//
+
+struct Holder {
+  Buf b; // a gsl::Owner field, reached through the indirection below
+};
+
+struct ThroughWrapper {
+  Holder *hp;
+  Holder &hr;
+  ThroughWrapper(Holder &h) : hp(&h), hr(h) {}
+
+  // Pointer member to a non-owner that contains the owner.
+  void via_ptr() const {
+    hp->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Reference member to a non-owner that contains the owner.
+  void via_ref() const {
+    hr.b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Read-only access through the indirection is fine.
+  void read_ptr() const { (void)hp->b.read(); } // no-warning
+  void read_ref() const { (void)hr.b.read(); }  // no-warning
+};
+
+// A view whose pointer member reaches an owner through a non-owner intermediate,
+// mutating it in a const method -- the bug that motivated this: a borrow into the
+// owner co-held by the caller is silently invalidated.
+struct [[gsl::Pointer]] WrapperView {
+  Holder *p;
+  void grow() const {
+    p->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+};
+
 

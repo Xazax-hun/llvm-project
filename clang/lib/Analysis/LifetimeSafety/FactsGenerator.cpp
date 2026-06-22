@@ -143,6 +143,52 @@ static QualType arrayElementType(QualType T) {
   return T;
 }
 
+/// Walks a member-call receiver `E` down to `this`, returning true iff the
+/// receiver object is reached from a const `this` by crossing a pointer or
+/// reference indirection through which `const` does NOT propagate -- so a const
+/// method can mutate it. Crossings: a member ARROW whose base is not `this`
+/// (`this->ptr->field`: dereferencing a pointer member), a REFERENCE data member,
+/// a POINTER subscript, or an explicit `*ptr` deref. `CallDerefsPointer` is the
+/// call's own arrow (`this->ptr->method()`), also a crossing.
+///
+/// The implicit `this->member` arrow is NOT a crossing: a const method's `this`
+/// is `const T*`, so `const` propagates through it (a `this`-rooted owner that
+/// crosses no indirection would be const and the mutating call would not
+/// compile). Returns false for a receiver that is not a `this`-rooted
+/// designation.
+static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
+  bool Crossed = CallDerefsPointer;
+  E = E->IgnoreParenImpCasts();
+  while (true) {
+    if (isThisExpr(E))
+      return Crossed;
+    if (const auto *ME = dyn_cast<MemberExpr>(E)) {
+      const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
+      if (ME->isArrow() && !isThisExpr(Base))
+        Crossed = true; // dereferences a pointer reached through the chain
+      if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
+        if (FD->getType()->isReferenceType())
+          Crossed = true; // a reference member -- const does not propagate
+      E = Base;
+      continue;
+    }
+    if (const auto *UO = dyn_cast<UnaryOperator>(E);
+        UO && UO->getOpcode() == UO_Deref) {
+      Crossed = true;
+      E = UO->getSubExpr()->IgnoreParenImpCasts();
+      continue;
+    }
+    if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+      const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
+      if (!Base->getType()->isArrayType())
+        Crossed = true; // subscripting a pointer is an indirection
+      E = Base;
+      continue;
+    }
+    return false; // not a `this`-rooted designation
+  }
+}
+
 /// Returns true if a parameter of type `PT` lets the call mutate the owner the
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
@@ -2476,16 +2522,38 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
     return;
   }
 
-  // (2) Raw-pointer arrow: `this->rawptr->nonConstMethod()`. `const` does not
-  // propagate through a raw pointer either, so the pointee is mutable. The
-  // receiver is the loaded pointer member; a non-const call on the owner pointee
-  // is a mutation. (Const-method calls are read-only; the `*ptr` deref forms go
-  // through VisitUnaryOperator.)
-  if (Method->isInstance() && !Method->isConst() && !isa<CXXConstructorDecl>(FD) &&
-      FieldD && FieldTy->isPointerType() &&
-      isGslOwnerType(FieldTy->getPointeeType()))
-    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-        UntrackedConstructReason::ConstMethodIndirectMutation, Call));
+  // (2) A non-const method call whose receiver is a mutable owner reached from
+  // `this` through a raw pointer or reference member: `this->rawptr->push_back()`
+  // (rawptr -> owner) or `this->rawptr->ownerField.push_back()` /
+  // `this->ref.ownerField.push_back()` (the member points at a non-owner record
+  // that contains an owner). `const` does not propagate through a raw pointer or
+  // reference, so the owner is mutable even in a const method. (A `this`-rooted
+  // owner that did NOT cross such an indirection would itself be const and the
+  // mutating call would not compile; a `mutable` owner field is handled by the
+  // mutable-field declaration check.)
+  if (Method->isInstance() && !Method->isConst() &&
+      !isa<CXXConstructorDecl>(FD)) {
+    // A bare-deref receiver `(*ptr).method()` is handled by VisitUnaryOperator
+    // (raw pointer) or case (1) (smart pointer); skip to avoid double-reporting.
+    const Expr *Recv = Args[0]->IgnoreParenImpCasts();
+    if (!isa<UnaryOperator>(Recv)) {
+      // `recv->method()`: the receiver expression is a pointer the call
+      // dereferences. Peel it to the pointee (the object actually mutated); for
+      // `obj.method()` the receiver IS the object.
+      QualType RecvTy = Args[0]->getType().getNonReferenceType();
+      bool CallDerefsPointer = RecvTy->isPointerType();
+      if (CallDerefsPointer)
+        RecvTy = RecvTy->getPointeeType();
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+      bool RecvIsMutableOwner =
+          isGslOwnerType(RecvTy) ||
+          recordContainsMutableOwner(RecvTy->getAsCXXRecordDecl(), Visited);
+      if (RecvIsMutableOwner &&
+          constDroppedReachingThis(Args[0], CallDerefsPointer))
+        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+            UntrackedConstructReason::ConstMethodIndirectMutation, Call));
+    }
+  }
 }
 
 void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
