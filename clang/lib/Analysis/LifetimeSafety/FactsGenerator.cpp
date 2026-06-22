@@ -156,6 +156,10 @@ static bool castDropsConst(QualType From, QualType To) {
   return referent(From).isConstQualified() && !referent(To).isConstQualified();
 }
 
+// Defined below; declared here for use in constDroppedReachingThis.
+static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
+                                      unsigned I);
+
 /// Walks a member-call receiver `E` down to `this`, returning true iff the
 /// receiver object is reached from a const `this` by crossing a pointer or
 /// reference indirection through which `const` does NOT propagate -- so a const
@@ -217,15 +221,18 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
       E = ECE->getSubExpr()->IgnoreParenImpCasts();
       continue;
     }
-    // A member-call result in the chain. The principle: in a const method, no
+    // A call result in the chain. The principle: in a const method, no
     // `this`-derived expression may have an indirection type with a non-const
-    // pointee. So a member accessor whose declared return type is a pointer or
-    // reference to a NON-const pointee/referent (`unique_ptr::get()` -> `T*`, a
-    // `T* getPtr() const` / `T& getRef() const`) hands out mutable access a const
-    // method should not have -- a crossing. Continue toward `this` through the
-    // call's object argument. (`operator*`/`operator->` on a smart-pointer member
-    // are owned by case (1) of handleConstSubversion; excluded here to avoid
-    // double-reporting.)
+    // pointee. A call (member accessor OR a free function) whose declared return
+    // type is a pointer/reference to a NON-const pointee/referent
+    // (`unique_ptr::get()` -> `T*`, `T* getPtr() const`, `T& getRef() const`, or a
+    // free `T* launder(const unique_ptr<T>& a [[lifetimebound]])`) hands out
+    // mutable access a const method should not have. Continue toward `this`
+    // through whatever the result borrows: a member call's implicit object, or any
+    // [[clang::lifetimebound]] argument. The result dropping const is itself a
+    // crossing; compose it (and any crossing already seen) into the recursion's
+    // seed. (`operator*`/`operator->` on a smart-pointer member are owned by case
+    // (1) of handleConstSubversion; excluded here to avoid double-reporting.)
     if (const auto *CE = dyn_cast<CallExpr>(E)) {
       const auto *Callee = dyn_cast_or_null<FunctionDecl>(CE->getCalleeDecl());
       if (!Callee)
@@ -241,15 +248,25 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
         Referent = RetTy.getNonReferenceType();
       else if (RetTy->isPointerType())
         Referent = RetTy->getPointeeType();
-      if (!Referent.isNull() && !Referent.isConstQualified())
-        Crossed = true;
-      const Expr *Obj = nullptr;
-      if (const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE))
-        Obj = MCE->getImplicitObjectArgument();
-      if (!Obj)
-        return false; // a non-member call is not a `this`-rooted designation.
-      E = Obj->IgnoreParenImpCasts();
-      continue;
+      bool Seed = Crossed || (!Referent.isNull() && !Referent.isConstQualified());
+      const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE);
+      const auto *MD = dyn_cast_or_null<CXXMethodDecl>(Callee);
+      bool ImplicitObject = MCE && MD && !MD->isExplicitObjectMemberFunction();
+      // The implicit object of a member call (lifetimebound `this` is implicit).
+      if (ImplicitObject &&
+          constDroppedReachingThis(
+              MCE->getImplicitObjectArgument()->IgnoreParenImpCasts(), Seed))
+        return true;
+      // Any [[clang::lifetimebound]] argument the result may borrow from.
+      for (unsigned I = 0, N = CE->getNumArgs(); I != N; ++I) {
+        const ParmVarDecl *PVD = paramForArg(
+            Callee, /*IsInstance=*/MD && MD->isInstance(),
+            ImplicitObject ? I + 1 : I);
+        if (PVD && PVD->hasAttr<clang::LifetimeBoundAttr>() &&
+            constDroppedReachingThis(CE->getArg(I)->IgnoreParenImpCasts(), Seed))
+          return true;
+      }
+      return false; // result does not reach `this`.
     }
     return false; // not a `this`-rooted designation
   }

@@ -175,6 +175,38 @@ struct ConstAccessorFacade {
   int read_ref() const { return getRef().read(); }  // no-warning
 };
 
+// The laundering accessor need not be a member: a FREE function that returns a
+// non-const indirection into one of its [[clang::lifetimebound]] arguments
+// (`launder(owned)` returning a non-const `Buf*`/`Buf&`) is the same crossing
+// when the bound argument is `this`-rooted. Follow the lifetimebound argument(s)
+// back to `this`.
+Buf *launderPtr(const Ptr<Buf> &p [[clang::lifetimebound]]) { return p.operator->(); }
+Buf &launderRef(const Ptr<Buf> &p [[clang::lifetimebound]]) { return *p; }
+const Buf *peekPtr(const Ptr<Buf> &p [[clang::lifetimebound]]) { return p.operator->(); }
+
+struct FreeLaunderFacade {
+  Ptr<Buf> owned;
+  void via_free_ptr() const {
+    launderPtr(owned)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_free_ptr_deref() const {
+    (*launderPtr(owned)).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void via_free_ref() const {
+    launderRef(owned).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // A free launderer returning a CONST indirection is fine.
+  int read_free() const { return peekPtr(owned)->read(); } // no-warning
+};
+
+// Negative: a free launderer applied to an UNRELATED owner (not reached from
+// `this`) is not a const subversion of `this`.
+Ptr<Buf> g_owned;
+struct UnrelatedFacade {
+  int x;
+  void f() const { launderPtr(g_owned)->mutate(); } // no-warning (mutates a global, not this)
+};
+
 
 //===----------------------------------------------------------------------===//
 // `const` does not propagate through a RAW pointer either: a const method that
