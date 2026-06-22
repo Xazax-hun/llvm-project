@@ -221,6 +221,31 @@ static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
   }
 }
 
+/// If `E` designates a data member reached from `this` through a chain of
+/// const-PROPAGATING accesses -- plain value member accesses (`this->a.b.m`) and
+/// array subscripts, but NO pointer/reference indirection (which const does not
+/// cross, and which is handled separately) -- return that member (`m`); else
+/// null. Used to find a smart-pointer member of `this` whose pointee `const`
+/// does not protect, even when the member is nested one or more value-subobjects
+/// deep (`this->a.sp`), not only an immediate `this->member`.
+static const FieldDecl *thisRootedValueMember(const Expr *E) {
+  const auto *ME = memberThroughArraySubscripts(E);
+  if (!ME)
+    return nullptr;
+  const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
+  if (!FD)
+    return nullptr;
+  const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
+  if (isThisExpr(Base))
+    return FD;
+  // The member access must be `.` (a value subobject), not `->` (a pointer
+  // indirection); recurse on the base, which must also be a this-rooted value
+  // designation.
+  if (ME->isArrow())
+    return nullptr;
+  return thisRootedValueMember(Base) ? FD : nullptr;
+}
+
 /// Returns true if a parameter of type `PT` lets the call mutate the owner the
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
@@ -2514,13 +2539,12 @@ void FactsGenerator::handleConstSubversion(const Expr *Call,
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
   if (!Method || Args.empty())
     return;
-  // The receiver, after stripping the load of the pointer member, should be
-  // `this->m` (or `this->arr[i]`, which denotes the array member `this->arr`).
-  const auto *ME = memberThroughArraySubscripts(Args[0]);
-  const FieldDecl *FieldD =
-      ME && isThisExpr(ME->getBase())
-          ? dyn_cast<FieldDecl>(ME->getMemberDecl())
-          : nullptr;
+  // The receiver, after stripping the load of the pointer member, should be a
+  // smart-pointer data member reached from `this` through a chain of value
+  // subobjects -- `this->m`, `this->arr[i]`, or nested `this->a.b.sp`. (A
+  // pointer/reference hop in the chain is a different, non-const-propagating
+  // case, handled below in (2).)
+  const FieldDecl *FieldD = thisRootedValueMember(Args[0]);
   // The effective member type (an array-of-pointer member hands out a pointer
   // element).
   QualType FieldTy = FieldD ? arrayElementType(FieldD->getType()) : QualType();

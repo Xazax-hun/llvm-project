@@ -110,6 +110,36 @@ struct OwnerFacade {
   }
 };
 
+// The smart-pointer member need not be a DIRECT `this->member`: a const method
+// reaching an owning smart pointer through a chain of value-subobject members
+// (`this->a.p`, `this->a.b.p`) still gets mutable access to the pointee, because
+// `const` does not propagate through the smart pointer. Detection follows the
+// value-subobject chain from `this`.
+struct NestedInner {
+  Ptr<Buf> p; // owning smart pointer one sub-object deep
+};
+struct NestedFacade {
+  NestedInner in;
+  void grow() const {
+    in.p->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  void grow_deref() const {
+    (*in.p).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Read-only access through the chain is fine.
+  int read() const { return in.p->read(); } // no-warning
+};
+
+struct DeepA {
+  NestedInner mid;
+};
+struct DeepFacade {
+  DeepA a;
+  void grow() const {
+    a.mid.p->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+};
+
 
 //===----------------------------------------------------------------------===//
 // `const` does not propagate through a RAW pointer either: a const method that
