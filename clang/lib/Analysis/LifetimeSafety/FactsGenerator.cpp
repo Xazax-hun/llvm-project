@@ -2020,8 +2020,14 @@ void FactsGenerator::handleAssumedInvalidatingCall(
         Method->isVirtual() && RecvRD && RecvRD->isPolymorphic();
     bool StaticallyOwner =
         OwnerReceiver || recordHasGslOwnerField(RecvTy) || MaybeDynamicOwner;
+    // A recognized non-invalidating accessor (`data()`, `front()`, `at()`,
+    // `operator[]`, ...) does not reallocate, whether the owner is the direct
+    // receiver (`v.data()`) or reached through a pointer (`p->data()`). Test the
+    // pointee record so the allow-list applies in both cases -- otherwise a read
+    // through a pointer-to-owner is spuriously treated as a mutation.
+    bool PointeeIsOwner = isGslOwnerType(RecvRecordTy);
     if ((StaticallyOwner || RecvRD) &&
-        !(OwnerReceiver && isNonInvalidatingMethod(*Method)))
+        !(PointeeIsOwner && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
         bool RequireOwnerLoan = !StaticallyOwner;
         invalidate(L->getOriginID(), RequireOwnerLoan);

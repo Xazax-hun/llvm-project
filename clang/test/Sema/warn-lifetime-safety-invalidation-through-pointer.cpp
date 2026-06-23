@@ -74,3 +74,19 @@ int const_method_ok() {
   (void)p->c_str(); // no-warning (const)
   return v.size();
 }
+
+//===----------------------------------------------------------------------===//
+// Negative: a recognized NON-INVALIDATING accessor (`operator[]`, `at()`,
+// `front()`, `data()`, ...) does not reallocate, so it does not invalidate a
+// borrow into the pointee -- even when it is a NON-const overload reached
+// through a pointer (`p->at(i)`, `(*p)[i]`). The non-invalidating allow-list
+// must be consulted on the pointee record, not only on a direct owner receiver.
+//===----------------------------------------------------------------------===//
+
+int nonconst_accessor_through_pointer_ok() {
+  unique_ptr<vector<char>> p;
+  char *e = &(*p)[0];  // borrow into the pointee vector
+  (void)p->at(0);      // non-const at() through the pointer -- not a mutation
+  (void)(*p)[0];       // non-const operator[] through the pointer -- not a mutation
+  return *e;           // no-warning
+}
