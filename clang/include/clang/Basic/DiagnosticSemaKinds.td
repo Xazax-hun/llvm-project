@@ -11309,6 +11309,14 @@ def warn_lifetime_safety_const_indirect_mutation
               "not invalidate borrows into the object">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
+def warn_lifetime_safety_const_indirect_escape
+    : Warning<"this const member function hands out a non-const pointer or "
+              "reference into an owner reached from the object; the caller can "
+              "mutate the owner through it, so lifetime safety can no longer "
+              "assume const member functions do not invalidate borrows into "
+              "the object">,
+      InGroup<LifetimeSafetyConstSubversion>,
+      DefaultIgnore;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.

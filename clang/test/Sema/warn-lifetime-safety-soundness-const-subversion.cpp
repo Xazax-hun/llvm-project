@@ -1,4 +1,5 @@
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-const-subversion -verify %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-const-subversion -verify=expected %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++2b -Wlifetime-safety-const-subversion -verify=expected,cxx23 %s
 
 // The analysis assumes a const member function does not invalidate borrows into
 // the object. A 'mutable' field or a 'const_cast' can subvert that assumption
@@ -70,8 +71,8 @@ struct Doc {
     take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
   }
   void via_binding() const {
-    Buf &r = *buf; // expected-warning {{const member function mutates an owner through a pointer member}}
-    r.mutate();
+    Buf &r = *buf;
+    r.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
   }
 
   // Read-only (const) uses are fine.
@@ -144,23 +145,23 @@ struct DeepFacade {
 // expression with an indirection type whose pointee is non-const subverts
 // `const`. A sibling const ACCESSOR that hands out a non-const pointer/reference
 // into an owner reached from `this` (e.g. `unique_ptr::get()` re-exposed as a
-// `T*`, or a `T&` accessor) is such a crossing -- using it to mutate is flagged.
+// `T*`, or a `T&` accessor) is such a crossing -- caught at the accessor that
+// produces it (the non-const indirection escapes via return), which is the root
+// cause. The downstream call sites (`getPtr()->mutate()`) are not themselves
+// const-subversions here -- `getPtr` is unannotated, so its result is an
+// untracked borrow flagged separately by -Wlifetime-safety-unannotated-indirection.
 struct AccessorFacade {
   Ptr<Buf> owned;
-  // The accessor bodies themselves hand out mutable access to the owner from a
-  // const method (case 1: a non-const-consumed smart-pointer deref).
-  Buf *getPtr() const { return owned.operator->(); } // expected-warning {{const member function mutates an owner through a pointer member}}
-  Buf &getRef() const { return *owned; }             // expected-warning {{const member function mutates an owner through a pointer member}}
+  // The accessor bodies hand out mutable access to the owner from a const
+  // method: the non-const `Buf*`/`Buf&` escapes via return.
+  Buf *getPtr() const { return owned.operator->(); } // expected-warning {{const member function hands out a non-const pointer or reference into an owner reached from the object}}
+  Buf &getRef() const { return *owned; }             // expected-warning {{const member function hands out a non-const pointer or reference into an owner reached from the object}}
 
-  void via_ptr_arrow() const {
-    getPtr()->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
-  }
-  void via_ptr_deref() const {
-    (*getPtr()).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
-  }
-  void via_ref() const {
-    getRef().mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
-  }
+  // Using the accessors is downstream of the flagged source; not reported by
+  // the const-subversion check (the untracked-indirection check covers them).
+  void via_ptr_arrow() const { getPtr()->mutate(); }   // no-warning
+  void via_ptr_deref() const { (*getPtr()).mutate(); } // no-warning
+  void via_ref() const { getRef().mutate(); }          // no-warning
   // Read-only use of the accessors is fine.
   int read_ptr() const { return getPtr()->read(); } // no-warning
   int read_ref() const { return getRef().read(); }  // no-warning
@@ -199,6 +200,58 @@ struct FreeLaunderFacade {
   int read_free() const { return peekPtr(owned)->read(); } // no-warning
 };
 
+//===----------------------------------------------------------------------===//
+// The crossing is detected from the loan provenance, not the syntactic shape:
+// laundering the `this`-derived owner through a ternary or comma operator before
+// mutating it is still flagged, because the borrow's provenance flows through
+// the dataflow regardless of how it is spelled.
+//===----------------------------------------------------------------------===//
+
+struct LaunderShapes {
+  Ptr<Buf> a;
+  Ptr<Buf> b;
+  // Ternary selecting between two `this`-derived owners, then mutating.
+  void via_ternary(bool c) const {
+    (c ? a : b)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Comma operator: the result is the (mutable) `this`-derived owner.
+  void via_comma() const {
+    (void(0), a)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Selecting then reading is fine.
+  int read_ternary(bool c) const { return (c ? a : b)->read(); } // no-warning
+};
+
+#if defined(__cpp_explicit_this_parameter)
+//===----------------------------------------------------------------------===//
+// C++23 deducing-this: an explicit object parameter `this const X& self` is
+// `const`-trusted exactly like an implicit `const this`. Mutating an owner
+// reached through `self`, or handing out a non-const indirection into it, is the
+// same subversion. A by-VALUE explicit object is a copy -- mutating it cannot
+// affect the caller's object -- so it is not trusted.
+//===----------------------------------------------------------------------===//
+
+struct DeducingThis {
+  Ptr<Buf> owned;
+  // Mutation through the explicit `const` object reference.
+  void via_self(this const DeducingThis &self) {
+    self.owned->mutate(); // cxx23-warning {{const member function mutates an owner through a pointer member}}
+  }
+  // Handing out a non-const indirection from a deducing-this const method.
+  Buf *getPtr(this const DeducingThis &self) {
+    return self.owned.operator->(); // cxx23-warning {{const member function hands out a non-const pointer or reference into an owner reached from the object}}
+  }
+  // A by-value explicit object is a copy: not trusted, nothing subverted.
+  void by_value(this DeducingThis self) {
+    self.owned->mutate(); // no-warning
+  }
+  // Read through the const object is fine.
+  int read_self(this const DeducingThis &self) {
+    return self.owned->read(); // no-warning
+  }
+};
+#endif
+
 // Negative: a free launderer applied to an UNRELATED owner (not reached from
 // `this`) is not a const subversion of `this`.
 Ptr<Buf> g_owned;
@@ -223,8 +276,8 @@ struct RawDoc {
     take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
   }
   void deref_binding() const {
-    Buf &r = *buf; // expected-warning {{const member function mutates an owner through a pointer member}}
-    r.mutate();
+    Buf &r = *buf;
+    r.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
   }
   void paren_deref() const {
     (*buf).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}

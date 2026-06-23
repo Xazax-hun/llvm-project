@@ -176,6 +176,10 @@ private:
   llvm::DenseSet<SourceLocation> ReportedLostLoanLocs;
   /// Source locations already reported as borrowing from a mutable global.
   llvm::DenseSet<SourceLocation> ReportedMutableGlobalLocs;
+  /// Mutating expressions already reported as a const-method subversion, to
+  /// avoid duplicate warnings when several invalidation facts or loans match the
+  /// same mutating call.
+  llvm::DenseSet<const Expr *> ReportedConstSubversionExprs;
   /// Expressions already reported as an untracked construct, to avoid duplicate
   /// soundness warnings when a construct is visited more than once.
   llvm::DenseSet<const Expr *> ReportedUntrackedExprs;
@@ -233,6 +237,7 @@ public:
         if (const auto *EF = F->getAs<ExpireFact>())
           checkExpiry(EF);
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
+          checkConstSubversion(IOF);
           if (IOF->isAssumed())
             checkAssumedInvalidation(IOF);
           else {
@@ -245,6 +250,7 @@ public:
           checkAnnotations(OEF);
           checkBorrowFromMutableGlobal(OEF);
           checkEscapedLostLoan(OEF);
+          checkConstSubversionEscape(OEF);
         }
         else if (const auto *UF = F->getAs<UseFact>()) {
           checkLostLoan(UF);
@@ -603,6 +609,165 @@ public:
       }
     if (!Safe)
       SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
+  }
+
+  /// Soundness check: a member function whose object the analysis trusts as
+  /// `const` must not mutate an owner reachable from that object -- doing so
+  /// would invalidate borrows a sibling accessor handed out, breaking the
+  /// assumption that const methods do not invalidate borrows into the object.
+  /// `const` does not protect a pointee/referent reached through a pointer or
+  /// reference, so a mutation can slip through any number of laundering forms
+  /// (`this->p->m()`, `getPtr()->m()`, `(c?p:q)->m()`, a deducing-this
+  /// `self.p->m()`, ...). Rather than match those AST shapes, this is loan-based:
+  /// the dataflow already roots the mutating call's receiver loan at the object
+  /// it reached (a `$this`/`$self` placeholder, or an `Uninitialized`/field loan
+  /// rooted at a member of the object's record). If the invalidated origin holds
+  /// such a loan inside a const-trusted method, the mutation reached `this`.
+  /// If the current function is a `const`-trusted member function -- a `const`
+  /// instance method, or a C++23 deducing-this method whose explicit object
+  /// parameter is a `const` *reference* (`this const X& self`; a by-value
+  /// explicit object is a copy, so mutating it cannot affect the caller's
+  /// object) -- returns its record and, for the deducing-this form, sets `Self`
+  /// to the explicit object parameter. Returns null otherwise.
+  const CXXRecordDecl *constTrustedSelf(const ParmVarDecl *&Self) const {
+    Self = nullptr;
+    const auto *MD = dyn_cast_or_null<CXXMethodDecl>(FD);
+    if (!MD)
+      return nullptr;
+    if (MD->isExplicitObjectMemberFunction()) {
+      const ParmVarDecl *Obj = MD->getParamDecl(0);
+      QualType T = Obj->getType();
+      if (!T->isReferenceType() || !T.getNonReferenceType().isConstQualified())
+        return nullptr;
+      Self = Obj;
+    } else if (!MD->isConst()) {
+      return nullptr;
+    }
+    return MD->getParent();
+  }
+
+  /// True if any loan held by `OID` at program point `PP` is rooted at the
+  /// `const`-trusted object `Record` -- the `$this`/`$self` placeholder, or an
+  /// `Uninitialized`/field loan whose decl is a (possibly transitive /
+  /// inherited) member of `Record`. `Self` is the deducing-this explicit object
+  /// parameter (or null).
+  bool originReachesConstObject(OriginID OID, ProgramPoint PP,
+                                const CXXRecordDecl *Record,
+                                const ParmVarDecl *Self) const {
+    for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
+      if (const CXXMethodDecl *PThis = AP.getAsPlaceholderThis()) {
+        if (PThis->getParent()->getCanonicalDecl() == Record->getCanonicalDecl())
+          return true;
+      } else if (const ParmVarDecl *PParam = AP.getAsPlaceholderParam()) {
+        if (PParam == Self)
+          return true; // the deducing-this explicit object
+      } else {
+        const ValueDecl *VD = AP.getAsValueDecl();
+        if (!VD)
+          VD = AP.getAsUninitialized();
+        if (const auto *Field = dyn_cast_or_null<FieldDecl>(VD)) {
+          llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+          if (recordReachesField(Record, Field, Visited))
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// True if `T` (peeling one pointer/reference) is, or transitively contains, a
+  /// mutable owner -- the only thing whose mutation can dangle a borrow a sibling
+  /// accessor handed out.
+  static bool pointeeIsMutableOwner(QualType T) {
+    if (T.isNull())
+      return false;
+    const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+    return isGslOwnerType(T) ||
+           (RD && recordContainsMutableOwner(RD, Visited));
+  }
+
+  void checkConstSubversion(const InvalidateOriginFact *IOF) {
+    if (!SemaHelper)
+      return;
+    const Expr *InvExpr = IOF->getInvalidationExpr();
+    if (!InvExpr)
+      return; // a non-Expr invalidation (e.g. a destructor trigger).
+    const ParmVarDecl *Self = nullptr;
+    const CXXRecordDecl *Record = constTrustedSelf(Self);
+    if (!Record)
+      return;
+    // The mutation only subverts `const` if the thing mutated is (or transitively
+    // contains) a mutable owner -- only then can it invalidate a borrow a sibling
+    // accessor handed out. The invalidated receiver's type is the mutated object
+    // (peel pointer/reference). A mutation of a plain non-owner pointee (a pimpl
+    // whose Impl holds no owner) cannot dangle a view, so it is not flagged.
+    QualType RecvTy;
+    if (const Type *T = FactMgr.getOriginMgr().getOrigin(IOF->getInvalidatedOrigin()).Ty)
+      RecvTy = QualType(T, 0).getNonReferenceType();
+    // The receiver origin does not always carry a type (e.g. a member access off
+    // a cast result). For a member/operator call the mutated object is the
+    // implicit object argument, whose type is always available -- use it.
+    if (RecvTy.isNull()) {
+      if (const auto *MCE = dyn_cast<CXXMemberCallExpr>(InvExpr))
+        RecvTy = MCE->getImplicitObjectArgument()->getType().getNonReferenceType();
+      else if (const auto *OCE = dyn_cast<CXXOperatorCallExpr>(InvExpr);
+               OCE && OCE->getNumArgs() > 0)
+        RecvTy = OCE->getArg(0)->getType().getNonReferenceType();
+    }
+    if (!RecvTy.isNull() && RecvTy->isPointerType())
+      RecvTy = RecvTy->getPointeeType();
+    if (!pointeeIsMutableOwner(RecvTy))
+      return;
+    if (originReachesConstObject(IOF->getInvalidatedOrigin(), IOF, Record,
+                                 Self) &&
+        ReportedConstSubversionExprs.insert(InvExpr).second)
+      SemaHelper->reportConstMethodIndirectMutation(InvExpr);
+  }
+
+  /// Soundness: a `const`-trusted member function that hands out a *non-const*
+  /// pointer/reference into a mutable owner reached from the object -- by
+  /// returning it, or storing it to a field/global -- subverts `const`. The
+  /// caller can mutate the owner through the escaped indirection, invalidating
+  /// borrows a sibling accessor returned, which the analysis assumes a const
+  /// member function cannot do. (A `const Buf*`/`const Buf&` return is fine: the
+  /// pointee is protected. A by-value view return is fine: not a raw
+  /// pointer/reference, so the caller holds no handle into the object.) This is
+  /// the escape-site counterpart of `checkConstSubversion`, catching the
+  /// subversion at the accessor that produces it rather than at a later mutation.
+  void checkConstSubversionEscape(const OriginEscapesFact *OEF) {
+    if (!SemaHelper)
+      return;
+    const ParmVarDecl *Self = nullptr;
+    const CXXRecordDecl *Record = constTrustedSelf(Self);
+    if (!Record)
+      return;
+    OriginID OID = OEF->getEscapedOriginID();
+    const Type *T = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+    if (!T)
+      return;
+    QualType EscTy(T, 0);
+    // Only a raw pointer/reference whose pointee is non-const is a handle the
+    // caller can mutate through.
+    QualType Pointee;
+    if (EscTy->isPointerType())
+      Pointee = EscTy->getPointeeType();
+    else if (EscTy->isReferenceType())
+      Pointee = EscTy.getNonReferenceType();
+    else
+      return;
+    if (Pointee.isConstQualified() || !pointeeIsMutableOwner(Pointee))
+      return;
+    if (!originReachesConstObject(OID, OEF, Record, Self))
+      return;
+    const Expr *E = nullptr;
+    if (const auto *RE = dyn_cast<ReturnEscapeFact>(OEF))
+      E = RE->getReturnExpr();
+    if (!E)
+      return;
+    if (ReportedConstSubversionExprs.insert(E).second)
+      SemaHelper->reportConstMethodIndirectEscape(E);
   }
 
   /// Soundness check for "assumed" invalidations (a non-const operation on an

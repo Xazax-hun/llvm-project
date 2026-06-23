@@ -5,9 +5,10 @@
 // into it dangles when the const method reserves/reallocates. The const-
 // subversion check recognized an owning-smart-pointer member only as a direct
 // `this->member` (isThisExpr on the receiver base), so the one-sub-object-deeper
-// `this->a.sp->reserve()` slipped. Found by the multi-agent bypass hunt. Fixed by
-// following a chain of const-propagating value-subobject accesses from `this`
-// (thisRootedValueMember).
+// `this->a.sp->reserve()` slipped. Found by the multi-agent bypass hunt. Now
+// handled by the loan-based const-subversion check: the mutated receiver's loan
+// is rooted at a (transitive) member of the `const`-trusted object, so the depth
+// of value-subobject accesses no longer matters.
 // EXPECT-ASAN: heap-use-after-free
 #include <memory>
 #include <string>

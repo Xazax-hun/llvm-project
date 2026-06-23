@@ -3,11 +3,12 @@
 // or `((Box*)this)->s.append`). The model trusts a const method not to invalidate
 // borrows into the object; a lifetimebound accessor (`view()`) ties the borrow
 // into `s` to the object, so lost-loan/unannotated-indirection don't fire, and
-// the const-subversion handler missed it because constDroppedReachingThis walked
+// the const-subversion handler missed it because the assignment routing walked
 // via IgnoreParenImpCasts (stripping implicit casts but not the explicit C-style
 // cast) -- so it never saw a const-dropping crossing. Found by the multi-agent
-// bypass hunt. Fixed by recognizing an explicit const-dropping cast (and keying
-// the arrow crossing on a non-const pointee) in constDroppedReachingThis.
+// bypass hunt. Fixed by recognizing an explicit const-dropping cast at the cast
+// site (and, in the loan-based const-subversion check, by deriving the receiver
+// type from the mutating member call when the cast-result origin carries none).
 // EXPECT-ASAN: heap-use-after-free
 #include <string>
 #include <string_view>

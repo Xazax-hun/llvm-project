@@ -143,160 +143,6 @@ static QualType arrayElementType(QualType T) {
   return T;
 }
 
-/// True if an explicit cast from `From` to `To` removes `const` from the
-/// referent/pointee -- a const-dropping cast (`(T&)cs` / `static_cast<T*>(cp)` /
-/// `const_cast` / a C-style equivalent) that hands a const method mutable access.
-static bool castDropsConst(QualType From, QualType To) {
-  auto referent = [](QualType T) {
-    T = T.getNonReferenceType();
-    if (T->isPointerType())
-      T = T->getPointeeType();
-    return T;
-  };
-  return referent(From).isConstQualified() && !referent(To).isConstQualified();
-}
-
-// Defined below; declared here for use in constDroppedReachingThis.
-static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
-                                      unsigned I);
-
-/// Walks a member-call receiver `E` down to `this`, returning true iff the
-/// receiver object is reached from a const `this` by crossing a pointer or
-/// reference indirection through which `const` does NOT propagate -- so a const
-/// method can mutate it. Crossings: a member ARROW whose base is not `this`
-/// (`this->ptr->field`: dereferencing a pointer member), a REFERENCE data member,
-/// a POINTER subscript, an explicit `*ptr` deref, or an explicit const-dropping
-/// cast (`(T&)member` / `(Derived*)this`). `CallDerefsPointer` is the call's own
-/// arrow (`this->ptr->method()`), also a crossing.
-///
-/// The implicit `this->member` arrow is NOT a crossing: a const method's `this`
-/// is `const T*`, so `const` propagates through it (a `this`-rooted owner that
-/// crosses no indirection would be const and the mutating call would not
-/// compile). Returns false for a receiver that is not a `this`-rooted
-/// designation.
-static bool constDroppedReachingThis(const Expr *E, bool CallDerefsPointer) {
-  bool Crossed = CallDerefsPointer;
-  E = E->IgnoreParenImpCasts();
-  while (true) {
-    if (isThisExpr(E))
-      return Crossed;
-    if (const auto *ME = dyn_cast<MemberExpr>(E)) {
-      const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
-      // An arrow dereferences the base pointer; `const` propagates to the pointee
-      // only if the pointee is const. `this->member` in a const method has a
-      // `const` pointee (NOT a crossing). A raw pointer member, or a const-
-      // dropping cast of `this` (`((Box*)this)->m`), yields a non-const pointee --
-      // a crossing through which a const method gains mutable access.
-      if (ME->isArrow())
-        if (QualType BaseTy = ME->getBase()->getType(); BaseTy->isPointerType() &&
-            !BaseTy->getPointeeType().isConstQualified())
-          Crossed = true;
-      if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
-        if (FD->getType()->isReferenceType())
-          Crossed = true; // a reference member -- const does not propagate
-      E = Base;
-      continue;
-    }
-    if (const auto *UO = dyn_cast<UnaryOperator>(E);
-        UO && UO->getOpcode() == UO_Deref) {
-      Crossed = true;
-      E = UO->getSubExpr()->IgnoreParenImpCasts();
-      continue;
-    }
-    if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
-      const Expr *Base = ASE->getBase()->IgnoreParenImpCasts();
-      if (!Base->getType()->isArrayType())
-        Crossed = true; // subscripting a pointer is an indirection
-      E = Base;
-      continue;
-    }
-    // An explicit cast (C-style / static_cast / const_cast / reinterpret_cast /
-    // functional) that IgnoreParenImpCasts does not strip. Peel it to continue
-    // toward `this`; if it drops const it gives mutable access a const method
-    // should not have -- a crossing (e.g. `((std::string&)s).append()` or
-    // `((Derived*)this)->ownerField.mutate()`).
-    if (const auto *ECE = dyn_cast<ExplicitCastExpr>(E)) {
-      if (castDropsConst(ECE->getSubExpr()->getType(), ECE->getType()))
-        Crossed = true;
-      E = ECE->getSubExpr()->IgnoreParenImpCasts();
-      continue;
-    }
-    // A call result in the chain. The principle: in a const method, no
-    // `this`-derived expression may have an indirection type with a non-const
-    // pointee. A call (member accessor OR a free function) whose declared return
-    // type is a pointer/reference to a NON-const pointee/referent
-    // (`unique_ptr::get()` -> `T*`, `T* getPtr() const`, `T& getRef() const`, or a
-    // free `T* launder(const unique_ptr<T>& a [[lifetimebound]])`) hands out
-    // mutable access a const method should not have. Continue toward `this`
-    // through whatever the result borrows: a member call's implicit object, or any
-    // [[clang::lifetimebound]] argument. The result dropping const is itself a
-    // crossing; compose it (and any crossing already seen) into the recursion's
-    // seed. (`operator*`/`operator->` on a smart-pointer member are owned by case
-    // (1) of handleConstSubversion; excluded here to avoid double-reporting.)
-    if (const auto *CE = dyn_cast<CallExpr>(E)) {
-      const auto *Callee = dyn_cast_or_null<FunctionDecl>(CE->getCalleeDecl());
-      if (!Callee)
-        return false;
-      if (OverloadedOperatorKind OO = Callee->getOverloadedOperator();
-          OO == OO_Star || OO == OO_Arrow)
-        return false; // smart-pointer deref -- handled by case (1).
-      // Use the DECLARED return type (a reference-returning call's expression
-      // type is the referent, so the indirection is otherwise invisible).
-      QualType RetTy = Callee->getReturnType();
-      QualType Referent;
-      if (RetTy->isReferenceType())
-        Referent = RetTy.getNonReferenceType();
-      else if (RetTy->isPointerType())
-        Referent = RetTy->getPointeeType();
-      bool Seed = Crossed || (!Referent.isNull() && !Referent.isConstQualified());
-      const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE);
-      const auto *MD = dyn_cast_or_null<CXXMethodDecl>(Callee);
-      bool ImplicitObject = MCE && MD && !MD->isExplicitObjectMemberFunction();
-      // The implicit object of a member call (lifetimebound `this` is implicit).
-      if (ImplicitObject &&
-          constDroppedReachingThis(
-              MCE->getImplicitObjectArgument()->IgnoreParenImpCasts(), Seed))
-        return true;
-      // Any [[clang::lifetimebound]] argument the result may borrow from.
-      for (unsigned I = 0, N = CE->getNumArgs(); I != N; ++I) {
-        const ParmVarDecl *PVD = paramForArg(
-            Callee, /*IsInstance=*/MD && MD->isInstance(),
-            ImplicitObject ? I + 1 : I);
-        if (PVD && PVD->hasAttr<clang::LifetimeBoundAttr>() &&
-            constDroppedReachingThis(CE->getArg(I)->IgnoreParenImpCasts(), Seed))
-          return true;
-      }
-      return false; // result does not reach `this`.
-    }
-    return false; // not a `this`-rooted designation
-  }
-}
-
-/// If `E` designates a data member reached from `this` through a chain of
-/// const-PROPAGATING accesses -- plain value member accesses (`this->a.b.m`) and
-/// array subscripts, but NO pointer/reference indirection (which const does not
-/// cross, and which is handled separately) -- return that member (`m`); else
-/// null. Used to find a smart-pointer member of `this` whose pointee `const`
-/// does not protect, even when the member is nested one or more value-subobjects
-/// deep (`this->a.sp`), not only an immediate `this->member`.
-static const FieldDecl *thisRootedValueMember(const Expr *E) {
-  const auto *ME = memberThroughArraySubscripts(E);
-  if (!ME)
-    return nullptr;
-  const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
-  if (!FD)
-    return nullptr;
-  const Expr *Base = ME->getBase()->IgnoreParenImpCasts();
-  if (isThisExpr(Base))
-    return FD;
-  // The member access must be `.` (a value subobject), not `->` (a pointer
-  // indirection); recurse on the base, which must also be a this-rooted value
-  // designation.
-  if (ME->isArrow())
-    return nullptr;
-  return thisRootedValueMember(Base) ? FD : nullptr;
-}
-
 /// Returns true if a parameter of type `PT` lets the call mutate the owner the
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
@@ -941,7 +787,6 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
 }
 
 // Defined below; declared here for use in VisitUnaryOperator.
-static bool isConstConsumed(const Expr *E, ParentMap &PM);
 
 void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   switch (UO->getOpcode()) {
@@ -967,25 +812,6 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   case UO_Deref: {
     const Expr *SubExpr = UO->getSubExpr();
     killAndFlowOrigin(*UO, *SubExpr);
-    // Const-subversion: in a const member function, `*expr` where `expr` is a
-    // pointer that reaches a mutable owner from `this` across a non-const-pointee
-    // indirection (`*this->rawptr`, `*getPtr()`, ...) yields mutable access the
-    // `const` should have protected. Flag unless the dereference is consumed
-    // const-ly (a const reference/argument, a copy, or a const member call). The
-    // `expr->method()` arrow form is handled in handleConstSubversion.
-    if (const auto *EnclMD = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
-        EnclMD && EnclMD->isConst())
-      if (QualType PointeeTy = SubExpr->getType()->getPointeeType();
-          !PointeeTy.isNull()) {
-        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-        if ((isGslOwnerType(PointeeTy) ||
-             recordContainsMutableOwner(PointeeTy->getAsCXXRecordDecl(),
-                                        Visited)) &&
-            constDroppedReachingThis(SubExpr, /*CallDerefsPointer=*/true) &&
-            !isConstConsumed(UO, AC.getParentMap()))
-          CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-              UntrackedConstructReason::ConstMethodIndirectMutation, UO));
-      }
     return;
   }
   case UO_PreInc:
@@ -2562,117 +2388,6 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
   }
 }
 
-/// Returns true if the glvalue `E` is consumed in a way that cannot mutate the
-/// object it denotes: through a const-qualifying conversion (a const reference
-/// binding or const-ref argument, which Clang models as a NoOp cast to a
-/// const-qualified type), a by-value copy, or as the object of a const member
-/// call. Used to tell a read-only use of a smart-pointer dereference from a
-/// mutating one.
-static bool isConstConsumed(const Expr *E, ParentMap &PM) {
-  const Stmt *P = PM.getParentIgnoreParens(E);
-  if (!P)
-    return false;
-  if (const auto *CE = dyn_cast<CastExpr>(P)) {
-    // `operator->` yields a pointer, so a const consumer casts to `const T *`
-    // (pointer-to-const); `operator*` yields an lvalue, cast to `const T`. Strip
-    // one level of pointer so both are recognized.
-    QualType T = CE->getType().getNonReferenceType();
-    if (T->isPointerType())
-      T = T->getPointeeType();
-    return T.isConstQualified();
-  }
-  // A copy / temporary materialization yields an independent object.
-  if (isa<CXXConstructExpr>(P) || isa<MaterializeTemporaryExpr>(P))
-    return true;
-  // The object of a member call: safe iff the callee is a const method.
-  if (const auto *ME = dyn_cast<MemberExpr>(P))
-    if (const auto *M = dyn_cast<CXXMethodDecl>(ME->getMemberDecl()))
-      return M->isConst();
-  return false;
-}
-
-void FactsGenerator::handleConstSubversion(const Expr *Call,
-                                           const FunctionDecl *FD,
-                                           ArrayRef<const Expr *> Args) {
-  // Only inside a const member function: `const` is what the analysis trusts.
-  const auto *Enclosing = dyn_cast_or_null<CXXMethodDecl>(AC.getDecl());
-  if (!Enclosing || !Enclosing->isConst())
-    return;
-  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  if (!Method || Args.empty())
-    return;
-  // The receiver, after stripping the load of the pointer member, should be a
-  // smart-pointer data member reached from `this` through a chain of value
-  // subobjects -- `this->m`, `this->arr[i]`, or nested `this->a.b.sp`. (A
-  // pointer/reference hop in the chain is a different, non-const-propagating
-  // case, handled below in (2).)
-  const FieldDecl *FieldD = thisRootedValueMember(Args[0]);
-  // The effective member type (an array-of-pointer member hands out a pointer
-  // element).
-  QualType FieldTy = FieldD ? arrayElementType(FieldD->getType()) : QualType();
-
-  // (1) Smart-pointer dereference: `operator->`/`operator*` on an owning
-  // smart-pointer data member of `this`. `const` does not propagate through the
-  // smart pointer, so the pointee is mutable even though the member (and `this`)
-  // are const.
-  OverloadedOperatorKind OO = Method->getOverloadedOperator();
-  if (OO == OO_Arrow || OO == OO_Star) {
-    if (!FieldD || !isGslOwnerType(FieldTy)) // owning smart pointer
-      return;
-    // The pointee must be an owner -- or transitively contain a mutable owner
-    // field -- i.e. something a sibling accessor can hand out a borrow into
-    // (e.g. std::string -> string_view, or a pimpl `Impl` holding a
-    // std::vector). A plain pimpl whose `Impl` holds no owner is excluded: a
-    // const method that mutates such an *pimpl cannot dangle a view.
-    QualType Pointee = Call->getType();
-    if (Pointee->isPointerType())
-      Pointee = Pointee->getPointeeType();
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-    if (!isGslOwnerType(Pointee) &&
-        !recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited))
-      return;
-    // Safe iff the dereference result is consumed const-ly. Otherwise the const
-    // member function obtained mutable access to the owner -- a const subversion
-    // (it can invalidate a borrow a sibling accessor handed out).
-    if (!isConstConsumed(Call, AC.getParentMap()))
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::ConstMethodIndirectMutation, Call));
-    return;
-  }
-
-  // (2) A non-const method call whose receiver is a mutable owner reached from
-  // `this` through a raw pointer or reference member: `this->rawptr->push_back()`
-  // (rawptr -> owner) or `this->rawptr->ownerField.push_back()` /
-  // `this->ref.ownerField.push_back()` (the member points at a non-owner record
-  // that contains an owner). `const` does not propagate through a raw pointer or
-  // reference, so the owner is mutable even in a const method. (A `this`-rooted
-  // owner that did NOT cross such an indirection would itself be const and the
-  // mutating call would not compile; a `mutable` owner field is handled by the
-  // mutable-field declaration check.)
-  if (Method->isInstance() && !Method->isConst() &&
-      !isa<CXXConstructorDecl>(FD)) {
-    // A bare-deref receiver `(*ptr).method()` is handled by VisitUnaryOperator
-    // (raw pointer) or case (1) (smart pointer); skip to avoid double-reporting.
-    const Expr *Recv = Args[0]->IgnoreParenImpCasts();
-    if (!isa<UnaryOperator>(Recv)) {
-      // `recv->method()`: the receiver expression is a pointer the call
-      // dereferences. Peel it to the pointee (the object actually mutated); for
-      // `obj.method()` the receiver IS the object.
-      QualType RecvTy = Args[0]->getType().getNonReferenceType();
-      bool CallDerefsPointer = RecvTy->isPointerType();
-      if (CallDerefsPointer)
-        RecvTy = RecvTy->getPointeeType();
-      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-      bool RecvIsMutableOwner =
-          isGslOwnerType(RecvTy) ||
-          recordContainsMutableOwner(RecvTy->getAsCXXRecordDecl(), Visited);
-      if (RecvIsMutableOwner &&
-          constDroppedReachingThis(Args[0], CallDerefsPointer))
-        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-            UntrackedConstructReason::ConstMethodIndirectMutation, Call));
-    }
-  }
-}
 
 void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
                                                   const FunctionDecl *FD,
@@ -2783,7 +2498,6 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         Call, Nested));
   handleInvalidatingCall(Call, FD, Args);
   handleAssumedInvalidatingCall(Call, FD, Args);
-  handleConstSubversion(Call, FD, Args);
   handleLambdaCallInvalidation(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);

@@ -128,6 +128,11 @@ public:
                ? cast<const ParmVarDecl>(cast<const clang::Decl *>(Root))
                : nullptr;
   }
+  const clang::ValueDecl *getAsUninitialized() const {
+    return K == Kind::Uninitialized
+               ? cast<const clang::ValueDecl>(cast<const clang::Decl *>(Root))
+               : nullptr;
+  }
   const CXXMethodDecl *getAsPlaceholderThis() const {
     return K == Kind::PlaceholderThis
                ? cast<const CXXMethodDecl>(cast<const clang::Decl *>(Root))

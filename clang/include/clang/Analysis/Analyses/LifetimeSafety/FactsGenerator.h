@@ -198,11 +198,6 @@ private:
   void handleArgumentOverlap(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);
 
-  // Detect a const member function mutating an owner reached through the pointee
-  // of an owning smart-pointer data member (a const-subversion).
-  void handleConstSubversion(const Expr *Call, const FunctionDecl *FD,
-                             ArrayRef<const Expr *> Args);
-
   // Detect a callable (lambda or std::function) being invoked -- directly or as
   // a call argument the callee may invoke -- whose value holds borrows of
   // by-reference captures: invoking it may mutate those captured owners,

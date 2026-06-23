@@ -342,6 +342,14 @@ public:
   // function leaves intact.
   virtual void reportConstMethodIndirectMutation(const Expr *E) {}
 
+  // Reports a const member function that hands out (returns / stores) a
+  // non-const pointer or reference into a mutable owner reached from the
+  // object. The caller can mutate the owner through the escaped indirection,
+  // which can invalidate borrows the analysis assumes a const member function
+  // leaves intact. This is the escape-site counterpart of
+  // reportConstMethodIndirectMutation.
+  virtual void reportConstMethodIndirectEscape(const Expr *E) {}
+
   // Reports a self-referential borrow: a view/pointer member bound to a sibling
   // member of the same object (e.g. 'this->view = this->str;'). Mutating or
   // moving the object invalidates the view, which the intra-procedural analysis

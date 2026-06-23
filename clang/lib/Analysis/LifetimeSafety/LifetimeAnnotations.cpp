@@ -251,6 +251,26 @@ bool shouldTrackImplicitObjectArg(const Expr &ImplicitObjectArgument,
       return true;
   }
 
+  // A [[gsl::Owner]]'s accessor that hands out a borrow of its pointee/contents
+  // -- `operator*`/`operator->`/`get`/`data`/`c_str` returning a pointer or
+  // reference -- behaves like a lifetimebound accessor of the owner, regardless
+  // of namespace (a user-defined owning smart pointer makes the same contract as
+  // std::unique_ptr). Recognize it so the borrow is rooted at the owner (not an
+  // untracked Unknown loan): the const-subversion check relies on this to see
+  // that a const method mutating through `owned->m()` reaches `this`.
+  if (RunningUnderLifetimeSafety && IsGslOwnerImplicitObject &&
+      isReferenceOrPointerLikeType(Callee->getReturnType())) {
+    switch (Callee->getOverloadedOperator()) {
+    case OO_Arrow:
+    case OO_Star:
+      return true;
+    default:
+      break;
+    }
+    if (Callee->getIdentifier() && InnerPointerGetters.contains(Callee->getName()))
+      return true;
+  }
+
   if (!isInStlNamespace(Callee->getParent()))
     return false;
 

@@ -7,8 +7,9 @@
 // member; a `.get()`/accessor-returned non-const pointer slipped. Found by the
 // multi-agent bypass hunt. Fixed by the principle that in a const method any
 // `this`-derived expression with an indirection type whose pointee is non-const
-// is a crossing (constDroppedReachingThis now follows member-call results whose
-// declared return type is a non-const pointer/reference).
+// is a crossing -- now caught at the ESCAPE site (the accessor body that returns
+// the non-const pointer is the root cause), with the loan provenance flowing
+// through the dataflow regardless of how the borrow is spelled.
 // EXPECT-ASAN: heap-use-after-free
 #include <memory>
 #include <string>

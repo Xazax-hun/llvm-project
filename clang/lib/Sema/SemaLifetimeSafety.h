@@ -72,6 +72,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_pointer_of_indirection,
       diag::warn_lifetime_safety_view_on_mutable_global,
       diag::warn_lifetime_safety_const_indirect_mutation,
+      diag::warn_lifetime_safety_const_indirect_escape,
       diag::warn_lifetime_safety_self_referential,
       diag::warn_lifetime_safety_unsupported_store,
       diag::warn_lifetime_safety_unmodeled_expr};
@@ -661,6 +662,11 @@ public:
   void reportConstMethodIndirectMutation(const Expr *E) override {
     S.Diag(E->getExprLoc(),
            diag::warn_lifetime_safety_const_indirect_mutation)
+        << E->getSourceRange();
+  }
+  void reportConstMethodIndirectEscape(const Expr *E) override {
+    S.Diag(E->getExprLoc(),
+           diag::warn_lifetime_safety_const_indirect_escape)
         << E->getSourceRange();
   }
   void reportSelfReferentialBorrow(const Expr *E) override {
