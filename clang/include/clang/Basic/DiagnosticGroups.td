@@ -850,6 +850,16 @@ programming model.
   }];
 }
 
+def LifetimeSafetySetjmp : DiagGroup<"lifetime-safety-setjmp"> {
+  code Documentation = [{
+Warns on a call into the 'setjmp'/'longjmp' family. Their non-local control flow
+-- 'longjmp' transferring back to a 'setjmp' point -- is not modeled by the CFG
+as a back-edge, so a borrow invalidated before the jump and used after it
+re-enters can dangle undetected. The construct is rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetyOwnerOfIndirection
     : DiagGroup<"lifetime-safety-owner-of-indirection"> {
   code Documentation = [{
@@ -985,6 +995,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyException,
                                          LifetimeSafetyInlineAsm,
                                          LifetimeSafetyTypePunning,
+                                         LifetimeSafetySetjmp,
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyPointerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,

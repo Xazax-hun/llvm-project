@@ -11243,6 +11243,13 @@ def warn_lifetime_safety_reinterpret_cast
               "provenance">,
       InGroup<LifetimeSafetyTypePunning>,
       DefaultIgnore;
+def warn_lifetime_safety_setjmp
+    : Warning<"'setjmp'/'longjmp' is not modeled by lifetime safety analysis; "
+              "the non-local jump back to the 'setjmp' point can re-enter scopes "
+              "and re-run code so a borrow invalidated before the jump and used "
+              "after it would be missed">,
+      InGroup<LifetimeSafetySetjmp>,
+      DefaultIgnore;
 def warn_lifetime_safety_owner_of_indirection
     : Warning<"type %0 is a container whose element type holds a borrow (a "
               "pointer, reference, or unannotated borrow-holding type); "

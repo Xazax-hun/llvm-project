@@ -520,6 +520,14 @@ enum class UntrackedConstructReason : uint8_t {
   /// visible flow. A stale loan on an asm-reseated pointer would otherwise be
   /// trusted. The construct is rejected under the safe programming model.
   InlineAsm,
+  /// A call to a `setjmp`/`longjmp` family function (recognized via the
+  /// `returns_twice` attribute or the setjmp/longjmp builtins). Non-local
+  /// control flow -- `longjmp` transferring back to a `setjmp` point, which the
+  /// CFG does not model as a back-edge -- can re-enter scopes and re-run code in
+  /// a way the dataflow cannot follow, so a borrow invalidated before the jump
+  /// and used after it would be missed. The construct is rejected under the safe
+  /// programming model.
+  SetjmpLongjmp,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

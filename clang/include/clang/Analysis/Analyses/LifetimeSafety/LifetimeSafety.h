@@ -302,6 +302,11 @@ public:
   // can move or invalidate a borrow -- so it is rejected.
   virtual void reportInlineAsm(SourceLocation Loc) {}
 
+  // Reports a setjmp/longjmp family call. Its non-local control flow (a jump back
+  // to the setjmp point) is not modeled by the CFG, so a borrow invalidated
+  // before the jump and used after it re-enters could be missed.
+  virtual void reportSetjmpLongjmp(SourceLocation Loc) {}
+
   // Reports a member access on a union. Different union members alias the same
   // storage, so a borrow into one member can be invalidated by writing another;
   // the analysis keys borrows by field identity and does not model this.

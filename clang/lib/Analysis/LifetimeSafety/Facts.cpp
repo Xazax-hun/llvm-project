@@ -174,6 +174,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::UnsupportedStoreDestination:
     OS << "UnsupportedStoreDestination";
     break;
+  case UntrackedConstructReason::SetjmpLongjmp:
+    OS << "SetjmpLongjmp";
+    break;
   }
   OS << ")\n";
 }

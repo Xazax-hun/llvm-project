@@ -22,6 +22,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/Origins.h"
 #include "clang/Analysis/Analyses/PostOrderCFGView.h"
 #include "clang/Analysis/CFG.h"
+#include "clang/Basic/Builtins.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
@@ -194,6 +195,37 @@ static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
     I -= 1;
   }
   return I < FD->getNumParams() ? FD->getParamDecl(I) : nullptr;
+}
+
+/// Recognizes a call into the setjmp/longjmp family, whose non-local control
+/// flow the analysis cannot model (see UntrackedConstructReason::SetjmpLongjmp).
+/// Matches the `returns_twice` attribute (which marks setjmp, and is present
+/// even on a manual redeclaration), the setjmp/longjmp builtins, and a
+/// C-linkage `longjmp`/`siglongjmp`/`_longjmp` (which carries no distinguishing
+/// attribute or builtin id when redeclared by hand).
+static bool isSetjmpLongjmp(const FunctionDecl *FD) {
+  if (FD->hasAttr<ReturnsTwiceAttr>())
+    return true;
+  switch (FD->getBuiltinID()) {
+  case Builtin::BI__builtin_setjmp:
+  case Builtin::BI__builtin_longjmp:
+  case Builtin::BI__sigsetjmp:
+  case Builtin::BIsetjmp:
+  case Builtin::BI_setjmp:
+  case Builtin::BIlongjmp:
+  case Builtin::BI_longjmp:
+  case Builtin::BIsigsetjmp:
+  case Builtin::BIsiglongjmp:
+    return true;
+  default:
+    break;
+  }
+  if (FD->isExternC())
+    if (const IdentifierInfo *II = FD->getIdentifier()) {
+      StringRef N = II->getName();
+      return N == "longjmp" || N == "siglongjmp" || N == "_longjmp";
+    }
+  return false;
 }
 
 /// Returns true if `MD` is a known non-invalidating accessor of a standard
@@ -697,6 +729,14 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
 }
 
 void FactsGenerator::VisitCallExpr(const CallExpr *CE) {
+  // Safe-model soundness: a setjmp/longjmp family call introduces non-local
+  // control flow. `longjmp` transfers back to a `setjmp` point, which the CFG
+  // does not model as a back-edge, so a borrow invalidated on the first pass and
+  // read after the jump re-enters can dangle undetected. Reject the construct.
+  if (const FunctionDecl *Callee = CE->getDirectCallee())
+    if (isSetjmpLongjmp(Callee))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::SetjmpLongjmp, cast<Expr>(CE)));
   handleFunctionCall(CE, CE->getDirectCallee(),
                      {CE->getArgs(), CE->getNumArgs()});
 }
