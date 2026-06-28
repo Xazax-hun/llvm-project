@@ -176,6 +176,8 @@ public:
     Return, /// Escapes via return statement.
     Field,  /// Escapes via assignment to a field.
     Global, /// Escapes via assignment to global storage.
+    CapturedByThis, /// Captured into the implicit object via
+                    /// [[clang::lifetime_capture_by(this)]].
   } EscKind;
 
   static bool classof(const Fact *F) {
@@ -241,6 +243,32 @@ public:
                EscapeKind::Global;
   }
   const VarDecl *getGlobal() const { return Global; };
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &OM) const override;
+};
+
+/// Represents an origin captured into the implicit object (`this`) via a
+/// [[clang::lifetime_capture_by(this)]] parameter at a call site -- e.g.
+/// `obj.capture(arg)` where `capture`'s parameter is annotated
+/// capture_by(this). The captured borrow becomes reachable from the (caller's)
+/// object, so if it is a [[clang::noescape]] parameter of the analyzed
+/// function, that noescape promise is violated. Unlike a Field escape this
+/// carries no specific member (the capture target is the whole object), so it
+/// records the capturing call expression for the diagnostic.
+class CapturedByThisEscapeFact : public OriginEscapesFact {
+  const Expr *CaptureExpr;
+
+public:
+  CapturedByThisEscapeFact(OriginID OID, const Expr *CaptureExpr)
+      : OriginEscapesFact(OID, EscapeKind::CapturedByThis),
+        CaptureExpr(CaptureExpr) {}
+
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::OriginEscapes &&
+           static_cast<const OriginEscapesFact *>(F)->getEscapeKind() ==
+               EscapeKind::CapturedByThis;
+  }
+  const Expr *getCaptureExpr() const { return CaptureExpr; };
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };

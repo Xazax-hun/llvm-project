@@ -2316,10 +2316,28 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       // receiver (strip the implicit derived-to-base cast on the implicit object
       // argument) so a capture into a base-subobject view is keyed on the
       // derived class's fields too.
-      if (CapturingArgIdx == LifetimeCaptureByAttr::This)
+      if (CapturingArgIdx == LifetimeCaptureByAttr::This) {
         if (OriginNode *Recv = getOriginNode(*Args[0]->IgnoreImpCasts()))
           CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
               Args[I], CapturedOriginNode->getOriginID(), Recv->getOriginID()));
+        // The capture is an escape *out of the analyzed function* only when the
+        // receiver is this function's own implicit object (`this`): then the
+        // captured borrow becomes reachable from the caller's object. Capturing
+        // into some other receiver (e.g. `localObj.capture(arg)`, where `Dest`
+        // is a local's origin) stays within the function and is not an escape.
+        // Record the escape so the annotation checker sees it -- a
+        // [[clang::noescape]] parameter forwarded here violates its promise,
+        // which is otherwise missed because the capture flows into the
+        // whole-object `this` origin and never reaches a return/field/global
+        // escape point.
+        if (std::optional<OriginNode *> ThisOrigins =
+                FactMgr.getOriginMgr().getThisOrigins();
+            ThisOrigins &&
+            Dest->getOriginID() == (*ThisOrigins)->getOriginID())
+          CurrentBlockFacts.push_back(
+              FactMgr.createFact<CapturedByThisEscapeFact>(
+                  CapturedOriginNode->getOriginID(), Args[I]));
+      }
     }
   }
 }

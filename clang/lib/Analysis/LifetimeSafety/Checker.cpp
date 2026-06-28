@@ -361,6 +361,11 @@ public:
           NoescapeWarningsMap.try_emplace(PVD, FieldEsc->getFieldDecl());
         if (auto *GlobalEsc = dyn_cast<GlobalEscapeFact>(OEF))
           NoescapeWarningsMap.try_emplace(PVD, GlobalEsc->getGlobal());
+        // A noescape parameter forwarded into a callee's
+        // [[clang::lifetime_capture_by(this)]] parameter escapes into the
+        // (caller-scoped) object -- a violation, anchored at the capturing call.
+        if (auto *ThisEsc = dyn_cast<CapturedByThisEscapeFact>(OEF))
+          NoescapeWarningsMap.try_emplace(PVD, ThisEsc->getCaptureExpr());
         return;
       }
       // Skip annotation suggestion for moved loans, as ownership transfer
