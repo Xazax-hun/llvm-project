@@ -242,6 +242,7 @@ static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
 void FactsGenerator::run() {
   llvm::TimeTraceScope TimeProfile("FactGenerator");
   const CFG &Cfg = *AC.getCFG();
+  FlaggedIndirectionGlobals.clear();
   llvm::SmallVector<Fact *> PlaceholderLoanFacts = issuePlaceholderLoans();
   // Iterate through the CFG blocks in reverse post-order to ensure that
   // initializations and destructions are processed in the correct sequence.
@@ -429,6 +430,13 @@ void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
       if (OriginNode *Node = getOriginNode(*Decomposed))
         CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(DRE, Node));
   handleUse(DRE);
+  // Soundness: a use of a global "container of indirection" (owner/pointer whose
+  // elements/pointees are themselves indirections) is banned by the model, just
+  // like the local case in VisitDeclStmt. Flag it at the use site (the global's
+  // declaration may be outside the analyzed region).
+  if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl()))
+    if (VD->hasGlobalStorage())
+      handleGlobalContainerOfIndirectionUse(DRE, VD);
   // For all declarations with storage (non-references), we issue a loan
   // representing the borrow of the variable's storage itself.
   //
@@ -448,6 +456,41 @@ void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
     CurrentBlockFacts.push_back(
         FactMgr.createFact<IssueFact>(L->getID(), Node->getOriginID()));
   }
+}
+
+void FactsGenerator::handleGlobalContainerOfIndirectionUse(
+    const DeclRefExpr *DRE, const VarDecl *VD) {
+  // Report each offending global at most once per function.
+  if (!FlaggedIndirectionGlobals.insert(VD).second)
+    return;
+  // Peel array dimensions so a global array of such elements is treated like
+  // the scalar (mirrors VisitDeclStmt).
+  QualType T = VD->getType();
+  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
+    T = AT->getElementType();
+  auto &Cache = FactMgr.getUnknownOwnershipCache();
+  bool IsPointer = false;
+  UntrackedConstructReason Reason;
+  QualType ReportType;
+  // A gsl::Owner whose elements are indirections (e.g. std::vector<int*>,
+  // std::vector<std::string_view>); per-element borrows are not tracked.
+  if (isGslOwnerOfIndirection(T, Cache))
+    Reason = UntrackedConstructReason::OwnerOfIndirection;
+  // A gsl::Pointer view whose pointee is an indirection (e.g. std::span<int*>).
+  else if (isGslPointerOfIndirection(T, Cache))
+    Reason = UntrackedConstructReason::PointerOfIndirection;
+  // Or such a type buried in a non-owner aggregate (e.g.
+  // std::pair<std::vector<std::string_view>, int>).
+  else if (QualType Nested =
+               findNestedOwnerOrPointerOfIndirection(T, Cache, IsPointer);
+           !Nested.isNull()) {
+    Reason = IsPointer ? UntrackedConstructReason::PointerOfIndirection
+                       : UntrackedConstructReason::OwnerOfIndirection;
+    ReportType = Nested;
+  } else
+    return; // Not a container of indirection; nothing to flag.
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      Reason, cast<Expr>(DRE), ReportType));
 }
 
 void FactsGenerator::VisitCXXConstructExpr(const CXXConstructExpr *CCE) {

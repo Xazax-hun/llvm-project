@@ -20,6 +20,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/Origins.h"
 #include "clang/Analysis/AnalysisDeclContext.h"
 #include "clang/Analysis/CFG.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace clang::lifetimes::internal {
@@ -224,6 +225,16 @@ private:
   // (e.g. on the left-hand side of an assignment in the case of a DeclRefExpr).
   void handleUse(const Expr *E);
 
+  /// Soundness: flag a *use* of a global variable whose type is a "container of
+  /// indirection" -- an owner/pointer whose elements or pointees are themselves
+  /// indirections (e.g. std::vector<std::string_view>, std::span<int*>), or such
+  /// a type buried in a non-owner aggregate. The model bans these just like the
+  /// local case (VisitDeclStmt); a global's declaration may live outside the
+  /// analyzed region (e.g. a header), so the diagnostic is anchored at the use
+  /// site. Reported at most once per global per analyzed function.
+  void handleGlobalContainerOfIndirectionUse(const DeclRefExpr *DRE,
+                                             const VarDecl *VD);
+
   /// Walks the full subtree so origins on the pointee chain and on field
   /// children both escape with the returned value.
   void emitReturnEscapes(OriginNode *N, const Expr *RetExpr);
@@ -245,6 +256,10 @@ private:
   // exempting it from the check.
   llvm::DenseMap<const Expr *, UseFact *> UseFacts;
   const CFGBlock *CurrentBlock;
+  /// Global "container of indirection" variables already flagged at a use in the
+  /// current function (handleGlobalContainerOfIndirectionUse), so a global used
+  /// repeatedly is reported once. Cleared per function in run().
+  llvm::DenseSet<const VarDecl *> FlaggedIndirectionGlobals;
 };
 
 } // namespace clang::lifetimes::internal
