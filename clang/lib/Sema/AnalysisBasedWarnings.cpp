@@ -3033,6 +3033,70 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
     LifetimeSafetyTUAnalysis(S, TU, LSStats);
 }
 
+void clang::sema::AnalysisBasedWarnings::
+    IssueLifetimeSafetyWarningsForImplicitFunction(const Decl *D) {
+  // This mirrors the gating and CFG setup of the per-function IssueWarnings
+  // path below, but runs only the lifetime safety analysis. It exists for
+  // implicitly-defined functions, which never reach IssueWarnings: a defaulted
+  // or implicit default constructor still applies the class's default member
+  // initializers, and such an initializer can bind a view/pointer member to a
+  // temporary that is destroyed when construction finishes, leaving the field
+  // dangling. Visiting the synthesized body here lets the dangling-field escape
+  // check fire for it, just as it does for a user-written constructor.
+  if (!D || !D->getBody())
+    return;
+  // TU-end analysis reaches reachable definitions via its own call-graph walk;
+  // keep this to the default per-function mode to avoid double analysis.
+  if (S.getLangOpts().EnableLifetimeSafetyTUAnalysis ||
+      !S.getLangOpts().CPlusPlus || !lifetimes::IsLifetimeSafetyEnabled(S, D))
+    return;
+
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  if (Diags.getIgnoreAllWarnings() ||
+      (Diags.getSuppressSystemWarnings() &&
+       S.SourceMgr.isInSystemHeader(D->getLocation())))
+    return;
+  if (cast<DeclContext>(D)->isDependentContext())
+    return;
+  if (S.hasUncompilableErrorOccurred())
+    return;
+
+  // A synthesized constructor can only leave a field dangling through a default
+  // member initializer (NSDMI). A class with no in-class field initializer has
+  // nothing for the synthesized body to bind, so skip it -- this is sound (it
+  // cannot hide an NSDMI dangle) and keeps the common implicit constructor off
+  // the analysis path. We intentionally do not narrow further by member type:
+  // an NSDMI can bind a borrow nested inside an aggregate member too, so gating
+  // on the member type would risk a false negative.
+  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(D)) {
+    bool HasInClassInit = false;
+    for (const FieldDecl *FD : Ctor->getParent()->fields())
+      if (FD->hasInClassInitializer()) {
+        HasInClassInit = true;
+        break;
+      }
+    if (!HasInClassInit)
+      return;
+  }
+
+  AnalysisDeclContext AC(/*AnalysisDeclContextManager=*/nullptr, D);
+  AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
+  AC.getCFGBuildOptions().AddEHEdges = false;
+  AC.getCFGBuildOptions().AddInitializers = true;
+  AC.getCFGBuildOptions().AddImplicitDtors = true;
+  AC.getCFGBuildOptions().AddParameterLifetimes = true;
+  AC.getCFGBuildOptions().AddTemporaryDtors = true;
+  AC.getCFGBuildOptions().AddCXXNewAllocator = false;
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+  AC.getCFGBuildOptions().setAllAlwaysAdd();
+  AC.getCFGBuildOptions().AddLifetime = true;
+
+  lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
+  if (AC.getCFG())
+    lifetimes::runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats,
+                                         S.CollectStats);
+}
+
 void clang::sema::AnalysisBasedWarnings::IssueWarnings(
     sema::AnalysisBasedWarnings::Policy P, sema::FunctionScopeInfo *fscope,
     const Decl *D, QualType BlockType) {

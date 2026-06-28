@@ -14598,6 +14598,13 @@ void Sema::DefineImplicitDefaultConstructor(SourceLocation CurrentLocation,
   }
 
   DiagnoseUninitializedFields(*this, Constructor);
+
+  // The synthesized constructor body applies the class's default member
+  // initializers; one may bind a view/pointer member to a temporary that dies
+  // at the end of construction. Run lifetime safety on the synthesized body so
+  // that dangling field is not silently missed (it is never run through the
+  // normal IssueWarnings path).
+  AnalysisWarnings.IssueLifetimeSafetyWarningsForImplicitFunction(Constructor);
 }
 
 void Sema::ActOnFinishDelayedMemberInitializers(Decl *D) {
@@ -14779,6 +14786,13 @@ void Sema::DefineInheritingConstructor(SourceLocation CurrentLocation,
   }
 
   DiagnoseUninitializedFields(*this, Constructor);
+
+  // The synthesized constructor body applies the class's default member
+  // initializers; one may bind a view/pointer member to a temporary that dies
+  // at the end of construction. Run lifetime safety on the synthesized body so
+  // that dangling field is not silently missed (it is never run through the
+  // normal IssueWarnings path).
+  AnalysisWarnings.IssueLifetimeSafetyWarningsForImplicitFunction(Constructor);
 }
 
 CXXDestructorDecl *Sema::DeclareImplicitDestructor(CXXRecordDecl *ClassDecl) {

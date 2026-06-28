@@ -117,6 +117,14 @@ public:
   // Issue warnings that require whole-translation-unit analysis.
   void IssueWarnings(TranslationUnitDecl *D);
 
+  // Run *only* the lifetime safety analysis on an implicitly-defined function
+  // body (e.g. a defaulted/implicit default constructor). Such functions never
+  // reach IssueWarnings, yet a default member initializer applied by an
+  // implicit default constructor can bind a view/pointer member to a temporary
+  // that dies at the end of construction -- a dangling field the analysis would
+  // otherwise never see.
+  void IssueLifetimeSafetyWarningsForImplicitFunction(const Decl *D);
+
   void registerVarDeclWarning(VarDecl *VD, PossiblyUnreachableDiag PUD);
 
   void issueWarningsForRegisteredVarDecl(VarDecl *VD);
