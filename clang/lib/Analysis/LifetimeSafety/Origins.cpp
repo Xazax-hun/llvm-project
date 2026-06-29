@@ -552,3 +552,12 @@ void OriginManager::registerLifetimeAnnotatedOriginType(QualType QT) {
 }
 
 } // namespace clang::lifetimes::internal
+
+namespace clang::lifetimes {
+unsigned getIndirectionDepth(QualType QT, ASTContext &Ctx) {
+  // Reuse the analysis's origin-tree builder so this stays in sync with how
+  // declarations are modeled; a standalone manager has no body context, so its
+  // pointee-chain length is the purely structural indirection depth.
+  return internal::OriginManager(Ctx).getIndirectionDepth(QT);
+}
+} // namespace clang::lifetimes

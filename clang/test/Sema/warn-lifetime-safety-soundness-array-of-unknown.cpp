@@ -26,7 +26,7 @@ void array2d_of_unknown() {
 // A custom [[gsl::Owner]] whose element is an indirection, as an array element:
 // flagged as owner-of-indirection (peeled like the scalar form).
 template <class T> struct [[gsl::Owner]] Bag {
-  T *data; // expected-warning {{public data member 'data' of a [[gsl::Owner]] type can hold a borrow}}
+  T *data; // expected-warning {{public data member 'data' of a [[gsl::Owner]] type can hold a borrow}} expected-warning {{field 'data' uses more than one level of indirection}}
 };
 void array_of_owner_of_indirection() {
   Bag<int *> a[1]; // expected-warning {{element type holds a borrow}} \

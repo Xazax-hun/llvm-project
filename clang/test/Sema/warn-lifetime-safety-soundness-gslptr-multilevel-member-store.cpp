@@ -9,7 +9,7 @@
 // in a release build, silently mis-propagating loans).
 
 struct [[gsl::Pointer(char)]] Outer {
-  const char **base;
+  const char **base; // expected-warning {{field 'base' uses more than one level of indirection}}
 };
 
 void store_multilevel_member(const char **arr) { // expected-warning {{uses more than one level of indirection}}
@@ -19,7 +19,7 @@ void store_multilevel_member(const char **arr) { // expected-warning {{uses more
 }
 
 struct [[gsl::Pointer(int)]] OuterPP {
-  int **base;
+  int **base; // expected-warning {{field 'base' uses more than one level of indirection}}
 };
 void store_int_pp(int **arr) { // expected-warning {{uses more than one level of indirection}}
   OuterPP o;
@@ -31,7 +31,7 @@ struct [[gsl::Pointer(char)]] View {
   const char *p;
 };
 struct [[gsl::Pointer(int)]] OuterV {
-  View *base; // pointer to another view
+  View *base; // pointer to another view // expected-warning {{field 'base' uses more than one level of indirection}}
 };
 void store_view_ptr(View *arr) { // expected-warning {{uses more than one level of indirection}}
   OuterV o;

@@ -182,6 +182,12 @@ class OriginManager {
 public:
   explicit OriginManager(const AnalysisDeclContext &AC);
 
+  /// Lightweight constructor for standalone, type-structural queries (namely
+  /// getIndirectionDepth) outside a function analysis: it sets up only what the
+  /// origin-tree builder needs and skips the body pre-scan and `this`-origin
+  /// setup. Do not use it to analyze a function.
+  explicit OriginManager(ASTContext &Ctx) : AST(Ctx) {}
+
   /// Gets or creates the OriginNode for a given ValueDecl.
   ///
   /// Creates a tree structure mirroring the levels of indirection in the

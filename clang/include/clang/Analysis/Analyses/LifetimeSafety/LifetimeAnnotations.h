@@ -144,6 +144,21 @@ bool isGslPointerOfIndirection(QualType QT,
 QualType findNestedOwnerOrPointerOfIndirection(
     QualType QT, llvm::DenseMap<const Type *, bool> &Cache, bool &IsPointer);
 
+// Returns the indirection depth of QT for lifetime-tracking purposes: the length
+// of its pointee chain. A pointer/reference adds one level over what it points
+// to; a [[gsl::Pointer]] view or a borrow-holding record is a single level
+// (its fields do not extend the pointee chain); arrays and _Atomic are
+// transparent. So `int` -> 0, `int*` / `std::string_view` / `std::string*` -> 1,
+// and `int**` / `std::string_view*` / `T*&` -> 2. The safe programming model
+// supports only a single level of indirection, so a declaration (local,
+// parameter, field, or return) whose depth exceeds 1 cannot be modeled.
+//
+// This builds the same origin tree the analysis uses (OriginManager) and returns
+// its pointee-chain length, so it stays in sync with how declarations are
+// modeled. It is exposed for use outside a function analysis (e.g. the
+// record-field soundness check in Sema), hence the explicit ASTContext.
+unsigned getIndirectionDepth(QualType QT, ASTContext &Ctx);
+
 // Returns true if the given gsl::Pointer type can mutate the (non-const) owner
 // it points to, i.e. it (or a base class) exposes operator*/operator[]
 // returning a reference to a non-const gsl::Owner, or operator-> returning a
