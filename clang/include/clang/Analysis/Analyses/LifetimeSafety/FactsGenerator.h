@@ -91,6 +91,23 @@ private:
 
   void flow(OriginNode *Dst, OriginNode *Src, bool Kill);
 
+  /// Emits a single-level (top-level only) origin flow Dst <- Src, and then, if
+  /// Dst carries deeper levels of indirection (a pointee chain) that the shallow
+  /// flow leaves unpopulated, seeds those deeper origins with an Unknown loan
+  /// (anchored at \p LoanExpr).
+  ///
+  /// Used where a flow is intentionally single-level -- e.g. a
+  /// [[clang::lifetimebound]] return constrains only the relationship between
+  /// the returned handle and the arguments at the top level -- but the
+  /// destination type can be a multi-level indirection (e.g. a `const View&`
+  /// return: a reference *to* a view, whose inner level is the view's own
+  /// borrow). Without the Unknown loan the inner level stays empty and a use of
+  /// the inner borrow is only caught by the empty-set lost-loan heuristic, which
+  /// a control-flow merge can mask. The Unknown loan survives dataflow joins, so
+  /// the inner borrow reliably trips lost-loan instead.
+  void flowSingleLevelWithUnknownDepth(OriginNode *Dst, OriginNode *Src,
+                                       const Expr *LoanExpr, bool Kill);
+
   /// Handles assignment for both BinaryOperator and CXXOperatorCallExpr.
   ///
   /// LHSExpr is the destination whose stored loans are replaced by RHSExpr's

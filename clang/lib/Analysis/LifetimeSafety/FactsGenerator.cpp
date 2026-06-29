@@ -89,6 +89,29 @@ void FactsGenerator::flow(OriginNode *Dst, OriginNode *Src, bool Kill) {
   }
 }
 
+void FactsGenerator::flowSingleLevelWithUnknownDepth(OriginNode *Dst,
+                                                     OriginNode *Src,
+                                                     const Expr *LoanExpr,
+                                                     bool Kill) {
+  if (!Dst || !Src)
+    return;
+  // The intentional single-level flow: only the top-level (outer) origin.
+  CurrentBlockFacts.push_back(
+      FactMgr.createFact<OriginFlowFact>(Dst->getOriginID(),
+                                         Src->getOriginID(), Kill));
+  // Seed any deeper levels of the destination that the shallow flow did not
+  // populate with an Unknown loan, so an inner borrow this flow could not carry
+  // is reported as lost (the Unknown loan survives joins) rather than read from
+  // a silently-empty origin a control-flow merge could mask.
+  for (OriginNode *Inner = Dst->getPointeeChild(); Inner;
+       Inner = Inner->getPointeeChild()) {
+    const Loan *L = FactMgr.getLoanMgr().createLoan(
+        AccessPath::Unknown(LoanExpr), LoanExpr);
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<IssueFact>(L->getID(), Inner->getOriginID()));
+  }
+}
+
 /// Creates a loan for the storage path of a given declaration reference.
 /// This function should be called whenever a DeclRefExpr represents a borrow.
 /// \param DRE The declaration reference expression that initiates the borrow.
@@ -2720,8 +2743,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         // destination origin lists may have different lengths.
         // FIXME: Handle origin-shape mismatches gracefully so we can also flow
         // inner origins.
-        CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
-            CallNode->getOriginID(), ArgNode->getOriginID(), KillSrc));
+        flowSingleLevelWithUnknownDepth(CallNode, ArgNode, Call, KillSrc);
         KillSrc = false;
       }
     } else if (shouldTrackPointerImplicitObjectArg(I)) {
@@ -2735,9 +2757,12 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     } else if (IsArgLifetimeBound(I)) {
       // Lifetimebound on a non-GSL-ctor function means the returned
       // pointer/reference itself must not outlive the arguments. This
-      // only constrains the top-level origin.
-      CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
-          CallNode->getOriginID(), ArgNode->getOriginID(), KillSrc));
+      // only constrains the top-level origin. If the return is itself a
+      // multi-level indirection (e.g. a `const View&` -- a reference to a view,
+      // as std::max/min/clamp return), the deeper levels are seeded with an
+      // Unknown loan so the view's own (inner) borrow is reported as lost rather
+      // than silently dropped (which a control-flow merge could otherwise mask).
+      flowSingleLevelWithUnknownDepth(CallNode, ArgNode, Call, KillSrc);
       KillSrc = false;
     }
   }
