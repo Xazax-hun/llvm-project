@@ -7194,23 +7194,66 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
   // abstraction: external code can store a borrow into it, and the analysis
   // treats an owner's contents as opaque (it is a leaf in the origin tree), so
   // such a stored borrow is not tracked and can dangle silently -- the type is
-  // not a sound owner. A real owner keeps its resource handle private.
+  // not a sound owner. A real owner keeps its resource handle private and does
+  // not capture borrows into its members via lifetime_capture_by(this).
+  //
+  // These checks apply to the owner's own members *and* to members/methods
+  // inherited from a non-owner base: the capture machinery can otherwise hide in
+  // a base -- `struct [[gsl::Owner]] D : Base {};` where Base has a public
+  // borrow-holding member or a lifetime_capture_by(this) setter -- and the whole
+  // owner is still treated as opaque. A base that is itself a [[gsl::Owner]] is
+  // skipped: it reports its own members at its own definition. (A directly
+  // written lifetime_capture_by(this) on an owner's own method is reported where
+  // the attribute appears, in SemaDeclAttr; here it is checked for inherited
+  // methods, which that path does not see.)
   if (!Record->isInvalidDecl() && !Record->isDependentType() &&
-      !getDiagnostics().isIgnored(
-          diag::warn_lifetime_safety_owner_public_pointer,
-          Record->getLocation()) &&
-      lifetimes::isGslOwnerType(Context.getCanonicalTagType(Record)))
-    for (const auto *F : Record->fields()) {
-      if (F->getAccess() != AS_public)
-        continue;
-      QualType FT = F->getType();
-      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-        FT = AT->getElementType();
-      if ((FT->isPointerType() && !FT->isFunctionPointerType()) ||
-          FT->isReferenceType() || lifetimes::isGslPointerType(FT))
-        Diag(F->getLocation(), diag::warn_lifetime_safety_owner_public_pointer)
-            << F << F->getSourceRange();
-    }
+      lifetimes::isGslOwnerType(Context.getCanonicalTagType(Record))) {
+    bool CheckPubPtr = !getDiagnostics().isIgnored(
+        diag::warn_lifetime_safety_owner_public_pointer, Record->getLocation());
+    bool CheckCapture = !getDiagnostics().isIgnored(
+        diag::warn_lifetime_safety_owner_captures_borrow, Record->getLocation());
+    // Flag each public data member that can hold a borrow.
+    auto CheckPublicBorrowFields = [&](const CXXRecordDecl *RD) {
+      for (const FieldDecl *F : RD->fields()) {
+        if (F->getAccess() != AS_public)
+          continue;
+        QualType FT = F->getType();
+        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+          FT = AT->getElementType();
+        if ((FT->isPointerType() && !FT->isFunctionPointerType()) ||
+            FT->isReferenceType() || lifetimes::isGslPointerType(FT))
+          Diag(F->getLocation(),
+               diag::warn_lifetime_safety_owner_public_pointer)
+              << F << F->getSourceRange();
+      }
+    };
+    // Flag each lifetime_capture_by(this) parameter.
+    auto CheckCaptureByThisParams = [&](const CXXRecordDecl *RD) {
+      for (const CXXMethodDecl *M : RD->methods())
+        for (const ParmVarDecl *P : M->parameters())
+          if (const auto *A = P->getAttr<LifetimeCaptureByAttr>())
+            for (int Idx : A->params())
+              if (Idx == LifetimeCaptureByAttr::This) {
+                Diag(P->getLocation(),
+                     diag::warn_lifetime_safety_owner_captures_borrow);
+                break;
+              }
+    };
+    if (CheckPubPtr)
+      CheckPublicBorrowFields(Record);
+    // Own methods' capture_by(this) is reported in SemaDeclAttr; only inherited
+    // methods need checking here.
+    if (CheckPubPtr || CheckCapture)
+      Record->forallBases([&](const CXXRecordDecl *Base) {
+        if (lifetimes::isGslOwnerType(Base))
+          return true; // Reports its own members at its own definition.
+        if (CheckPubPtr)
+          CheckPublicBorrowFields(Base);
+        if (CheckCapture)
+          CheckCaptureByThisParams(Base);
+        return true;
+      });
+  }
 
   // Lifetime safety (safe programming model): a [[gsl::Pointer]] view owns
   // nothing, so destroying it must free nothing. Its own destructor is checked
