@@ -11317,10 +11317,10 @@ def warn_lifetime_safety_ctor_captures_borrow
       InGroup<LifetimeSafetyCtorCapture>,
       DefaultIgnore;
 def warn_lifetime_safety_const_indirect_mutation
-    : Warning<"this const member function mutates an owner through a "
-              "pointer member; 'const' does not protect the pointee, so "
-              "lifetime safety can no longer assume const member functions do "
-              "not invalidate borrows into the object">,
+    : Warning<"mutating an owner through a pointer member of a const-qualified "
+              "object or parameter; 'const' does not protect the pointee, so "
+              "lifetime safety can no longer assume the borrowed object is not "
+              "invalidated">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
 def warn_lifetime_safety_const_indirect_escape

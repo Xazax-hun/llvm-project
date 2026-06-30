@@ -65,14 +65,14 @@ struct Doc {
 
   // Mutating uses through the smart pointer in a const method: subversion.
   void via_method() const {
-    buf->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    buf->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void via_func_ref() const {
-    take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
+    take_mut(*buf); // expected-warning {{mutating an owner through a pointer member}}
   }
   void via_binding() const {
     Buf &r = *buf;
-    r.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    r.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
 
   // Read-only (const) uses are fine.
@@ -107,7 +107,7 @@ struct OwnerFacade {
   // Reaches the owner through the smart pointer in a const method (the field
   // access on the dereferenced pointee is not const-consumed).
   void grow() const {
-    pimpl->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    pimpl->b.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
 };
 
@@ -122,10 +122,10 @@ struct NestedInner {
 struct NestedFacade {
   NestedInner in;
   void grow() const {
-    in.p->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    in.p->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void grow_deref() const {
-    (*in.p).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    (*in.p).mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // Read-only access through the chain is fine.
   int read() const { return in.p->read(); } // no-warning
@@ -137,7 +137,7 @@ struct DeepA {
 struct DeepFacade {
   DeepA a;
   void grow() const {
-    a.mid.p->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    a.mid.p->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
 };
 
@@ -188,13 +188,13 @@ const Buf *peekPtr(const Ptr<Buf> &p [[clang::lifetimebound]]) { return p.operat
 struct FreeLaunderFacade {
   Ptr<Buf> owned;
   void via_free_ptr() const {
-    launderPtr(owned)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    launderPtr(owned)->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void via_free_ptr_deref() const {
-    (*launderPtr(owned)).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    (*launderPtr(owned)).mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void via_free_ref() const {
-    launderRef(owned).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    launderRef(owned).mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // A free launderer returning a CONST indirection is fine.
   int read_free() const { return peekPtr(owned)->read(); } // no-warning
@@ -212,11 +212,11 @@ struct LaunderShapes {
   Ptr<Buf> b;
   // Ternary selecting between two `this`-derived owners, then mutating.
   void via_ternary(bool c) const {
-    (c ? a : b)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    (c ? a : b)->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // Comma operator: the result is the (mutable) `this`-derived owner.
   void via_comma() const {
-    (void(0), a)->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    (void(0), a)->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // Selecting then reading is fine.
   int read_ternary(bool c) const { return (c ? a : b)->read(); } // no-warning
@@ -235,7 +235,7 @@ struct DeducingThis {
   Ptr<Buf> owned;
   // Mutation through the explicit `const` object reference.
   void via_self(this const DeducingThis &self) {
-    self.owned->mutate(); // cxx23-warning {{const member function mutates an owner through a pointer member}}
+    self.owned->mutate(); // cxx23-warning {{mutating an owner through a pointer member}}
   }
   // Handing out a non-const indirection from a deducing-this const method.
   Buf *getPtr(this const DeducingThis &self) {
@@ -270,17 +270,17 @@ struct RawDoc {
   Buf *buf;
 
   void arrow_mut() const {
-    buf->mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    buf->mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void deref_func() const {
-    take_mut(*buf); // expected-warning {{const member function mutates an owner through a pointer member}}
+    take_mut(*buf); // expected-warning {{mutating an owner through a pointer member}}
   }
   void deref_binding() const {
     Buf &r = *buf;
-    r.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    r.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   void paren_deref() const {
-    (*buf).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    (*buf).mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
 
   // Read-only / copy uses are fine.
@@ -318,11 +318,11 @@ struct ThroughWrapper {
 
   // Pointer member to a non-owner that contains the owner.
   void via_ptr() const {
-    hp->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    hp->b.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // Reference member to a non-owner that contains the owner.
   void via_ref() const {
-    hr.b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    hr.b.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
   // Read-only access through the indirection is fine.
   void read_ptr() const { (void)hp->b.read(); } // no-warning
@@ -335,7 +335,7 @@ struct ThroughWrapper {
 struct [[gsl::Pointer]] WrapperView {
   Holder *p;
   void grow() const {
-    p->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}}
+    p->b.mutate(); // expected-warning {{mutating an owner through a pointer member}}
   }
 };
 
@@ -353,17 +353,17 @@ struct CastDoc {
   // cast site (a cast that casts away constness) and by the analysis (the const
   // method mutates the owner through the cast).
   void grow_field_cast() const {
-    ((Buf &)b).mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+    ((Buf &)b).mutate(); // expected-warning {{mutating an owner through a pointer member}} \
                          // expected-warning {{a cast that casts away constness}}
   }
   // C-style cast of `this` to a non-const pointer, then a field mutation.
   void grow_this_cast() const {
-    ((CastDoc *)this)->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+    ((CastDoc *)this)->b.mutate(); // expected-warning {{mutating an owner through a pointer member}} \
                                    // expected-warning {{a cast that casts away constness}}
   }
   // Functional-notation cast of `this`.
   void grow_this_func_cast() const {
-    ((CastDoc *)(this))->b.mutate(); // expected-warning {{const member function mutates an owner through a pointer member}} \
+    ((CastDoc *)(this))->b.mutate(); // expected-warning {{mutating an owner through a pointer member}} \
                                      // expected-warning {{a cast that casts away constness}}
   }
 

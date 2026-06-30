@@ -699,10 +699,6 @@ public:
     const Expr *InvExpr = IOF->getInvalidationExpr();
     if (!InvExpr)
       return; // a non-Expr invalidation (e.g. a destructor trigger).
-    const ParmVarDecl *Self = nullptr;
-    const CXXRecordDecl *Record = constTrustedSelf(Self);
-    if (!Record)
-      return;
     // The mutation only subverts `const` if the thing mutated is (or transitively
     // contains) a mutable owner -- only then can it invalidate a borrow a sibling
     // accessor handed out. The invalidated receiver's type is the mutated object
@@ -725,10 +721,45 @@ public:
       RecvTy = RecvTy->getPointeeType();
     if (!pointeeIsMutableOwner(RecvTy))
       return;
-    if (originReachesConstObject(IOF->getInvalidatedOrigin(), IOF, Record,
-                                 Self) &&
-        ReportedConstSubversionExprs.insert(InvExpr).second)
+    // The mutation subverts `const` if the mutated origin reaches a const-trusted
+    // object: the `this` of a `const` member function, or -- the indirection
+    // analogue -- a `const`-reference/pointer parameter (an indirection to a
+    // const value the caller trusts will not be mutated behind its back).
+    OriginID OID = IOF->getInvalidatedOrigin();
+    const ParmVarDecl *Self = nullptr;
+    const CXXRecordDecl *Record = constTrustedSelf(Self);
+    bool Subverts =
+        (Record && originReachesConstObject(OID, IOF, Record, Self)) ||
+        originReachesConstParam(OID, IOF);
+    if (Subverts && ReportedConstSubversionExprs.insert(InvExpr).second)
       SemaHelper->reportConstMethodIndirectMutation(InvExpr);
+  }
+
+  /// True if any loan held by `OID` at `PP` is rooted at a `const`-reference or
+  /// `const`-pointer parameter -- an indirection to a const value. Mutating a
+  /// mutable owner reached through such a parameter (possible only via a
+  /// pointer/smart-pointer member whose const does not reach the pointee, i.e.
+  /// shallow const) mutates a value the caller passed as const, behind the
+  /// analysis' back -- the parameter analogue of mutating `this` in a `const`
+  /// member function. Matched by parameter identity (the placeholder loan a
+  /// member access merges in), so a same-typed local or `this` mutated
+  /// legitimately does not match. A by-value `const` parameter is a copy and is
+  /// excluded.
+  bool originReachesConstParam(OriginID OID, ProgramPoint PP) const {
+    for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
+      const ParmVarDecl *P = FactMgr.getLoanMgr()
+                                 .getLoan(L)
+                                 ->getAccessPath()
+                                 .getAsPlaceholderParam();
+      if (!P)
+        continue;
+      QualType T = P->getType();
+      if (T->isReferenceType()
+              ? T.getNonReferenceType().isConstQualified()
+              : T->isPointerType() && T->getPointeeType().isConstQualified())
+        return true;
+    }
+    return false;
   }
 
   /// Soundness: a `const`-trusted member function that hands out a *non-const*
