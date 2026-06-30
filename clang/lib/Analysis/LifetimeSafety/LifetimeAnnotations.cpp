@@ -422,39 +422,40 @@ template <typename AttrT> static QualType gslAttrDerefType(QualType QT) {
   return A->getDerefType();
 }
 
+// Whether an element/template-argument type counts as an "indirection" the
+// analysis cannot track per element: a pointer/reference/gsl::Pointer, a nested
+// container of indirections, a type-erased callable wrapper or lambda (which can
+// capture a borrow), or a complete, unannotated borrow-holding user type
+// (unknown ownership). An *incomplete* record is conservatively NOT counted: an
+// uninstantiated deleter/allocator (e.g. unique_ptr<T>'s default_delete) or a
+// forward-declared pimpl element cannot be shown to hold a borrow, and
+// isUnknownOwnershipType reports incomplete types as unknown, which would
+// spuriously flag those. Shared by the gsl::Owner-of-indirection check and the
+// std::variant/any check below.
+static bool isIndirectionElement(QualType T,
+                                 llvm::DenseMap<const Type *, bool> &Cache) {
+  if (isPointerLikeType(T) || T->isReferenceType() ||
+      isGslOwnerOfIndirection(T, Cache))
+    return true;
+  const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (isStdCallableWrapperType(RD) || RD->isLambda())
+    return true;
+  return isUnknownOwnershipType(T, Cache);
+}
+
 bool isGslOwnerOfIndirection(QualType QT,
                              llvm::DenseMap<const Type *, bool> &Cache) {
   if (!isGslOwnerType(QT))
     return false;
-  // An indirection element only counts when its record is *complete* here: an
-  // incomplete arg (commonly an uninstantiated deleter / allocator, e.g. the
-  // default_delete in unique_ptr<T>, or a forward-declared pimpl element) cannot
-  // be shown to hold a borrow, and isUnknownOwnershipType conservatively reports
-  // incomplete types as unknown -- which would spuriously flag those.
-  auto IsIndirection = [&](QualType T) {
-    if (isPointerLikeType(T) || T->isReferenceType() ||
-        isGslOwnerOfIndirection(T, Cache))
-      return true;
-    const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-    if (!RD || !RD->hasDefinition())
-      return false;
-    // A callable wrapper (std::function / std::move_only_function) or a lambda
-    // can capture a borrow, which the analysis cannot track per element (the
-    // capture is type-erased). Treat it as an indirection so a container of such
-    // callables (e.g. std::vector<std::function<...>>) is rejected like a
-    // container of views -- otherwise a closure capturing a borrow stored into
-    // an element (via a braced init-list or a factory return, neither of which
-    // has a callable parameter to flag) is dropped silently.
-    if (isStdCallableWrapperType(RD) || RD->isLambda())
-      return true;
-    return isUnknownOwnershipType(T, Cache);
-  };
   // A [[gsl::Owner(T)]] whose declared owned type T is itself an indirection
   // (e.g. struct [[gsl::Owner(std::string_view)]] S) holds a borrow it cannot
   // track per element -- and the annotation is self-contradictory (an owner of
   // a view). Treat it like a container of indirections. This is the
   // attribute-argument analogue of the template-argument check below.
-  if (QualType D = gslAttrDerefType<OwnerAttr>(QT); !D.isNull() && IsIndirection(D))
+  if (QualType D = gslAttrDerefType<OwnerAttr>(QT);
+      !D.isNull() && isIndirectionElement(D, Cache))
     return true;
   const auto *CTSD = dyn_cast_if_present<ClassTemplateSpecializationDecl>(
       QT->getAsCXXRecordDecl());
@@ -472,7 +473,7 @@ bool isGslOwnerOfIndirection(QualType QT,
     // (unknown ownership, e.g. unique_ptr<Box> where Box has a view member) --
     // the element type itself must be annotated [[gsl::Owner]]/[[gsl::Pointer]]
     // to be modeled, so reject the container until it is.
-    if (IsIndirection(ArgT))
+    if (isIndirectionElement(ArgT, Cache))
       return true;
   }
   return false;
@@ -588,6 +589,32 @@ static QualType findNestedOwnerOrPointerOfIndirectionImpl(
     return QualType();
   if (!Visited.insert(QT.getCanonicalType().getTypePtr()).second)
     return QualType();
+  // std::variant / std::any keep their value in a union / type-erased buffer
+  // that the origin model does not expand, so a borrow-holding alternative is
+  // invisible -- unlike std::pair/std::tuple, whose members ARE tracked, or
+  // std::optional, a [[gsl::Owner]] already recognized by
+  // isGslOwnerOfIndirection. Treat such a holder of an indirection alternative
+  // like a container of indirections. (Without this,
+  // std::variant<int, std::string_view> is silently untracked while the
+  // equivalent std::optional<std::string_view> is flagged.)
+  if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD);
+      CTSD && isInStlNamespace(RD) &&
+      (RD->getName() == "variant" || RD->getName() == "any")) {
+    llvm::SmallVector<TemplateArgument, 8> Worklist(
+        CTSD->getTemplateArgs().asArray());
+    while (!Worklist.empty()) {
+      TemplateArgument A = Worklist.pop_back_val();
+      if (A.getKind() == TemplateArgument::Pack)
+        Worklist.append(A.pack_elements().begin(), A.pack_elements().end());
+      else if (A.getKind() == TemplateArgument::Type &&
+               isIndirectionElement(A.getAsType(), Cache)) {
+        // A variant/any is a value container (like std::optional, a recognized
+        // owner-of-indirection), not a view -- report it as owner-of-indirection.
+        IsPointer = false;
+        return A.getAsType();
+      }
+    }
+  }
   // Descend the template arguments of a non-owner aggregate such as
   // std::pair/std::tuple/std::unique_ptr, whose arguments nothing else inspects.
   if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
