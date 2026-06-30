@@ -11250,6 +11250,13 @@ def warn_lifetime_safety_setjmp
               "after it would be missed">,
       InGroup<LifetimeSafetySetjmp>,
       DefaultIgnore;
+def warn_lifetime_safety_coroutine
+    : Warning<"coroutines are not modeled by lifetime safety analysis; a "
+              "coroutine can suspend and resume after a borrowed argument's "
+              "lifetime has ended, so a dangling use in the resumed body would "
+              "be missed">,
+      InGroup<LifetimeSafetyCoroutine>,
+      DefaultIgnore;
 def warn_lifetime_safety_owner_of_indirection
     : Warning<"type %0 is a container whose element type holds a borrow (a "
               "pointer, reference, or unannotated borrow-holding type); "

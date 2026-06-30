@@ -860,6 +860,17 @@ programming model.
   }];
 }
 
+def LifetimeSafetyCoroutine : DiagGroup<"lifetime-safety-coroutine"> {
+  code Documentation = [{
+Warns on a coroutine. A coroutine's body is deferred past suspension points and
+resumed later -- possibly after a by-reference argument's temporary has been
+destroyed (the coroutine frame outlives the call's full-expression). The
+analysis models the call as ordinary, so a borrowed parameter used in the
+resumed body is not connected to that expiry. The construct is rejected under
+the safe programming model.
+  }];
+}
+
 def LifetimeSafetyOwnerOfIndirection
     : DiagGroup<"lifetime-safety-owner-of-indirection"> {
   code Documentation = [{
@@ -996,6 +1007,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyInlineAsm,
                                          LifetimeSafetyTypePunning,
                                          LifetimeSafetySetjmp,
+                                         LifetimeSafetyCoroutine,
                                          LifetimeSafetyOwnerOfIndirection,
                                          LifetimeSafetyPointerOfIndirection,
                                          LifetimeSafetyViewOnMutableGlobal,

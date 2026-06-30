@@ -177,6 +177,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::SetjmpLongjmp:
     OS << "SetjmpLongjmp";
     break;
+  case UntrackedConstructReason::Coroutine:
+    OS << "Coroutine";
+    break;
   }
   OS << ")\n";
 }

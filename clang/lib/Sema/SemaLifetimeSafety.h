@@ -67,6 +67,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_exception,
       diag::warn_lifetime_safety_inline_asm,
       diag::warn_lifetime_safety_setjmp,
+      diag::warn_lifetime_safety_coroutine,
       diag::warn_lifetime_safety_union,
       diag::warn_lifetime_safety_reinterpret_cast,
       diag::warn_lifetime_safety_owner_of_indirection,
@@ -626,6 +627,9 @@ public:
   }
   void reportSetjmpLongjmp(SourceLocation Loc) override {
     S.Diag(Loc, diag::warn_lifetime_safety_setjmp);
+  }
+  void reportCoroutine(SourceLocation Loc) override {
+    S.Diag(Loc, diag::warn_lifetime_safety_coroutine);
   }
   void reportUnion(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_union)

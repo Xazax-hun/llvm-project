@@ -307,6 +307,11 @@ public:
   // before the jump and used after it re-enters could be missed.
   virtual void reportSetjmpLongjmp(SourceLocation Loc) {}
 
+  // Reports a coroutine. Its body is deferred past suspension points and resumed
+  // later, possibly after a by-reference argument's temporary has been
+  // destroyed, so a dangling use in the resumed body could be missed.
+  virtual void reportCoroutine(SourceLocation Loc) {}
+
   // Reports a member access on a union. Different union members alias the same
   // storage, so a borrow into one member can be invalidated by writing another;
   // the analysis keys borrows by field identity and does not model this.

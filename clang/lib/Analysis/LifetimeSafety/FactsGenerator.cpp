@@ -16,6 +16,7 @@
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtCXX.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
@@ -299,6 +300,18 @@ void FactsGenerator::run() {
   const CFG &Cfg = *AC.getCFG();
   FlaggedIndirectionGlobals.clear();
   llvm::SmallVector<Fact *> PlaceholderLoanFacts = issuePlaceholderLoans();
+  // Safe-model soundness: a coroutine's body is deferred past suspension points
+  // and resumed later, possibly after a by-reference argument's temporary has
+  // been destroyed. The analysis models the call as ordinary, so a borrowed
+  // parameter used in the resumed body is never connected to that expiry. Reject
+  // the construct (see UntrackedConstructReason::Coroutine). Emitted with the
+  // entry-block placeholder facts (CurrentBlockFacts is cleared per block). Use
+  // the declaration's raw body: AnalysisDeclContext::getBody() unwraps the
+  // CoroutineBodyStmt to its inner statement.
+  if (const auto *FD = dyn_cast_or_null<FunctionDecl>(AC.getDecl()))
+    if (isa_and_present<CoroutineBodyStmt>(FD->getBody()))
+      PlaceholderLoanFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::Coroutine, FD->getLocation()));
   // Iterate through the CFG blocks in reverse post-order to ensure that
   // initializations and destructions are processed in the correct sequence.
   for (const CFGBlock *Block : *AC.getAnalysis<PostOrderCFGView>()) {

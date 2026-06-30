@@ -528,6 +528,13 @@ enum class UntrackedConstructReason : uint8_t {
   /// and used after it would be missed. The construct is rejected under the safe
   /// programming model.
   SetjmpLongjmp,
+  /// A coroutine. Its body is deferred past suspension points and resumed later,
+  /// possibly after a by-reference argument's temporary has been destroyed (the
+  /// coroutine frame outlives the call's full-expression). The analysis models
+  /// the call as ordinary, so a borrowed parameter used in the resumed body --
+  /// after its argument died -- is not connected to that expiry and would be
+  /// missed. The construct is rejected under the safe programming model.
+  Coroutine,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

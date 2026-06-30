@@ -1272,6 +1272,10 @@ public:
     case UntrackedConstructReason::SetjmpLongjmp:
       SemaHelper->reportSetjmpLongjmp(E->getExprLoc());
       break;
+    case UntrackedConstructReason::Coroutine:
+      if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
+        SemaHelper->reportCoroutine(UCF->getConstructLoc());
+      break;
     case UntrackedConstructReason::ViewOnMutableGlobal:
       // Currently the view-on-mutable-global diagnostic is emitted loan-based
       // (checkBorrowFromMutableGlobal), not via this fact; kept for completeness.
