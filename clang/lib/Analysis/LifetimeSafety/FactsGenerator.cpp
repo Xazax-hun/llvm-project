@@ -854,6 +854,25 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     if (Dest && Src && Dest->getLength() == Src->getLength())
       flow(Dest, Src, /*Kill=*/true);
     return;
+  case CK_BaseToDerived:
+  case CK_Dynamic:
+    // A downcast (`static_cast<Derived*>(base)`, `dynamic_cast<Derived&>(base)`)
+    // denotes the same object as its operand, so the object's loan must carry
+    // through -- otherwise a borrow taken via `static_cast<Derived*>(b)->member`
+    // roots at nothing and a later `delete b` / scope exit is never connected
+    // (a silent use-after-free). If the derived/base origin shapes line up, flow
+    // precisely; otherwise (derived adds owner fields / differing gsl::Pointer
+    // annotations, so the loan trees cannot be mapped) carry the outer object
+    // loan and seed the deeper levels with an Unknown loan, so any inner borrow
+    // this flow could not carry surfaces as -Wlifetime-safety-lost-loan rather
+    // than being silently dropped.
+    if (Dest && Src) {
+      if (Dest->getLength() == Src->getLength())
+        flow(Dest, Src, /*Kill=*/true);
+      else
+        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
+    }
+    return;
   case CK_ArrayToPointerDecay:
     assert(Src && "Array expression should have origins as it is GL value");
     // Soundness: an array whose element type is itself an indirection (a
@@ -927,6 +946,15 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     handleUse(CE);
     return;
   default:
+    // An unhandled cast kind whose result carries origins: rather than silently
+    // dropping whatever borrow the operand held (which can hide a use-after-free
+    // -- e.g. the base<->derived cast family above), carry the operand's outer
+    // loan and seed any deeper levels with an Unknown loan, so a dropped inner
+    // borrow surfaces as -Wlifetime-safety-lost-loan. The outer level flows
+    // precisely, so a genuinely borrow-free result stays empty (no false
+    // positive); only an unmodeled deeper indirection is flagged.
+    if (Dest && Src)
+      flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
     return;
   }
 }
