@@ -132,6 +132,38 @@ static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
   return false;
 }
 
+/// True if `RD` is, or has a by-value (possibly inherited / transitive)
+/// subobject that is, of type `Target` or a type derived from it. Recognizes a
+/// receiver whose loan roots at an *enclosing* object rather than the receiver
+/// subobject itself: `Wrapper w; Base& b = w.d; b.grow()` roots b's loan at `w`
+/// (Wrapper), which has a `d` subobject derived from the receiver's static type
+/// `Base`. A view/pointer receiver is excluded -- its type is no such subobject
+/// of the owner it borrows into. `Visited` cuts cycles.
+static bool recordContainsSubobjectDerivedFrom(
+    const CXXRecordDecl *RD, const CXXRecordDecl *Target,
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+  if (!RD || !RD->hasDefinition() || !Target || !Target->hasDefinition())
+    return false;
+  if (RD->getCanonicalDecl() == Target->getCanonicalDecl() ||
+      RD->isDerivedFrom(Target))
+    return true;
+  if (!Visited.insert(RD->getCanonicalDecl()).second)
+    return false;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (recordContainsSubobjectDerivedFrom(B.getType()->getAsCXXRecordDecl(),
+                                           Target, Visited))
+      return true;
+  for (const FieldDecl *FD : RD->fields()) {
+    QualType FT = FD->getType().getNonReferenceType();
+    while (FT->isArrayType())
+      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    if (recordContainsSubobjectDerivedFrom(FT->getAsCXXRecordDecl(), Target,
+                                           Visited))
+      return true;
+  }
+  return false;
+}
+
 using AnnotationTarget =
     llvm::PointerUnion<const ParmVarDecl *, const CXXMethodDecl *>;
 using EscapingTarget = LifetimeSafetySemaHelper::EscapingTarget;
@@ -847,8 +879,16 @@ public:
         bool IsA = RT->getCanonicalDecl() == RecvRD->getCanonicalDecl() ||
                    (RT->hasDefinition() && RecvRD->hasDefinition() &&
                     RT->isDerivedFrom(RecvRD));
-        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-        if (IsA &&
+        // `IsA`: the loan's record is (a base of) the receiver -- the receiver
+        // is that object. Otherwise the loan may root at an *enclosing* object
+        // (`Wrapper w; Base& b = w.d; b.grow()` roots b's loan at `w`); the
+        // receiver still denotes an owner if that record has a by-value
+        // subobject derived from the receiver's static type AND the record is
+        // (or contains) a mutable owner. A view merely borrowing into an owner
+        // is excluded -- its type is no such subobject.
+        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited, Visited2;
+        if ((IsA ||
+             recordContainsSubobjectDerivedFrom(RT, RecvRD, Visited2)) &&
             (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited))) {
           DenotesOwner = true;
           break;
