@@ -615,8 +615,34 @@ void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
   // Flows origins from the initializer expression to the field.
   // Example: `MyObj(std::string s) : view(s) {}`
   const FieldDecl *FD = CII->getAnyMember();
-  if (!FD)
+  if (!FD) {
+    // Soundness: a base-class initializer (`: Base(init)`) stores into the base
+    // subobject of `this`. If that subobject is (or holds) an indirection -- for
+    // instance a [[gsl::Owner]] that privately inherits std::string_view -- the
+    // borrow in `init` is captured into the object exactly as a store into a
+    // data member would be. But the origin model does not represent base
+    // subobjects (hasOrigins inspects only public data members, not bases), so
+    // this store was invisible: a lying [[clang::noescape]] initializer argument
+    // escaped into the object undetected. Model it as a capture into `this` --
+    // mirroring lifetime_capture_by(this) -- so the annotation verifier sees the
+    // escaped parameter loan. The escaped loans are inspected by checkAnnotations
+    // and only turn into a diagnostic for a noescape argument; a lifetimebound or
+    // unannotated one is handled by its own (unchanged) path.
+    if (CII->isBaseInitializer()) {
+      QualType BaseTy(CII->getBaseClass(), 0);
+      const Expr *Init = CII->getInit();
+      if (Init && FactMgr.getOriginMgr().hasOrigins(BaseTy) &&
+          FactMgr.getOriginMgr().hasOrigins(Init) &&
+          FactMgr.getOriginMgr().getThisOrigins())
+        if (OriginNode *InitNode = getOriginNode(*Init)) {
+          InitNode = getRValueOrigins(Init, InitNode);
+          CurrentBlockFacts.push_back(
+              FactMgr.createFact<CapturedByThisEscapeFact>(
+                  InitNode->getOriginID(), Init));
+        }
+    }
     return;
+  }
   killAndFlowOrigin(*FD, *CII->getInit());
   // Soundness: a member-initializer is a store into the member, just like
   // `this->view = init;` in the constructor body. Record a FieldStore for a
