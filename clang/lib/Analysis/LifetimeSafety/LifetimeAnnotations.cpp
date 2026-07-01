@@ -422,27 +422,54 @@ template <typename AttrT> static QualType gslAttrDerefType(QualType QT) {
   return A->getDerefType();
 }
 
-// Whether an element/template-argument type counts as an "indirection" the
-// analysis cannot track per element: a pointer/reference/gsl::Pointer, a nested
-// container of indirections, a type-erased callable wrapper or lambda (which can
-// capture a borrow), or a complete, unannotated borrow-holding user type
-// (unknown ownership). An *incomplete* record is conservatively NOT counted: an
-// uninstantiated deleter/allocator (e.g. unique_ptr<T>'s default_delete) or a
-// forward-declared pimpl element cannot be shown to hold a borrow, and
-// isUnknownOwnershipType reports incomplete types as unknown, which would
-// spuriously flag those. Shared by the gsl::Owner-of-indirection check and the
-// std::variant/any check below.
-static bool isIndirectionElement(QualType T,
+static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
+                                 llvm::DenseMap<const Type *, bool> &Cache);
+
+// Whether a record field / lambda capture / template-argument of type T holds a
+// borrow the enclosing record cannot track through it: a raw pointer/reference
+// or a gsl::Pointer view (both via isPointerLikeType), a type-erased callable
+// wrapper (std::function / std::move_only_function -- its captures are invisible
+// and may be borrows), a closure that captures a borrow, or another complete,
+// unannotated borrow-holding user type (unknown ownership). An *incomplete*
+// record is conservatively NOT counted: an uninstantiated deleter/allocator
+// (e.g. unique_ptr<T>'s default_delete) or a forward-declared pimpl element
+// cannot be shown to hold a borrow, and isUnknownOwnershipType reports
+// incomplete types as unknown, which would spuriously flag those.
+//
+// This is the single predicate shared by isUnknownOwnershipType,
+// lambdaCapturesBorrow, and isIndirectionElement so all three agree on what
+// "holds a borrow" means -- in particular, all recognize callable wrappers.
+// Without a shared definition a std::function member hid a captured borrow from
+// the ownership checks (e.g. unique_ptr<struct{std::function<...>}> was trusted
+// as a plain owner).
+static bool fieldTypeHoldsBorrow(QualType T,
                                  llvm::DenseMap<const Type *, bool> &Cache) {
-  if (isPointerLikeType(T) || T->isReferenceType() ||
-      isGslOwnerOfIndirection(T, Cache))
+  // Peel array dimensions: `P a[N]` holds a borrow iff `P` does.
+  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
+    T = AT->getElementType();
+  if (isPointerLikeType(T) || T->isReferenceType())
     return true;
   const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
-  if (isStdCallableWrapperType(RD) || RD->isLambda())
+  if (isStdCallableWrapperType(RD))
     return true;
+  if (RD->isLambda())
+    return lambdaCapturesBorrow(RD, Cache);
   return isUnknownOwnershipType(T, Cache);
+}
+
+// Whether an element/template-argument type counts as an "indirection" the
+// analysis cannot track per element. Besides anything that holds a borrow (see
+// fieldTypeHoldsBorrow), this includes a container-/owner-of-indirection element
+// (e.g. std::vector<std::string_view>), which hands out borrows one level deeper
+// than the outer container tracks. Shared by the gsl::Owner-of-indirection check
+// and the std::variant/any check below.
+static bool isIndirectionElement(QualType T,
+                                 llvm::DenseMap<const Type *, bool> &Cache) {
+  if (isGslOwnerOfIndirection(T, Cache))
+    return true;
+  return fieldTypeHoldsBorrow(T, Cache);
 }
 
 bool isGslOwnerOfIndirection(QualType QT,
@@ -659,17 +686,9 @@ QualType findNestedOwnerOrPointerOfIndirection(
 // the capture fields the lambda exemption would otherwise skip.
 static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
                                  llvm::DenseMap<const Type *, bool> &Cache) {
-  for (const FieldDecl *F : Lambda->fields()) {
-    QualType FT = F->getType();
-    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-      FT = AT->getElementType();
-    if (isPointerLikeType(FT) || FT->isReferenceType() ||
-        isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
+  for (const FieldDecl *F : Lambda->fields())
+    if (fieldTypeHoldsBorrow(F->getType(), Cache))
       return true;
-    if (const CXXRecordDecl *FRD = FT->getAsCXXRecordDecl())
-      if (FRD->isLambda() && lambdaCapturesBorrow(FRD, Cache))
-        return true;
-  }
   return false;
 }
 
@@ -695,28 +714,14 @@ bool isUnknownOwnershipType(QualType QT,
   const CXXRecordDecl *Def = RD->getDefinition();
   bool Result = !Def;
   if (Def) {
-    // The type's ownership is "unknown" if it (or a base) has a member that can
-    // hold a borrow (pointer/reference/gsl::Pointer) or is itself a type of
-    // unknown ownership.
+    // The type's ownership is "unknown" if it (or a base) has a member that
+    // holds a borrow the record cannot track through it (see
+    // fieldTypeHoldsBorrow): a pointer/reference/view, a type-erased callable
+    // wrapper, a closure capturing a borrow, or another unknown-ownership type.
     auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
-      for (const FieldDecl *F : R->fields()) {
-        QualType FT = F->getType();
-        // Peel array dimensions so a C-array member `P arr[N]` is treated like
-        // the scalar member `P` -- a ConstantArrayType is not pointer-like and
-        // its getAsCXXRecordDecl() is null, so an array-of-pointers/views member
-        // would otherwise hide the borrow the record holds.
-        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-          FT = AT->getElementType();
-        if (isPointerLikeType(FT) || FT->isReferenceType() ||
-            isGslPointerType(FT) || isUnknownOwnershipType(FT, Cache))
+      for (const FieldDecl *F : R->fields())
+        if (fieldTypeHoldsBorrow(F->getType(), Cache))
           return true;
-        // A closure-typed member that captures a borrow makes the record
-        // borrow-holding. isUnknownOwnershipType(closure) is exempt (a lambda
-        // value is modeled directly), so inspect the captures explicitly here.
-        if (const CXXRecordDecl *FRD = FT->getAsCXXRecordDecl())
-          if (FRD->isLambda() && lambdaCapturesBorrow(FRD, Cache))
-            return true;
-      }
       return false;
     };
     Result = RecordHoldsBorrow(Def);
