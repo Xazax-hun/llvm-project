@@ -987,16 +987,20 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     killAndFlowOrigin(*UO, *SubExpr);
     return;
   }
+  case UO_Plus:
   case UO_PreInc:
   case UO_PostInc:
   case UO_PreDec:
   case UO_PostDec: {
     // Incrementing/decrementing a pointer keeps it aimed into the same
-    // allocation, so the result carries the operand's loans. Without this a
-    // borrow used via the inc/dec result (e.g. `g = ++p`) is dropped. Pre-inc/
-    // dec yields the operand (an lvalue, same origin shape); post-inc/dec yields
-    // the old value (a prvalue, one level shallower) -- match the value
-    // category. Non-pointer operands have no origins to flow.
+    // allocation, and unary plus on a pointer is the identity -- so the result
+    // carries the operand's loans. Without this a borrow used via the result
+    // (e.g. `g = ++p`, or `p = +&local`) is dropped, leaving an *empty* origin
+    // that a control-flow merge supplying a valid loan on another path would
+    // mask (suppressing the lost-loan backstop). Pre-inc/dec yields the operand
+    // (an lvalue, same origin shape); post-inc/dec and unary plus yield a
+    // prvalue (one level shallower) -- match the value category. Non-pointer
+    // operands have no origins to flow.
     if (!UO->getType()->isPointerType())
       return;
     const Expr *SubExpr = UO->getSubExpr();
@@ -1017,6 +1021,15 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     return;
   }
   default:
+    // Any other unary operator that yields a borrow-carrying value the analysis
+    // does not model precisely must not leave its result origin *empty*: an
+    // empty origin is masked by a control-flow merge supplying a valid loan on
+    // another path, suppressing the lost-loan backstop (unlike the join-immune
+    // Unknown sentinel). Seed an Unknown loan so a dropped borrow surfaces as
+    // lost-loan robustly across joins. (Value-preserving forms above propagate
+    // the operand's loans precisely; this covers anything not handled there.)
+    issueUnknownLoanIfUntrackedBorrow(UO, getOriginNode(*UO),
+                                      /*FlowedIntoResult=*/false);
     return;
   }
 }
