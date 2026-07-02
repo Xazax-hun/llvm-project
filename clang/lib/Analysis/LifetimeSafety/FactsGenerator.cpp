@@ -2851,9 +2851,18 @@ void FactsGenerator::issueUnknownLoanIfUntrackedBorrow(const Expr *Call,
   // Only a value that itself carries a borrow at its top level: a view
   // (gsl::Pointer) or a raw pointer/reference. An owner is tracked differently
   // and a non-pointer return holds no borrow.
+  //
+  // A reference-returning call (e.g. an unrecognized `T& f()` such as
+  // std::vector::emplace_back) is a glvalue: the AST strips the reference, so
+  // Call->getType() is the pointee type and `isReferenceType()` never holds for
+  // a call. Detect the reference return via the value category instead --
+  // otherwise `&f()` borrows storage the analysis cannot track yet the result
+  // origin stays *empty* (not sentineled), and a control-flow merge supplying a
+  // valid loan on another path would mask the loss (the Unknown loan, by
+  // contrast, survives the union join).
   QualType RetTy = Call->getType();
   if (!isGslPointerType(RetTy) && !RetTy->isPointerType() &&
-      !RetTy->isReferenceType())
+      !RetTy->isReferenceType() && !Call->isGLValue())
     return;
   const Loan *L =
       FactMgr.getLoanMgr().createLoan(AccessPath::Unknown(Call), Call);
