@@ -133,32 +133,47 @@ static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
 }
 
 /// True if `RD` is, or has a by-value (possibly inherited / transitive)
-/// subobject that is, of type `Target` or a type derived from it. Recognizes a
-/// receiver whose loan roots at an *enclosing* object rather than the receiver
-/// subobject itself: `Wrapper w; Base& b = w.d; b.grow()` roots b's loan at `w`
-/// (Wrapper), which has a `d` subobject derived from the receiver's static type
-/// `Base`. A view/pointer receiver is excluded -- its type is no such subobject
-/// of the owner it borrows into. `Visited` cuts cycles.
-static bool recordContainsSubobjectDerivedFrom(
+/// subobject that is, of type `Target` or a type derived from it AND that same
+/// subobject is (or contains) a mutable owner. Recognizes a receiver whose loan
+/// roots at an *enclosing* object rather than the receiver subobject itself:
+/// `Wrapper w; Base& b = w.d; b.grow()` roots b's loan at `w` (Wrapper), which
+/// has a `d` subobject derived from the receiver's static type `Base` and that
+/// `Derived d` holds the owner being mutated.
+///
+/// The owner check must apply to the *matched* subobject, not to `RD` as a
+/// whole: an unrelated same-typed subobject must not qualify a plain value-type
+/// receiver. E.g. `struct World { SlotMap<Asteroid> pool; Vec2 stray; };` where
+/// `a.pos = ...` mutates a `Vec2&` receiver rooted (through a lifetimebound
+/// accessor) at `World`. `World` contains a `Vec2` subobject (`stray`) and,
+/// separately, a mutable owner (`pool`) -- but `stray` is not `a.pos`, and a
+/// `Vec2` assignment cannot reallocate anything. Requiring the *same* subobject
+/// to be both is-a-receiver and owner-bearing rejects this false positive while
+/// still accepting the Wrapper/Base case. A view/pointer receiver is likewise
+/// excluded -- its type is no such by-value subobject of the owner it borrows
+/// into. `Visited` cuts cycles.
+static bool recordContainsOwnerSubobjectDerivedFrom(
     const CXXRecordDecl *RD, const CXXRecordDecl *Target,
     llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
   if (!RD || !RD->hasDefinition() || !Target || !Target->hasDefinition())
     return false;
   if (RD->getCanonicalDecl() == Target->getCanonicalDecl() ||
-      RD->isDerivedFrom(Target))
-    return true;
+      RD->isDerivedFrom(Target)) {
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> OwnerVisited;
+    return isGslOwnerType(RD) ||
+           recordContainsMutableOwner(RD, OwnerVisited);
+  }
   if (!Visited.insert(RD->getCanonicalDecl()).second)
     return false;
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (recordContainsSubobjectDerivedFrom(B.getType()->getAsCXXRecordDecl(),
-                                           Target, Visited))
+    if (recordContainsOwnerSubobjectDerivedFrom(
+            B.getType()->getAsCXXRecordDecl(), Target, Visited))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
     QualType FT = FD->getType().getNonReferenceType();
     while (FT->isArrayType())
       FT = FT->getAsArrayTypeUnsafe()->getElementType();
-    if (recordContainsSubobjectDerivedFrom(FT->getAsCXXRecordDecl(), Target,
-                                           Visited))
+    if (recordContainsOwnerSubobjectDerivedFrom(FT->getAsCXXRecordDecl(), Target,
+                                                Visited))
       return true;
   }
   return false;
@@ -880,16 +895,22 @@ public:
                    (RT->hasDefinition() && RecvRD->hasDefinition() &&
                     RT->isDerivedFrom(RecvRD));
         // `IsA`: the loan's record is (a base of) the receiver -- the receiver
-        // is that object. Otherwise the loan may root at an *enclosing* object
+        // is that object; it denotes an owner if that object is (or contains) a
+        // mutable owner. Otherwise the loan may root at an *enclosing* object
         // (`Wrapper w; Base& b = w.d; b.grow()` roots b's loan at `w`); the
         // receiver still denotes an owner if that record has a by-value
-        // subobject derived from the receiver's static type AND the record is
-        // (or contains) a mutable owner. A view merely borrowing into an owner
-        // is excluded -- its type is no such subobject.
+        // subobject derived from the receiver's static type that is *itself* (or
+        // contains) a mutable owner. Requiring the matched subobject to be the
+        // owner-bearing one (not merely any same-typed subobject coexisting with
+        // an unrelated owner) avoids flagging a plain value-type receiver like
+        // `a.pos = ...` (`Vec2&`) merely because the enclosing record happens to
+        // hold both a stray `Vec2` and a container. A view merely borrowing into
+        // an owner is excluded -- its type is no such by-value subobject.
         llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited, Visited2;
-        if ((IsA ||
-             recordContainsSubobjectDerivedFrom(RT, RecvRD, Visited2)) &&
-            (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited))) {
+        bool DirectOwner =
+            IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited));
+        if (DirectOwner ||
+            recordContainsOwnerSubobjectDerivedFrom(RT, RecvRD, Visited2)) {
           DenotesOwner = true;
           break;
         }
