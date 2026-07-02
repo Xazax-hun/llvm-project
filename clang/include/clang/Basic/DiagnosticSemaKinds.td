@@ -11042,6 +11042,15 @@ def warn_lifetime_safety_lifetimebound_violation
     : Warning<"could not verify that the return value can be lifetime bound to %select{an unnamed parameter|'%1'|the implicit this parameter}0">,
       InGroup<LifetimeSafetyLifetimeboundViolation>,
       DefaultIgnore;
+def warn_lifetime_safety_capture_by_violation
+    : Warning<"'[[clang::lifetime_capture_by]]' names a capturing entity other "
+              "than 'this', but the borrow from %select{an unnamed parameter|"
+              "'%1'}0 is captured into this object; annotate it "
+              "'[[clang::lifetime_capture_by(this)]]' or '[[clang::lifetimebound]]' "
+              "to match, or callers cannot tell the object now aliases the "
+              "argument">,
+      InGroup<LifetimeSafetyCaptureByViolation>,
+      DefaultIgnore;
 def warn_lifetime_safety_immortal_violation
     : Warning<"'[[clang::lifetime_immortal]]' function returns a borrow of "
               "%select{a local or temporary|a parameter|the implicit this "

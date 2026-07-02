@@ -227,6 +227,16 @@ public:
   virtual void reportAnnotatedParamEscapesToGlobal(const ParmVarDecl *PVD,
                                                    const VarDecl *Global) {}
 
+  // Reports a parameter annotated [[clang::lifetime_capture_by(X)]] (with X not
+  // naming `this`) whose borrow is nonetheless captured into the enclosing
+  // object -- stored into a field of `this`. The annotation names a different
+  // capturer than the body uses, so the analysis trusted the wrong entity and
+  // suppressed the unannotated-indirection backstop; the real capture into
+  // `this` went unchecked and the borrow can dangle. Annotate the parameter
+  // [[clang::lifetime_capture_by(this)]] (or [[clang::lifetimebound]]) to match
+  // the body.
+  virtual void reportCaptureByViolation(const ParmVarDecl *PVD) {}
+
   // Reports a parameter annotated [[clang::lifetime_capture_by(global)]] or
   // [[clang::lifetime_capture_by(unknown)]]. The safe programming model rejects
   // both: the analysis cannot track a borrow captured into global/static storage

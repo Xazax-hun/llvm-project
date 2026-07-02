@@ -696,10 +696,26 @@ Detects misuse of [[clang::noescape]] annotation where the parameter escapes (fo
   }];
 }
 
+def LifetimeSafetyCaptureByViolation
+    : DiagGroup<"lifetime-safety-capture-by-violation"> {
+  code Documentation = [{
+Warns on a parameter annotated '[[clang::lifetime_capture_by(X)]]' (with X not
+naming 'this') whose borrow is nonetheless captured into the enclosing object --
+stored into a field of 'this'. The annotation names a different capturer than the
+body actually uses, so the analysis trusts the wrong entity and stops requiring
+the parameter to be otherwise annotated; the real capture into the object then
+goes unchecked and the captured borrow can dangle once the object outlives it.
+Annotate the parameter '[[clang::lifetime_capture_by(this)]]' (or
+'[[clang::lifetimebound]]') to match the body. Rejected under the safe
+programming model.
+  }];
+}
+
 def LifetimeSafetyValidations : DiagGroup<"lifetime-safety-validations",
                                           [LifetimeSafetyNoescape,
                                            LifetimeSafetyLifetimeboundViolation,
                                            LifetimeSafetyImmortalViolation,
+                                           LifetimeSafetyCaptureByViolation,
                                            LifetimeSafetyMisplacedLifetimebound]> {
   code Documentation = [{
 Verify function implementations adhere to the annotated lifetime contracts through lifetime safety
@@ -1026,6 +1042,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyNoescape,
                                          LifetimeSafetyLifetimeboundViolation,
                                          LifetimeSafetyImmortalViolation,
+                                         LifetimeSafetyCaptureByViolation,
                                          // A borrow of `this`/a parameter that
                                          // escapes (via return or a field) from
                                          // an unannotated function is a soundness

@@ -206,6 +206,13 @@ private:
   /// now aliases the argument. Keyed by parameter to de-duplicate.
   llvm::DenseMap<const ParmVarDecl *, const VarDecl *>
       AnnotatedParamEscapesToGlobalMap;
+  /// Parameters annotated [[clang::lifetime_capture_by(X)]] with X *not* naming
+  /// `this`, whose borrow nonetheless escapes into the enclosing object (a store
+  /// into a field of `this`). The body captures the borrow into `this`, which
+  /// the annotation's named capturer does not describe -- and the annotation
+  /// suppressed the unannotated-indirection backstop, so the real capture went
+  /// unchecked. Keyed by parameter to de-duplicate.
+  llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// For a [[clang::lifetime_immortal]] function: the worst offending subject
   /// its return value borrows (0 = local/temporary, 1 = parameter, 2 = this);
@@ -317,6 +324,7 @@ public:
     suggestAnnotations();
     reportNoescapeViolations();
     reportThisEscapesToGlobal();
+    reportCaptureByViolations();
     reportLifetimeboundViolations();
     reportMisplacedLifetimebound();
     //  Annotation inference is currently guarded by a frontend flag. In the
@@ -332,6 +340,16 @@ public:
     if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
       for (int Idx : A->params())
         if (Idx == LifetimeCaptureByAttr::Global)
+          return true;
+    return false;
+  }
+
+  /// Returns true if \p PVD is annotated [[clang::lifetime_capture_by(this)]],
+  /// i.e. its capturer list names the implicit object.
+  static bool capturesThis(const ParmVarDecl *PVD) {
+    if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
+      for (int Idx : A->params())
+        if (Idx == LifetimeCaptureByAttr::This)
           return true;
     return false;
   }
@@ -478,9 +496,22 @@ public:
           AnnotatedParamEscapesToGlobalMap.try_emplace(PVD,
                                                        GlobalEsc->getGlobal());
       }
-      if (const auto *PVD = AP.getAsPlaceholderParam())
+      if (const auto *PVD = AP.getAsPlaceholderParam()) {
+        // A [[clang::lifetime_capture_by(X)]] parameter promises its borrow is
+        // captured by X. If the borrow instead escapes into the enclosing
+        // object -- a store into a field of `this` (FieldEscapeFact) -- and X
+        // does not name `this`, the body contradicts the annotation. The
+        // annotation suppressed the unannotated-indirection backstop, so this
+        // real capture into `this` would otherwise go unchecked and the borrow
+        // can dangle. Flag it as a capture_by violation. (A capture into a
+        // genuine parameter capturer produces no field escape; a truthful
+        // capture_by(this) names `this` and is excluded -- it is validated
+        // elsewhere, e.g. owner-capture.)
+        if (isa<FieldEscapeFact>(OEF) && PVD->hasAttr<LifetimeCaptureByAttr>() &&
+            !capturesThis(PVD))
+          CaptureByFieldViolations.insert(PVD);
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
-      else if (const auto *MD = AP.getAsPlaceholderThis())
+      } else if (const auto *MD = AP.getAsPlaceholderThis())
         CheckImplicitThis(MD);
     }
   }
@@ -1860,6 +1891,13 @@ public:
       SemaHelper->reportThisEscapesToGlobal(Info.Loc, Info.IsField, Global);
     for (auto [PVD, Global] : AnnotatedParamEscapesToGlobalMap)
       SemaHelper->reportAnnotatedParamEscapesToGlobal(PVD, Global);
+  }
+
+  void reportCaptureByViolations() {
+    if (!SemaHelper)
+      return;
+    for (const ParmVarDecl *PVD : CaptureByFieldViolations)
+      SemaHelper->reportCaptureByViolation(PVD);
   }
 
   // Bans [[clang::lifetime_capture_by(global)]] and
