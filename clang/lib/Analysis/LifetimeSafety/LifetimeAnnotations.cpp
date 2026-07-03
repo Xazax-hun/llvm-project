@@ -1009,6 +1009,24 @@ bool isStlStringConcatenationOperator(const FunctionDecl &FD) {
          isStlBasicStringType(FD.getReturnType()->getAsCXXRecordDecl());
 }
 
+bool isStlStringMemberCall(const FunctionDecl *FD) {
+  // CXXConstructorDecl is-a CXXMethodDecl, so this also covers the
+  // basic_string(const char*/string_view/...) constructors.
+  const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+  return MD && isStlBasicStringType(MD->getParent());
+}
+
+bool isStringSourceType(QualType T) {
+  T = T.getNonReferenceType();
+  if (T->isPointerType() && T->getPointeeType()->isCharType())
+    return true; // const char*
+  const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+  if (!RD || !isInStlNamespace(RD))
+    return false;
+  StringRef Name = getName(*RD);
+  return Name == "basic_string" || Name == "basic_string_view";
+}
+
 bool isStlContainerType(const CXXRecordDecl *RD) {
   if (!RD || !isInStlNamespace(RD))
     return false;

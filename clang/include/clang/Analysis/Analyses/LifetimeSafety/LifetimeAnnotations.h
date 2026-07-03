@@ -220,6 +220,19 @@ bool isStlContainerInsertionMethod(const CXXMethodDecl &MD);
 // operand reference (or character pointer) does not escape.
 bool isStlStringConcatenationOperator(const FunctionDecl &FD);
 
+// Returns true if \p FD is a member (or constructor) of std::basic_string.
+// basic_string owns its character buffer and never retains a borrow taken from
+// an argument: every member either copies the characters of a string-like
+// argument (ctor/assign/append/insert/replace/operator=/operator+=) or only
+// reads them (compare/find/...). So a string-source argument to any of them
+// does not escape -- see isStringSourceType.
+bool isStlStringMemberCall(const FunctionDecl *FD);
+
+// Returns true if \p T (peeling a reference) is a string *source* the standard
+// library reads/copies characters from without retaining: a std::string_view,
+// a std::string (basic_string), or a character pointer (const char*).
+bool isStringSourceType(QualType T);
+
 // Returns true if the record is a standard container template (vector, map,
 // basic_string, ...). A constructor of such a type copies/moves in the values
 // it is given, so a by-reference parameter to a non-borrow-holding type does

@@ -2587,6 +2587,15 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
           IsCopyInByPtr)
         continue;
     }
+    // std::basic_string owns its buffer and never retains a borrow from an
+    // argument: it copies (append/assign/operator=/insert/replace/ctor) or only
+    // reads (compare/find/...) the characters of a string-source argument. So a
+    // std::string_view / const char* / std::string argument does not escape,
+    // even though a string_view itself can hold a borrow (unlike the copy-in
+    // checks above, this holds precisely because the *referent* is a string the
+    // owner copies, not a value it stores).
+    if (isStlStringMemberCall(FD) && isStringSourceType(PVD->getType()))
+      continue;
     // Skip arguments the analysis already models through GSL recognition.
     if ((I == 0 && shouldTrackFirstArgument(FD)) ||
         (I == 1 && shouldTrackSecondArgument(FD)))
