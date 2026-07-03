@@ -359,6 +359,7 @@ public:
   template<class F> function& operator=(F) { return *this; }
   function& operator=(const function&) { return *this; }
   function& operator=(function&&) { return *this; }
+  R operator()(Args...) const;
   ~function();
 };
 

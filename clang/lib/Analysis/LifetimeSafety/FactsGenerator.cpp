@@ -2628,6 +2628,20 @@ void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
     if (OriginNode *N = getRValueOrigins(Arg, getOriginNode(*Arg)))
       CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
           N->getOriginID(), Call, /*Assumed=*/true));
+    // If the invoked callable is a data member, invoking it can mutate the
+    // enclosing object: the callable may have captured that object (or its
+    // members) by reference in a *different* function -- e.g. a [this]-capturing
+    // closure stored into a std::function member by the constructor -- so those
+    // captured loans are not visible on the member's own origin here. The
+    // enclosing object's origin carries its loan (e.g. `$this`), so invalidate
+    // it too. This catches a live borrow into the object (e.g. from a
+    // lifetimebound accessor) across the invocation -- including from a *const*
+    // method, where a stored callable subverts the "const does not mutate"
+    // assumption that assumed-invalidation of non-const calls relies on.
+    if (const auto *ME = dyn_cast<MemberExpr>(Arg->IgnoreImpCasts()))
+      if (OriginNode *Base = getOriginNode(*ME->getBase()))
+        CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+            Base->getOriginID(), Call, /*Assumed=*/true));
   }
 }
 
