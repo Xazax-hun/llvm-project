@@ -1,9 +1,9 @@
 // slotmap.h - a fixed-capacity, generation-tagged object pool.
 //
-// The project's one hand-written [[gsl::Owner]] container, exercising the safe
-// programming model on:
+// The project's one hand-written owner container (SELF_CONTAINED, i.e.
+// [[gsl::Owner]]; see annotations.h), exercising the safe programming model on:
 //
-//   * user-defined ownership (`[[gsl::Owner]]` on a class template),
+//   * user-defined ownership (SELF_CONTAINED on a class template),
 //   * returning borrows into the owner via `[[clang::lifetimebound]]` on `this`,
 //   * stable cross-frame references expressed as integer *handles* rather than
 //     pointers (so nothing is ever a `T*` stored in a container).
@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <type_traits>
 #include <vector>
+
+#include "annotations.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic error "-Wlifetime-safety-soundness"
@@ -44,7 +46,7 @@ struct SlotHandle {
 };
 
 template <class T>
-struct [[gsl::Owner]] SlotMap {
+struct SELF_CONTAINED SlotMap {
   static_assert(std::is_trivially_copyable_v<T>,
                 "SlotMap stores PODs by value; entities are trivially copyable");
 
