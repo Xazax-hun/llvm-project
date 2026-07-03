@@ -2404,10 +2404,6 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
-  // Whether the modeled argument list has a leading implicit object argument
-  // (true for an ordinary instance method, false for a C++23 explicit object
-  // member function, whose object is an ordinary parameter mapped 1:1).
-  bool ImplicitThis = IsInstance && !Method->isExplicitObjectMemberFunction();
   auto getArgCaptureBy = [FD, IsInstance](unsigned I) -> LifetimeCaptureByAttr * {
     // FIXME: Add support for capture_by on the implicit object (I == 0).
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
@@ -2428,15 +2424,17 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
           CapturingArgIdx == LifetimeCaptureByAttr::Unknown ||
           CapturingArgIdx == LifetimeCaptureByAttr::Invalid)
         continue;
-      // CapturingArgIdx is a parameter index; map it back to a call argument.
-      // For an implicit-this method the object occupies Args[0], so the
-      // parameters start at Args[1] (drop_front); for an explicit object member
-      // function (and free functions) parameters map to Args 1:1.
-      ArrayRef<const Expr *> CallArgs = ImplicitThis ? Args.drop_front() : Args;
-      const Expr *CapturedByArg =
-          (CapturingArgIdx == LifetimeCaptureByAttr::This)
-              ? Args[0]
-              : CallArgs[CapturingArgIdx];
+      // CapturingArgIdx indexes the attribute's entity numbering, which matches
+      // the modeled argument list directly: for an instance method the implicit
+      // object (`this`, ArgIndex::This == 0) is Args[0] and each parameter maps
+      // to its own Args slot; for a free or explicit-object function Args[0] is
+      // the first parameter (index 0). So index Args directly. (Dropping the
+      // object and reusing the index double-counted `this`: it mis-targeted the
+      // capturer and ran one past the end -- crashing -- when the named capturer
+      // was the last parameter of a non-static member function.)
+      if (CapturingArgIdx < 0 || (size_t)CapturingArgIdx >= Args.size())
+        continue;
+      const Expr *CapturedByArg = Args[CapturingArgIdx];
       assert(CapturedByArg && "Capturer expression must be valid");
 
       OriginNode *CapturingOriginNode = getOriginNode(*CapturedByArg);
