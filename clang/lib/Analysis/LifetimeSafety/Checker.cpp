@@ -404,9 +404,22 @@ public:
           continue;
         case AccessPath::Kind::ValueDecl: {
           const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
-          // A global/static variable is immortal; a local/field is not.
-          if (VD && VD->hasGlobalStorage())
+          // A global/static variable is immortal -- unless its type has a
+          // non-trivial destructor, which frees its storage at static
+          // destruction. A borrow of such a global's buffer (e.g. a
+          // `std::string_view` of a `std::string` global) is not immortal: a
+          // caller keeping it can read freed memory at teardown, and the
+          // destruction order is not something the analysis can reason about.
+          if (VD && VD->hasGlobalStorage()) {
+            QualType GlobalTy = AST.getBaseElementType(VD->getType());
+            const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
+            if (!RD || !RD->hasNonTrivialDestructor())
+              continue;
+            // Report as "an object the analysis cannot prove is immortal": the
+            // storage duration is static but the buffer is freed at teardown.
+            ImmortalReturnsUntracked = true;
             continue;
+          }
           ImmortalViolationSubject = std::max(ImmortalViolationSubject, 0);
           continue;
         }
@@ -1143,7 +1156,8 @@ public:
   /// escaping origin is typed as the owner value rather than a reference.
   void flagBorrowFromMutableGlobal(OriginID OID, ProgramPoint PP,
                                    SourceLocation Loc, SourceRange Range,
-                                   QualType ValueTyHint = QualType()) {
+                                   QualType ValueTyHint = QualType(),
+                                   bool EscapesToGlobal = false) {
     if (!SemaHelper || Loc.isInvalid())
       return;
     // A raw pointer/reference value, or a gsl::Pointer view.
@@ -1165,14 +1179,13 @@ public:
       // Peel array dimensions: a global array of owners (`std::string g[4]`)
       // owns reallocatable storage per element, but the loan roots at the array
       // variable whose own type is the array, not an owner. Test the element
-      // type for owner-ness (and its constness -- a const element is safe).
+      // type for owner-ness.
       QualType GlobalTy = AST.getBaseElementType(VD->getType());
-      if (GlobalTy.isConstQualified())
-        continue;
-      // The global must itself be a mutable owner, or a record that transitively
+      // The global must itself be an owner, or a record that transitively
       // contains one (`struct W { std::string s; } g_w;`). A global with no owner
       // anywhere (a plain scalar, `int g_int`, `int g_arr[8]`) has no
-      // reallocatable buffer and no aliasing hazard, so it is not flagged.
+      // reallocatable buffer and no aliasing/teardown hazard, so it is not
+      // flagged.
       bool DirectOwner = isGslOwnerType(GlobalTy);
       bool WrapsOwner = false;
       if (!DirectOwner)
@@ -1182,6 +1195,23 @@ public:
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
+      if (GlobalTy.isConstQualified()) {
+        // A const global owner cannot be mutated, so it has no aliasing hazard.
+        // But its buffer is still freed by its (non-trivial) destructor at
+        // static destruction. When a borrow of it escapes to other global/static
+        // storage, a longer-lived global holding the borrow can read the freed
+        // buffer at teardown -- and the destruction order across translation
+        // units is not something the intra-procedural analysis can reason about.
+        // A purely local use of such a borrow is safe (the const global outlives
+        // the function), so this applies only on the escape-to-global path.
+        const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
+        if (!EscapesToGlobal || !RD || !RD->hasNonTrivialDestructor())
+          continue;
+        if (!ReportedMutableGlobalLocs.insert(Loc).second)
+          return;
+        SemaHelper->reportGlobalDtorOrder(Loc, ValueTy, Range);
+        return;
+      }
       // Any pointer/reference/view borrow of a global that is or contains a
       // mutable owner is flagged: it aliases that owner invisibly to the caller,
       // so a mutation of the owner elsewhere (another function or TU) can
@@ -1337,11 +1367,13 @@ public:
     } else if (const auto *FE = dyn_cast<FieldEscapeFact>(OEF)) {
       const FieldDecl *FD = FE->getFieldDecl();
       flagBorrowFromMutableGlobal(OID, OEF, FD->getLocation(),
-                                  FD->getSourceRange());
+                                  FD->getSourceRange(), QualType(),
+                                  /*EscapesToGlobal=*/true);
     } else if (const auto *GE = dyn_cast<GlobalEscapeFact>(OEF)) {
       const VarDecl *VD = GE->getGlobal();
       flagBorrowFromMutableGlobal(OID, OEF, VD->getLocation(),
-                                  VD->getSourceRange());
+                                  VD->getSourceRange(), QualType(),
+                                  /*EscapesToGlobal=*/true);
     }
   }
 

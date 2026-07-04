@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-view-on-mutable-global -verify %s
+// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-view-on-mutable-global -Wlifetime-safety-immortal-violation -verify %s
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-soundness -verify %s
 
 #include "Inputs/lifetime-analysis.h"
@@ -76,8 +76,9 @@ void element_of_global_local(int i) {
 // A [[clang::lifetime_immortal]] accessor does not exempt this: the attribute
 // promises the function's *result* outlives callers, but a global owner's
 // reallocatable buffer is not immortal. The loan-based check still sees the
-// loan rooted at the global.
-[[clang::lifetime_immortal]] std::string_view immortal_element(int i) {
+// loan rooted at the global, and the immortal body verifier likewise rejects
+// the non-immortal borrow.
+[[clang::lifetime_immortal]] std::string_view immortal_element(int i) { // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
   return g_table[i]; // expected-warning {{borrows from a mutable global or static object}}
 }
 
@@ -115,10 +116,13 @@ public:
   void refresh(int i) { cache = g_table[i]; } // expected-warning {{borrows from a mutable global or static object}}
 };
 
-// Negative: caching a view of a CONST global into an owner member is safe.
+// Caching a view of a CONST global into an owner member is a static-destruction
+// hazard: the const global cannot be mutated, but its non-trivial destructor
+// frees its buffer at teardown, and the member escape keeps the view alive into
+// another object's destruction. The destruction order across TUs is unknowable.
 struct [[gsl::Owner]] CachingOwnerConst {
 private:
-  std::string_view cache; // no-warning
+  std::string_view cache; // expected-warning {{borrows from a global or static object with a non-trivial destructor and escapes to global or static storage}}
 
 public:
   void refresh() { cache = g_const; }

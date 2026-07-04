@@ -11284,6 +11284,13 @@ def warn_lifetime_safety_view_on_mutable_global
               "lifetime safety cannot track">,
       InGroup<LifetimeSafetyViewOnMutableGlobal>,
       DefaultIgnore;
+def warn_lifetime_safety_global_dtor_order
+    : Warning<"%0 borrows from a global or static object with a non-trivial "
+              "destructor and escapes to global or static storage; the borrowed "
+              "storage is freed at static destruction, whose order across "
+              "translation units lifetime safety cannot track">,
+      InGroup<LifetimeSafetyViewOnMutableGlobal>,
+      DefaultIgnore;
 def warn_lifetime_safety_self_referential
     : Warning<"%0 member is bound to a sibling member of the same object, making "
               "the object self-referential; mutating or moving the object can "

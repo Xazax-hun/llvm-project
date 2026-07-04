@@ -44,10 +44,13 @@ string_view launder(string_view); // unannotated: result is an untracked borrow
 // Negatives: the return really is immortal.
 //===----------------------------------------------------------------------===//
 
-string g_str;                 // global: immortal storage
-static const char G[] = "hi"; // static: immortal storage
+string g_str;                 // global std::string: buffer freed at teardown
+static const char G[] = "hi"; // static char array: genuinely immortal storage
 
-[[clang::lifetime_immortal]] string_view from_global() { return g_str; } // no-warning
+// A view of a global whose type has a non-trivial destructor is NOT immortal:
+// the buffer is freed at static destruction, so a caller keeping the result can
+// read freed memory at teardown (and the destruction order is unknowable).
+[[clang::lifetime_immortal]] string_view from_global() { return g_str; } // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
 
 [[clang::lifetime_immortal]] const char *from_static() { return G; } // no-warning
 

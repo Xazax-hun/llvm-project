@@ -356,6 +356,14 @@ public:
   virtual void reportViewOnMutableGlobal(SourceLocation Loc, QualType ViewTy,
                                          SourceRange Range) {}
 
+  // Reports a borrow of a global/static owner (even a `const` one) that has a
+  // non-trivial destructor and that escapes into other global/static storage.
+  // The borrowed storage is freed at static destruction, whose order across
+  // translation units the intra-procedural analysis cannot track, so a
+  // longer-lived global holding the borrow can read freed memory at teardown.
+  virtual void reportGlobalDtorOrder(SourceLocation Loc, QualType ViewTy,
+                                     SourceRange Range) {}
+
   // Reports a `const` member function that mutates an owner reached through the
   // pointee of an owning smart-pointer data member. `const` does not protect the
   // pointee, so this can invalidate borrows the analysis assumes a const member
