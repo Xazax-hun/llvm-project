@@ -19,8 +19,8 @@
 #include "entities.h"
 #include "slotmap.h"
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -69,6 +69,6 @@ private:
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
 
 #endif // LMT_GRID_H

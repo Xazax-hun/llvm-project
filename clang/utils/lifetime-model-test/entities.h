@@ -14,8 +14,8 @@
 
 #include "vec2.h"
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -79,6 +79,6 @@ inline float asteroidRadiusForSize(std::int32_t size) {
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
 
 #endif // LMT_ENTITIES_H

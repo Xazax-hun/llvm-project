@@ -2,7 +2,7 @@
 //
 // This is the project's main "library boundary": termios/unistd syscalls take
 // raw pointer parameters and are not lifetime-annotated, so the calls that touch
-// them sit inside localized `#pragma clang diagnostic ignored` opt-outs (see
+// them sit inside localized LIFETIME_UNSAFE_BEGIN/END opt-outs (see
 // terminal.cpp). Everything the rest of the program sees is a clean, in-model
 // value API: a Terminal RAII handle and a PollResult of value types.
 #ifndef LMT_TERMINAL_H
@@ -12,8 +12,8 @@
 
 #include "world.h" // for Input
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -49,6 +49,6 @@ void sleepMs(std::int32_t ms);
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
 
 #endif // LMT_TERMINAL_H

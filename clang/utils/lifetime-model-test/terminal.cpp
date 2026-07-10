@@ -1,7 +1,7 @@
 // terminal.cpp - see terminal.h.
 //
-// All syscall interaction is confined to small `#pragma clang diagnostic
-// ignored "-Wlifetime-safety-soundness"` regions: tcgetattr/tcsetattr/read/
+// All syscall interaction is confined to small LIFETIME_UNSAFE_BEGIN /
+// LIFETIME_UNSAFE_END regions: tcgetattr/tcsetattr/read/
 // ioctl/write/nanosleep take raw pointer parameters that carry no lifetime
 // annotations. Input *parsing* deliberately stays inside the model -- only the
 // raw read() that fills the byte buffer is opted out.
@@ -16,10 +16,10 @@
 #include <time.h>
 #include <unistd.h>
 
-// Opt INTO the safe model for this file's own code; nested `ignored` regions
-// below carve out the individual syscalls.
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+// Opt INTO the safe model for this file's own code; nested LIFETIME_UNSAFE
+// regions below carve out the individual syscalls.
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 namespace {
@@ -31,21 +31,19 @@ termios g_origTermios;
 // Emit a NUL-terminated control string to stdout. Opt-out: write() is a raw
 // syscall with pointer parameters.
 void emit(const char *s [[clang::noescape]]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   std::size_t n = 0;
   while (s[n] != '\0')
     ++n;
   ::write(STDOUT_FILENO, s, n);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 } // namespace
 
 Terminal::Terminal() {
   // Enter raw, non-blocking mode and query the window size.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   if (::tcgetattr(STDIN_FILENO, &g_origTermios) == 0) {
     termios raw = g_origTermios;
     raw.c_lflag = raw.c_lflag & ~(static_cast<tcflag_t>(ICANON | ECHO));
@@ -59,7 +57,7 @@ Terminal::Terminal() {
     cols_ = static_cast<std::int32_t>(ws.ws_col);
     rows_ = static_cast<std::int32_t>(ws.ws_row) - 1; // leave a status line
   }
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
   if (cols_ < 20) cols_ = 80;
   if (rows_ < 10) rows_ = 40;
   emit("\x1b[2J");    // clear screen
@@ -70,10 +68,9 @@ Terminal::~Terminal() {
   emit("\x1b[?25h"); // show cursor
   emit("\x1b[2J\x1b[H");
   if (raw_) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
     ::tcsetattr(STDIN_FILENO, TCSANOW, &g_origTermios);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
   }
 }
 
@@ -84,10 +81,9 @@ PollResult Terminal::poll() {
   std::int32_t n = 0;
   {
     // The only opt-out in this function: read() fills the local byte buffer.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
     ssize_t got = ::read(STDIN_FILENO, buf, sizeof(buf));
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
     if (got > 0)
       n = static_cast<std::int32_t>(got);
   }
@@ -122,15 +118,14 @@ PollResult Terminal::poll() {
 void sleepMs(std::int32_t ms) {
   if (ms <= 0)
     return;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   timespec ts;
   ts.tv_sec = ms / 1000;
   ts.tv_nsec = static_cast<long>(ms % 1000) * 1000000L;
   ::nanosleep(&ts, nullptr);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END

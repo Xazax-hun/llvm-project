@@ -8,8 +8,8 @@
 
 #include <cmath>
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -68,6 +68,6 @@ inline Vec2 toroidalDelta(Vec2 a, Vec2 b, float w, float h) {
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
 
 #endif // LMT_VEC2_H

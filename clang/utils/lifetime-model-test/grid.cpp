@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <span>
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -65,4 +65,4 @@ std::span<const std::uint32_t> Grid::cell(std::int32_t cx,
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END

@@ -8,8 +8,8 @@
 #include "entities.h"
 #include "vec2.h"
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -128,13 +128,12 @@ void Renderer::present() {
 
   // --- library boundary: hand the assembled bytes to stdio. fwrite takes
   // unannotated pointer parameters, so this single call opts out. ---
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   std::fwrite(frame_.data(), 1, frame_.size(), stdout);
   std::fflush(stdout);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END

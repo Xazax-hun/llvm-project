@@ -22,20 +22,23 @@ the model requires. In short, inside a soundness-error region:
 
 ## How the model is scoped
 
-Each source file `#include`s its system headers first, then opens a region:
+Each source file `#include`s its system headers first, then opens a region
+with the markers from `annotations.h`:
 
 ```c++
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 // ... all of our code ...
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
 ```
 
-The pragma both **enables** the analysis and upgrades soundness checks to errors
-— but only for code lexically inside the region. Because the STL is included
-*outside* the region, standard-library template bodies produce no diagnostics,
-and we need no global `-Wlifetime-safety` flag. (Verified: the pragma alone is
-sufficient to turn the analysis on.)
+`LIFETIME_SAFE_START` expands to a pragma that both **enables** the analysis and
+upgrades soundness checks to errors — but only for code lexically inside the
+region. Because the STL is included *outside* the region, standard-library
+template bodies produce no diagnostics, and we need no global
+`-Wlifetime-safety` flag. (Verified: the pragma alone is sufficient to turn the
+analysis on.) Unavoidable raw-pointer FFI is carved back out with
+`LIFETIME_UNSAFE_BEGIN` / `LIFETIME_UNSAFE_END`.
 
 ## Build & run
 
@@ -149,8 +152,8 @@ The opt-outs are deliberately confined to I/O glue; **no game logic is opted
 out**.
 
 * **`terminal.cpp`** -- all the syscalls (`tcgetattr`/`tcsetattr`/`read`/
-  `ioctl`/`write`/`nanosleep`) sit in per-call `#pragma clang diagnostic ignored
-  "-Wlifetime-safety-soundness"` regions; they take raw pointer parameters with
+  `ioctl`/`write`/`nanosleep`) sit in per-call `LIFETIME_UNSAFE_BEGIN` /
+  `LIFETIME_UNSAFE_END` regions; they take raw pointer parameters with
   no lifetime annotations. Input *parsing* stays in the model -- only the raw
   `read()` that fills a local byte buffer is opted out. The `termios` system
   struct is kept in a file-local static so it never appears as a member inside a

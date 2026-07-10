@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <span>
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -272,4 +272,4 @@ void World::spawnWave(std::int32_t count) {
 
 } // namespace ast
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END

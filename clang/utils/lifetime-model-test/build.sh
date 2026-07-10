@@ -4,14 +4,16 @@
 # built clang in this checkout.
 #
 # The whole application opts into the lifetime-safety "safe programming model"
-# via per-file pragma regions:
+# via per-file region markers from annotations.h:
 #
-#     #pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#     LIFETIME_SAFE_START / LIFETIME_SAFE_END
 #
-# That pragma (a) enables the lifetime-safety analysis and (b) upgrades every
-# soundness check to an error -- but only for code *inside* the region. System
-# headers are #included *outside* the region, so the STL produces no noise and
-# no global -Wlifetime-safety flag is required. See NOTES.md for details.
+# LIFETIME_SAFE_START expands to a pragma that (a) enables the lifetime-safety
+# analysis and (b) upgrades every soundness check to an error -- but only for
+# code *inside* the region. System headers are #included *outside* the region,
+# so the STL produces no noise and no global -Wlifetime-safety flag is required.
+# Unavoidable raw-pointer FFI is carved out with LIFETIME_UNSAFE_BEGIN /
+# LIFETIME_UNSAFE_END. See annotations.h and NOTES.md for details.
 #
 # Usage:
 #   ./build.sh            # build ./asteroids (safe model enforced, -O2)

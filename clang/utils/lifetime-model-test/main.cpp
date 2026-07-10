@@ -5,8 +5,8 @@
 // single-indirection rule (it is language-mandated), so argv can be iterated
 // directly in-model. The only opt-outs are a handful of un-annotated C library
 // calls (chrono, printf/fprintf, strcmp, atoi), each wrapped behind a small
-// annotated shim whose body carries a localized
-// `#pragma clang diagnostic ignored`. main's own logic -- arg parsing, dispatch,
+// annotated shim whose body carries a localized LIFETIME_UNSAFE region.
+// main's own logic -- arg parsing, dispatch,
 // the bench arithmetic -- is fully checked.
 #include <chrono>
 #include <cstdint>
@@ -18,8 +18,8 @@
 #include "terminal.h"
 #include "world.h"
 
-#pragma clang diagnostic push
-#pragma clang diagnostic error "-Wlifetime-safety-soundness"
+#include "annotations.h"
+LIFETIME_SAFE_START
 
 namespace ast {
 
@@ -33,11 +33,10 @@ struct BenchResult {
 // durations through un-annotated reference parameters, so the call is opted out;
 // callers just consume the returned int64.
 std::int64_t nowNanos() {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   auto now = std::chrono::steady_clock::now().time_since_epoch();
   return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 // Headless throughput benchmark: keep ~targetAsteroids alive, fly the ship
@@ -108,36 +107,32 @@ namespace {
 
 bool argIs(const char *arg [[clang::noescape]],
            const char *want [[clang::noescape]]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   return std::strcmp(arg, want) == 0;
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 std::int32_t parseInt(const char *s [[clang::noescape]]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   return std::atoi(s);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 void printUsage() {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   std::printf(
       "ASCII Asteroids - lifetime safe-model test\n"
       "  (no args)            play interactively (WASD/arrows + space, q to quit)\n"
       "  --bench N            headless: simulate N frames, report throughput\n"
       "  --asteroids M        target asteroid population for --bench (default 300)\n"
       "  --help               this message\n");
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 void printUnknownArg(const char *arg [[clang::noescape]]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   std::fprintf(stderr, "unknown argument: %s\n", arg);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 // Derived stats are computed in-model; only the printf calls are opted out.
@@ -146,8 +141,7 @@ void printBenchResult(ast::BenchResult r, std::int32_t asteroids) {
   const double msPerFrame = r.frames > 0 ? r.seconds * 1000.0 / r.frames : 0.0;
   const double astPerSec =
       r.seconds > 0.0 ? static_cast<double>(r.asteroidSteps) / r.seconds : 0.0;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-soundness"
+LIFETIME_UNSAFE_BEGIN
   std::printf("frames           : %lld\n", static_cast<long long>(r.frames));
   std::printf("target asteroids : %d\n", asteroids);
   std::printf("wall time        : %.3f s\n", r.seconds);
@@ -155,7 +149,7 @@ void printBenchResult(ast::BenchResult r, std::int32_t asteroids) {
   std::printf("ms / frame       : %.4f\n", msPerFrame);
   std::printf("asteroid-updates : %lld (%.2f M/s)\n",
               static_cast<long long>(r.asteroidSteps), astPerSec * 1e-6);
-#pragma clang diagnostic pop
+LIFETIME_UNSAFE_END
 }
 
 } // namespace
@@ -196,4 +190,4 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-#pragma clang diagnostic pop
+LIFETIME_SAFE_END
