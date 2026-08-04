@@ -614,6 +614,14 @@ public:
            diag::note_lifetime_safety_assumed_invalidated_here)
         << OperationStmt->getSourceRange();
   }
+  void reportAssumedInvalidation(const CXXMethodDecl *MD,
+                                 const Stmt *OperationStmt) override {
+    S.Diag(MD->getBeginLoc(), diag::warn_lifetime_safety_assumed_invalidation)
+        << /*implicit object parameter=*/2 << MD->getSourceRange();
+    S.Diag(OperationStmt->getBeginLoc(),
+           diag::note_lifetime_safety_assumed_invalidated_here)
+        << OperationStmt->getSourceRange();
+  }
 
   void reportNakedDeallocation(const Expr *DeallocExpr) override {
     S.Diag(DeallocExpr->getExprLoc(),

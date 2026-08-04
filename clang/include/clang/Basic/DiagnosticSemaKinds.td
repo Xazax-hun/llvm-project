@@ -11199,7 +11199,8 @@ def warn_lifetime_safety_move_silencing
       InGroup<LifetimeSafetyMoveSilencing>,
       DefaultIgnore;
 def warn_lifetime_safety_assumed_invalidation
-    : Warning<"%select{object whose reference is captured|parameter}0 may be "
+    : Warning<"%select{object whose reference is captured|parameter|implicit "
+              "object parameter}0 may be "
               "invalidated by an operation that lifetime safety analysis "
               "assumes mutates the owner">,
       InGroup<LifetimeSafetyAssumedInvalidation>,

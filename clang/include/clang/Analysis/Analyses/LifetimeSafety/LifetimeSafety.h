@@ -291,6 +291,10 @@ public:
                                          const Stmt *OperationStmt) {}
   virtual void reportAssumedInvalidation(const ParmVarDecl *PVD,
                                          const Stmt *OperationStmt) {}
+  // Same, for a borrow of the implicit object (`this`) passed as an aliasing
+  // argument to the operation; anchored at the method it belongs to.
+  virtual void reportAssumedInvalidation(const CXXMethodDecl *MD,
+                                         const Stmt *OperationStmt) {}
 
   // Reports a 'delete'/'free' of a pointer whose allocation the analysis did not
   // see, so it cannot verify the deallocation is a live, unaliased allocation.

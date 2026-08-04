@@ -132,6 +132,28 @@ static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
   return false;
 }
 
+/// True if a borrow rooted at the `$this` placeholder of `MD` is aliased by a
+/// mutation of record `MutatedRecord`. `this` designates the *whole* object, so
+/// only a mutation of that object itself -- its own type, or a base subobject of
+/// it -- can invalidate such a borrow.
+///
+/// This must NOT be decided by matching the loans directly: a field's loan
+/// widens to its enclosing object's `$this` placeholder, so a raw `$this ==
+/// $this` match would make every pair of disjoint fields of the same object look
+/// aliasing (`grid_.build(asteroids_)`). Mutating a field does not move the
+/// enclosing object, so a borrow of `this` survives it; mutating the object (or a
+/// base subobject of it) may reallocate the owners it contains, so it does not.
+static bool thisBorrowAliasesMutationOf(const CXXMethodDecl *MD,
+                                        const CXXRecordDecl *MutatedRecord) {
+  if (!MD || !MutatedRecord || !MutatedRecord->hasDefinition())
+    return false;
+  const CXXRecordDecl *ThisClass = MD->getParent();
+  if (!ThisClass || !ThisClass->hasDefinition())
+    return false;
+  return ThisClass->getCanonicalDecl() == MutatedRecord->getCanonicalDecl() ||
+         ThisClass->isDerivedFrom(MutatedRecord);
+}
+
 /// True if `RD` is, or has a by-value (possibly inherited / transitive)
 /// subobject that is, of type `Target` or a type derived from it AND that same
 /// subobject is (or contains) a mutable owner. Recognizes a receiver whose loan
@@ -1044,6 +1066,12 @@ public:
         // The `$this` placeholder loan (laundered through a lifetimebound
         // accessor of `this`): anchor at the use that keeps the borrow live.
         SemaHelper->reportAssumedInvalidation(FallbackUse, OperationStmt);
+      else if (const CXXMethodDecl *MD =
+                   L->getAccessPath().getAsPlaceholderThis())
+        // The `$this` placeholder loan with no use to anchor at: `this` itself
+        // is the aliasing argument (argument-overlap), so anchor at the method
+        // whose implicit object parameter it stands for.
+        SemaHelper->reportAssumedInvalidation(MD, OperationStmt);
     }
   }
 
@@ -1534,45 +1562,73 @@ public:
     const CXXRecordDecl *MutatedRecord = AOF->getMutatedRecord();
     for (OriginID BO : AOF->getBorrowOrigins()) {
       LoanSet BLoans = LoanPropagation.getLoans(BO, AOF);
+      // Prefer an aliasing loan with a precise anchor (an issuing expression or
+      // a placeholder parameter) so the diagnostic points at the borrow itself.
+      // Only if none exists fall back to the `$this` placeholder loan, which
+      // carries neither anchor but is reportable at the method whose implicit
+      // object it stands for -- without that fallback, passing `this` as an
+      // aliasing argument (`f(this, this)`, `this->m(this)`) is detected here
+      // and then silently dropped.
+      LoanID ReportLoan;
+      bool HaveReport = false;
       for (LoanID BL : BLoans) {
         const Loan *BLoan = FactMgr.getLoanMgr().getLoan(BL);
         const AccessPath &BAP = BLoan->getAccessPath();
-        // The borrow aliases the mutated argument if it borrows the same
-        // storage, OR a SUBOBJECT of it: mutating an object (`a` / the receiver
-        // `this`) may reallocate any owner field it (transitively) contains,
-        // dangling a field-rooted borrow into it. So `f(a, a.b)` /
-        // `obj.m(this->buf)` overlap, while disjoint subobjects (`f(a.b, a.c)`)
-        // do not -- `c` is not a member of `b`'s type. (Field loans are
-        // instance-insensitive: the same accepted over-approximation as the
-        // invalidation check.)
-        bool Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
-        for (LoanID ML : Mutating) {
-          if (Aliases)
-            break;
-          const AccessPath &MAP =
-              FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
-          if (MAP == BAP)
-            Aliases = true;
+        bool HasPreciseAnchor =
+            BLoan->getIssuingExpr() || BAP.getAsPlaceholderParam();
+        const CXXMethodDecl *BorrowsThis = BAP.getAsPlaceholderThis();
+        // Skip loans with no reportable anchor at all; they would emit nothing.
+        if (!HasPreciseAnchor && !BorrowsThis)
+          continue;
+        bool Aliases;
+        if (BorrowsThis) {
+          // A borrow of the whole object: only a mutation of that object (or of
+          // a base subobject of it) aliases it. Deciding this by loan identity
+          // would over-match disjoint fields, whose loans widen to the same
+          // `$this` root.
+          Aliases = thisBorrowAliasesMutationOf(BorrowsThis, MutatedRecord);
+        } else {
+          // The borrow aliases the mutated argument if it borrows the same
+          // storage, OR a SUBOBJECT of it: mutating an object (`a` / the
+          // receiver `this`) may reallocate any owner field it (transitively)
+          // contains, dangling a field-rooted borrow into it. So `f(a, a.b)` /
+          // `obj.m(this->buf)` overlap, while disjoint subobjects (`f(a.b,
+          // a.c)`) do not -- `c` is not a member of `b`'s type. (Field loans are
+          // instance-insensitive: the same accepted over-approximation as the
+          // invalidation check.)
+          Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
+          for (LoanID ML : Mutating) {
+            if (Aliases)
+              break;
+            const AccessPath &MAP =
+                FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
+            if (MAP == BAP)
+              Aliases = true;
+          }
         }
         if (!Aliases)
           continue;
-        // Only a loan with a reportable anchor (an issuing expression or a
-        // placeholder parameter) produces a diagnostic; skip others so `break`
-        // (one report per captured value) lands on a reportable loan rather
-        // than a non-reportable one that would emit nothing.
-        if (!BLoan->getIssuingExpr() && !BAP.getAsPlaceholderParam())
-          continue;
-        // Two aliasing reference arguments produce symmetric facts (a->[b] and
-        // b->[a]); they describe the same hazard, so de-duplicate by (aliased
-        // storage, call).
-        const void *Storage = BAP.getAsValueDecl();
-        if (Storage && !ReportedArgOverlap.insert({Storage, Op}).second)
-          continue;
-        // Reuse the assumed-invalidation reporting (the operation is the call).
-        if (ReportedAssumedInval.insert({BL.Value, Op}).second)
-          PendingAssumedInval.push_back({BL, Op, /*FallbackUse=*/nullptr});
-        break; // one report per captured value
+        ReportLoan = BL;
+        HaveReport = true;
+        if (HasPreciseAnchor)
+          break; // precise anchor: prefer it and stop looking
       }
+      if (!HaveReport)
+        continue;
+      const AccessPath &RAP =
+          FactMgr.getLoanMgr().getLoan(ReportLoan)->getAccessPath();
+      // Two aliasing reference arguments produce symmetric facts (a->[b] and
+      // b->[a]); they describe the same hazard, so de-duplicate by (aliased
+      // storage, call). For a `this` argument the storage is the implicit
+      // object, keyed by the method the placeholder stands for.
+      const void *Storage = RAP.getAsValueDecl();
+      if (!Storage)
+        Storage = RAP.getAsPlaceholderThis();
+      if (Storage && !ReportedArgOverlap.insert({Storage, Op}).second)
+        continue;
+      // Reuse the assumed-invalidation reporting (the operation is the call).
+      if (ReportedAssumedInval.insert({ReportLoan.Value, Op}).second)
+        PendingAssumedInval.push_back({ReportLoan, Op, /*FallbackUse=*/nullptr});
     }
   }
 
