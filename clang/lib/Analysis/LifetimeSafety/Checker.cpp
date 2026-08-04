@@ -572,6 +572,24 @@ public:
   /// When a path expires, all loans having this path expires.
   /// This method examines all live origins and reports warnings for loans they
   /// hold that are prefixed by the expired path.
+  /// True if a warning for loan `LID` caused by `CausingFact` can actually
+  /// produce a diagnostic. A loan with an issuing expression, or one rooted at a
+  /// placeholder *parameter*, always can -- both are anchors every branch of
+  /// issuePendingWarnings handles. A loan with neither has no anchor of its own:
+  /// the `$this` placeholder, or the non-expiring "uninitialized" seed given to
+  /// each pointer/view member of `this` (created with /*IssuingExpr=*/nullptr and
+  /// AccessPath::Kind::Uninitialized). Such a loan can only be anchored at a
+  /// *use*; the escape-caused branches have no fallback and would emit nothing.
+  bool warningIsReportable(
+      LoanID LID,
+      llvm::PointerUnion<const UseFact *, const OriginEscapesFact *> CausingFact)
+      const {
+    const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
+    if (L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam())
+      return true;
+    return CausingFact.dyn_cast<const UseFact *>() != nullptr;
+  }
+
   void checkExpiry(const ExpireFact *EF) {
     const AccessPath &ExpiredPath = EF->getAccessPath();
     LivenessMap Origins = LiveOrigins.getLiveOriginsAt(EF);
@@ -692,9 +710,18 @@ public:
 
       for (LoanID LiveLoanID : Invalidated) {
         bool CurDomination = causingFactDominatesExpiry(LiveInfo.Kind);
-        bool LastDomination =
-            FinalWarningsMap.lookup(LiveLoanID).CausingFactDominatesExpiry;
-        if (!LastDomination) {
+        const PendingWarning &Last = FinalWarningsMap.lookup(LiveLoanID);
+        bool LastDomination = Last.CausingFactDominatesExpiry;
+        // FinalWarningsMap is keyed by loan, so one entry per loan survives.
+        // Prefer a *reportable* one: a loan with no anchor of its own can only be
+        // reported from a use (see warningIsReportable), so an escape-caused entry
+        // for such a loan would claim the slot and then emit nothing, silently
+        // dropping the use-after-invalidation. Let a reportable entry take over
+        // even from a dominating unreportable one -- a reported "maybe" beats a
+        // silent "definitely".
+        bool TakeOver = !warningIsReportable(LiveLoanID, Last.CausingFact) &&
+                        warningIsReportable(LiveLoanID, LiveInfo.CausingFact);
+        if (!LastDomination || TakeOver) {
           FinalWarningsMap[LiveLoanID] = {
               /*ExpiryLoc=*/{},
               /*CausingFact=*/LiveInfo.CausingFact,
