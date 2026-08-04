@@ -53,6 +53,15 @@ enum class BailoutReason : unsigned {
   CFGUnavailable = 1 // The CFG could not be built for the function.
 };
 
+/// How a borrow of a `const` global/static owner with a non-trivial destructor
+/// outlives this function, so that it can be read after that destructor has freed
+/// the borrowed storage. The values match the `%select` order of
+/// `warn_lifetime_safety_global_dtor_order`.
+enum class GlobalDtorOrderRoute : unsigned {
+  EscapesToGlobal = 0, // Stored into global/static storage or a field.
+  Returned = 1         // Handed to the caller, which may outlive the global.
+};
+
 /// Abstract interface for operations requiring Sema access.
 ///
 /// This class exists to break a circular dependency: the LifetimeSafety
@@ -361,12 +370,15 @@ public:
                                          SourceRange Range) {}
 
   // Reports a borrow of a global/static owner (even a `const` one) that has a
-  // non-trivial destructor and that escapes into other global/static storage.
-  // The borrowed storage is freed at static destruction, whose order across
-  // translation units the intra-procedural analysis cannot track, so a
-  // longer-lived global holding the borrow can read freed memory at teardown.
+  // non-trivial destructor and that outlives the borrowing function, so it can be
+  // read after that destructor has freed the borrowed storage: it escapes into
+  // other global/static storage, or is returned to the caller. The destruction
+  // order across translation units is not something the intra-procedural analysis
+  // can track, so such a borrow can read freed memory at teardown. `Route` says
+  // which way it left the function.
   virtual void reportGlobalDtorOrder(SourceLocation Loc, QualType ViewTy,
-                                     SourceRange Range) {}
+                                     SourceRange Range,
+                                     GlobalDtorOrderRoute Route) {}
 
   // Reports a `const` member function that mutates an owner reached through the
   // pointee of an owning smart-pointer data member. `const` does not protect the

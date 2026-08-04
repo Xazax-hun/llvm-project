@@ -11287,7 +11287,8 @@ def warn_lifetime_safety_view_on_mutable_global
       DefaultIgnore;
 def warn_lifetime_safety_global_dtor_order
     : Warning<"%0 borrows from a global or static object with a non-trivial "
-              "destructor and escapes to global or static storage; the borrowed "
+              "destructor and %select{escapes to global or static storage|is "
+              "returned to the caller}1; the borrowed "
               "storage is freed at static destruction, whose order across "
               "translation units lifetime safety cannot track">,
       InGroup<LifetimeSafetyViewOnMutableGlobal>,

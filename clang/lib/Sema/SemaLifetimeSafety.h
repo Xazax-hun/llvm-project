@@ -687,9 +687,10 @@ public:
         << ViewTy << Range;
   }
   void reportGlobalDtorOrder(SourceLocation Loc, QualType ViewTy,
-                             SourceRange Range) override {
+                             SourceRange Range,
+                             GlobalDtorOrderRoute Route) override {
     S.Diag(Loc, diag::warn_lifetime_safety_global_dtor_order)
-        << ViewTy << Range;
+        << ViewTy << unsigned(Route) << Range;
   }
   void reportConstMethodIndirectMutation(const Expr *E) override {
     S.Diag(E->getExprLoc(),

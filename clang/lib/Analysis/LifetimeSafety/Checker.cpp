@@ -1197,10 +1197,13 @@ public:
   /// (e.g. a function's return type) -- used so a reference/pointer RETURN of the
   /// whole owner (`std::string& f(){ return g_s; }`) is recognized, where the
   /// escaping origin is typed as the owner value rather than a reference.
-  void flagBorrowFromMutableGlobal(OriginID OID, ProgramPoint PP,
-                                   SourceLocation Loc, SourceRange Range,
-                                   QualType ValueTyHint = QualType(),
-                                   bool EscapesToGlobal = false) {
+  /// `EscapeRoute` is set when the borrow outlives this function invocation (it
+  /// is stored into global/static storage or a field, or returned to the
+  /// caller); `std::nullopt` means the borrow is only used locally.
+  void flagBorrowFromMutableGlobal(
+      OriginID OID, ProgramPoint PP, SourceLocation Loc, SourceRange Range,
+      QualType ValueTyHint = QualType(),
+      std::optional<GlobalDtorOrderRoute> EscapeRoute = std::nullopt) {
     if (!SemaHelper || Loc.isInvalid())
       return;
     // A raw pointer/reference value, or a gsl::Pointer view.
@@ -1241,18 +1244,27 @@ public:
       if (GlobalTy.isConstQualified()) {
         // A const global owner cannot be mutated, so it has no aliasing hazard.
         // But its buffer is still freed by its (non-trivial) destructor at
-        // static destruction. When a borrow of it escapes to other global/static
-        // storage, a longer-lived global holding the borrow can read the freed
-        // buffer at teardown -- and the destruction order across translation
-        // units is not something the intra-procedural analysis can reason about.
-        // A purely local use of such a borrow is safe (the const global outlives
-        // the function), so this applies only on the escape-to-global path.
+        // static destruction, and the destruction order across translation units
+        // is not something the intra-procedural analysis can reason about. So a
+        // borrow that OUTLIVES this function -- stored into other global/static
+        // storage or a field, or returned to the caller -- can be read after the
+        // buffer is freed, by a global destroyed later or by a caller running at
+        // teardown.
+        //
+        // A purely local use is not flagged. It is safe during normal execution
+        // (the const global outlives the call), and unsafe only if this function
+        // itself runs during static destruction -- which is whole-program
+        // reachability the intra-procedural analysis cannot decide. Keying it on
+        // "is a destructor" was tried and is a bad trade: it flags the common safe
+        // case (a destructor of a purely *local* object) while still missing the
+        // real bug behind one level of indirection (a destructor calling a helper
+        // that reads the global). So a local read at teardown remains a known gap.
         const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
-        if (!EscapesToGlobal || !RD || !RD->hasNonTrivialDestructor())
+        if (!EscapeRoute || !RD || !RD->hasNonTrivialDestructor())
           continue;
         if (!ReportedMutableGlobalLocs.insert(Loc).second)
           return;
-        SemaHelper->reportGlobalDtorOrder(Loc, ValueTy, Range);
+        SemaHelper->reportGlobalDtorOrder(Loc, ValueTy, Range, *EscapeRoute);
         return;
       }
       // Any pointer/reference/view borrow of a global that is or contains a
@@ -1404,19 +1416,26 @@ public:
       QualType RetTy;
       if (const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD))
         RetTy = Fn->getReturnType();
+      // A [[clang::lifetime_immortal]] function returning such a borrow is
+      // reported more specifically by the immortal body verifier ("an object the
+      // analysis cannot prove is immortal", see checkAnnotations), so skip the
+      // return route here to avoid a duplicate.
+      std::optional<GlobalDtorOrderRoute> Route = GlobalDtorOrderRoute::Returned;
+      if (FD && FD->hasAttr<LifetimeImmortalAttr>())
+        Route = std::nullopt;
       flagBorrowFromMutableGlobal(
           OID, OEF, Ret ? Ret->getExprLoc() : SourceLocation(),
-          Ret ? Ret->getSourceRange() : SourceRange(), RetTy);
+          Ret ? Ret->getSourceRange() : SourceRange(), RetTy, Route);
     } else if (const auto *FE = dyn_cast<FieldEscapeFact>(OEF)) {
       const FieldDecl *FD = FE->getFieldDecl();
       flagBorrowFromMutableGlobal(OID, OEF, FD->getLocation(),
                                   FD->getSourceRange(), QualType(),
-                                  /*EscapesToGlobal=*/true);
+                                  GlobalDtorOrderRoute::EscapesToGlobal);
     } else if (const auto *GE = dyn_cast<GlobalEscapeFact>(OEF)) {
       const VarDecl *VD = GE->getGlobal();
       flagBorrowFromMutableGlobal(OID, OEF, VD->getLocation(),
                                   VD->getSourceRange(), QualType(),
-                                  /*EscapesToGlobal=*/true);
+                                  GlobalDtorOrderRoute::EscapesToGlobal);
     }
   }
 

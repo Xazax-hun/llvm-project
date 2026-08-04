@@ -37,6 +37,23 @@ void store_const_to_global_field() {
 }
 
 //===----------------------------------------------------------------------===//
+// Returned to the caller: flagged.
+//===----------------------------------------------------------------------===//
+
+// The caller may keep the borrow -- or may itself be running during static
+// destruction -- so handing one out is a teardown hazard regardless of who calls.
+// This is the Meyers-singleton accessor shape: the idiom recommended to fix the
+// static *initialization* order fiasco reintroduces the *destruction* order one.
+string_view return_const_global() {
+  return g_const_str; // expected-warning {{borrows from a global or static object with a non-trivial destructor and is returned to the caller}}
+}
+
+const char *return_local_static() {
+  static const string s;
+  return s.data(); // expected-warning {{borrows from a global or static object with a non-trivial destructor and is returned to the caller}}
+}
+
+//===----------------------------------------------------------------------===//
 // [[clang::lifetime_immortal]] body verifier: a view of such a global is not
 // immortal storage.
 //===----------------------------------------------------------------------===//
@@ -51,6 +68,15 @@ void store_const_to_global_field() {
 
 // A borrow of a const global owner used LOCALLY (not escaping to global storage)
 // is safe: the const global outlives the function.
+//
+// KNOWN GAP: it is *not* safe if this function itself runs during static
+// destruction (a destructor of some static object, or an atexit handler), which
+// is whole-program reachability the intra-procedural analysis cannot decide.
+// Keying it on "the enclosing function is a destructor" was tried and rejected:
+// it flags the common safe case (a destructor of a purely *local* object) while
+// still missing the real bug behind one level of indirection (a destructor
+// calling a helper that reads the global). Closing this soundly would require
+// banning such a borrow outright, at the cost of the `use(g_const_string)` idiom.
 volatile char sink;
 void local_use_ok() {
   string_view v = g_const_str;

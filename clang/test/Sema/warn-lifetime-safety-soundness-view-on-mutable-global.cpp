@@ -8,7 +8,11 @@
 // (another function or TU) the intra-procedural analysis cannot see can
 // invalidate a view derived from it, and the borrow can dangle. The model bans
 // any such borrow once the global is, or transitively contains, a mutable owner.
-// A const owner is safe. The one permitted interaction is a method call on the
+// A const owner has no such aliasing hazard, but its buffer is still freed by its
+// destructor at static destruction, so a borrow of one that outlives the call is
+// flagged separately -- see
+// warn-lifetime-safety-soundness-global-dtor-order.cpp.
+// The one permitted interaction is a method call on the
 // global (`g.method()`): the receiver is exempt, but a borrow the method returns
 // is checked at its own use/escape.
 
@@ -20,7 +24,9 @@ std::string_view from_mutable_global() {
 }
 
 std::string_view from_const_global() {
-  return g_const; // no-warning
+  // No aliasing hazard (the global is const), but the returned borrow outlives
+  // the call and g_const's buffer is freed at static destruction.
+  return g_const; // expected-warning {{borrows from a global or static object with a non-trivial destructor and is returned to the caller}}
 }
 
 std::string_view from_static_local() {
