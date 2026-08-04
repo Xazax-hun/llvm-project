@@ -309,6 +309,33 @@ public:
             const OriginManager &OM) const override;
 };
 
+/// How strongly the checker must confirm, from the loans the mutated origin
+/// actually carries, that it really denotes a mutable owner. Needed when the
+/// *static* type of the mutated receiver/argument does not reveal one, so the
+/// confirmation must come from what the origin refers to -- robust to
+/// references/pointers/ternaries the static type cannot express. Only the loans
+/// that pass the gate are treated as invalidated.
+enum class OwnerLoanGate : uint8_t {
+  /// No confirmation needed: the static type already showed a mutable owner.
+  None,
+  /// The mutated owner must be REACHABLE from what a loan denotes: either the
+  /// loan's record is-a the static type and is (or contains) a mutable owner, or
+  /// that record has a by-value subobject derived from the static type which is
+  /// (or contains) one -- the case where the loan roots at an *enclosing* object
+  /// (`Wrapper w; Base& b = w.d; b.grow();` roots b's loan at `w`). Used for a
+  /// receiver whose static type hides the owner.
+  ReachableOwner,
+  /// Stricter: a loan must DENOTE the mutated object itself -- its record is-a
+  /// the static type AND is (or contains) a mutable owner. The enclosing-object
+  /// fallback is deliberately NOT accepted here: a member access inherits its
+  /// enclosing object's loan and gets no loan of its own (`this->b` carries only
+  /// `$this`), so accepting the fallback cannot tell "the argument is this object
+  /// viewed as a base" from "the argument is some member of it" -- and only the
+  /// former justifies invalidating borrows that carry the enclosing loan.
+  /// Used for the dynamic-dispatch parameter case.
+  DenotedOwner,
+};
+
 /// Represents that an origin's storage has been invalidated by a container
 /// operation (e.g., vector::push_back may reallocate, invalidating iterators).
 /// Created when a container method that may invalidate references/iterators
@@ -334,15 +361,10 @@ class InvalidateOriginFact : public Fact {
   /// carries the enclosing-object loan (needed for accessor verification),
   /// which must not be treated as invalidated by a field mutation.
   const FieldDecl *MutatedField;
-  /// When true, this assumed invalidation was emitted for a receiver whose
-  /// *static* type does not reveal an owner (e.g. a non-const call through a
-  /// base reference/pointer `Base& b = d; b.grow();`, or any other record
-  /// receiver). The checker only acts on it if a loan the receiver actually
-  /// carries points at a mutable owner -- a loan-based confirmation of what the
-  /// receiver refers to, robust to references/pointers/ternaries that the static
-  /// receiver type cannot express. (Dynamic dispatch is handled separately and
-  /// conservatively, without this flag.)
-  bool RequireOwnerLoanTarget;
+  /// How strongly the checker must confirm, from the loans the mutated origin
+  /// actually carries, that it really denotes a mutable owner. Used when the
+  /// *static* type of the mutated receiver/argument does not reveal one.
+  OwnerLoanGate LoanGate;
 
 public:
   static bool classof(const Fact *F) {
@@ -352,11 +374,11 @@ public:
   InvalidateOriginFact(OriginID OID, const Stmt *InvalidationOp,
                        bool Assumed = false, bool Deallocation = false,
                        const FieldDecl *MutatedField = nullptr,
-                       bool RequireOwnerLoanTarget = false)
+                       OwnerLoanGate LoanGate = OwnerLoanGate::None)
       : Fact(Kind::InvalidateOrigin), OID(OID),
         InvalidationOp(InvalidationOp), Assumed(Assumed),
         Deallocation(Deallocation), MutatedField(MutatedField),
-        RequireOwnerLoanTarget(RequireOwnerLoanTarget) {}
+        LoanGate(LoanGate) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   /// The invalidating operation as a statement (never null). Use this for the
@@ -370,7 +392,10 @@ public:
   bool isAssumed() const { return Assumed; }
   bool isDeallocation() const { return Deallocation; }
   const FieldDecl *getMutatedField() const { return MutatedField; }
-  bool requiresOwnerLoanTarget() const { return RequireOwnerLoanTarget; }
+  bool requiresOwnerLoanTarget() const {
+    return LoanGate != OwnerLoanGate::None;
+  }
+  OwnerLoanGate getOwnerLoanGate() const { return LoanGate; }
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };

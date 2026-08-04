@@ -956,6 +956,13 @@ public:
     // references/pointers/ternaries the static type cannot express), while
     // excluding a sub-object receiver that merely holds a borrow into some
     // containing owner (`a.pos = ...` where `a` is a reference into a container).
+    // The loans the invalidation actually matches against. Normally every loan
+    // the mutated origin carries; for a loan-gated invalidation, only those that
+    // pass the "denotes a mutable owner" test below. The distinction matters
+    // because a member access inherits its enclosing object's loan (`this->b`
+    // carries `$this`), so matching against every loan would let a mutation of one
+    // field invalidate borrows of a disjoint sibling.
+    llvm::SmallVector<LoanID, 8> MatchLoans;
     if (IOF->requiresOwnerLoanTarget()) {
       const Type *RecvT =
           FactMgr.getOriginMgr().getOrigin(IOF->getInvalidatedOrigin()).Ty;
@@ -965,7 +972,6 @@ public:
         RecvQT = RecvQT->getPointeeType();
       const CXXRecordDecl *RecvRD =
           RecvQT.isNull() ? nullptr : RecvQT->getAsCXXRecordDecl();
-      bool DenotesOwner = false;
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
@@ -990,17 +996,23 @@ public:
         llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited, Visited2;
         bool DirectOwner =
             IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited));
+        // The enclosing-object fallback is accepted only for a receiver
+        // (ReachableOwner), not for the dynamic-dispatch argument case
+        // (DenotedOwner) -- see OwnerLoanGate.
+        bool AllowEnclosing =
+            IOF->getOwnerLoanGate() == OwnerLoanGate::ReachableOwner;
         if (DirectOwner ||
-            recordContainsOwnerSubobjectDerivedFrom(RT, RecvRD, Visited2)) {
-          DenotesOwner = true;
-          break;
-        }
+            (AllowEnclosing &&
+             recordContainsOwnerSubobjectDerivedFrom(RT, RecvRD, Visited2)))
+          MatchLoans.push_back(InvalidID);
       }
-      if (!DenotesOwner)
+      if (MatchLoans.empty())
         return;
+    } else {
+      llvm::append_range(MatchLoans, DirectlyInvalidatedLoans);
     }
     auto IsInvalidated = [&](const Loan *L) {
-      for (LoanID InvalidID : DirectlyInvalidatedLoans) {
+      for (LoanID InvalidID : MatchLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
         if (AP == L->getAccessPath())

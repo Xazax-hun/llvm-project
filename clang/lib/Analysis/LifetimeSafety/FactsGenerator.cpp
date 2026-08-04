@@ -173,6 +173,27 @@ static QualType arrayElementType(QualType T) {
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
 /// exposes mutable access to a non-const owner pointee. Shared by the assumed-
 /// invalidation and argument-overlap checks.
+/// True if a non-const pointer/reference parameter of type `PT` may reach an
+/// owner through its *dynamic* type even though its static pointee type reveals
+/// none: the pointee is a polymorphic record, so a virtual call inside the callee
+/// can dispatch back to a derived object that owns reallocatable storage. An
+/// abstract interface is the extreme case -- it has no data members at all, yet
+/// `void notify(Reloader &R) { R.reload(); }` can reallocate whatever the
+/// most-derived object owns. Neither the static type nor any annotation expresses
+/// that, so such a parameter is treated conservatively; the resulting
+/// invalidation is loan-gated (OwnerLoanGate::DenotedOwner) so the checker acts
+/// only when the argument actually denotes a mutable owner. Mirrors the
+/// MaybeDynamicOwner case for a virtual-call receiver.
+static bool paramMayReachDynamicOwner(QualType PT) {
+  if (!PT->isPointerType() && !PT->isReferenceType())
+    return false;
+  QualType Pointee = PT->getPointeeType();
+  if (Pointee.isConstQualified())
+    return false;
+  const CXXRecordDecl *RD = Pointee->getAsCXXRecordDecl();
+  return RD && RD->hasDefinition() && RD->isPolymorphic();
+}
+
 static bool paramMayMutateOwner(QualType PT) {
   if (PT->isPointerType() || PT->isReferenceType()) {
     QualType Pointee = PT->getPointeeType();
@@ -2133,10 +2154,11 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
-  auto invalidate = [&](OriginID OID, bool RequireOwnerLoanTarget = false) {
+  auto invalidate = [&](OriginID OID,
+                        OwnerLoanGate LoanGate = OwnerLoanGate::None) {
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
         OID, Call, /*Assumed=*/true, /*Deallocation=*/false,
-        /*MutatedField=*/nullptr, RequireOwnerLoanTarget));
+        /*MutatedField=*/nullptr, LoanGate));
   };
   // A gsl::Pointer object/argument carries the borrows it holds on its pointee
   // origin(s). Invalidate the *entire* pointee chain, not just the first level:
@@ -2144,11 +2166,11 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   // by-value gsl::Pointer) reaches the borrowed owner several pointee levels
   // down, so a borrow taken directly from the aliased owner lives deeper than
   // getPointeeChild() once.
-  auto invalidatePointeeChain = [&](OriginNode *L,
-                                    bool RequireOwnerLoanTarget = false) {
+  auto invalidatePointeeChain =
+      [&](OriginNode *L, OwnerLoanGate LoanGate = OwnerLoanGate::None) {
     for (OriginNode *Pointee = L->getPointeeChild(); Pointee;
          Pointee = Pointee->getPointeeChild())
-      invalidate(Pointee->getOriginID(), RequireOwnerLoanTarget);
+      invalidate(Pointee->getOriginID(), LoanGate);
   };
   // Mutating an owner *through a member* (`w.in.grow()`) can invalidate a
   // borrow that flowed into an enclosing object rather than the receiver
@@ -2162,11 +2184,11 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   // base expression -- robust to forms like `(c ? a.f : b.f).g`. Invalidation
   // matches by exact borrowed-storage (AccessPath) identity, so an enclosing
   // object that holds no aliasing borrow yields nothing.
-  auto invalidateEnclosingObjects = [&](OriginNode *L,
-                                        bool RequireOwnerLoanTarget = false) {
+  auto invalidateEnclosingObjects =
+      [&](OriginNode *L, OwnerLoanGate LoanGate = OwnerLoanGate::None) {
     for (OriginNode *P = L->getParent(); P; P = P->getParent()) {
-      invalidate(P->getOriginID(), RequireOwnerLoanTarget);
-      invalidatePointeeChain(P, RequireOwnerLoanTarget);
+      invalidate(P->getOriginID(), LoanGate);
+      invalidatePointeeChain(P, LoanGate);
     }
   };
 
@@ -2191,7 +2213,7 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     //    or the call is a virtual dispatch on a polymorphic receiver (the
     //    dynamic type may add an owner), emit unconditionally (as before).
     //  - Otherwise, for any other record receiver, still emit -- but mark it
-    //    RequireOwnerLoanTarget so the checker only acts on it when a loan the
+    //    OwnerLoanGate::ReachableOwner so the checker only acts when a loan the
     //    receiver actually carries points at a mutable owner. This is loan-based
     //    (what the receiver refers to), robust to references/pointers/ternaries.
     QualType RecvTy = Args[0]->IgnoreImpCasts()->getType().getNonReferenceType();
@@ -2215,8 +2237,9 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     if ((StaticallyOwner || RecvRD) &&
         !(PointeeIsOwner && isNonInvalidatingMethod(*Method)))
       if (OriginNode *L = getOriginNode(*Args[0])) {
-        bool RequireOwnerLoan = !StaticallyOwner;
-        invalidate(L->getOriginID(), RequireOwnerLoan);
+        OwnerLoanGate RecvGate = StaticallyOwner ? OwnerLoanGate::None
+                                                 : OwnerLoanGate::ReachableOwner;
+        invalidate(L->getOriginID(), RecvGate);
         // When the receiver is a gsl::Pointer object (a view/wrapper that
         // reaches a mutable owner through what it points at, e.g. a wrapper
         // holding `std::vector<int>* v`), the borrows it carries also live on
@@ -2225,8 +2248,8 @@ void FactsGenerator::handleAssumedInvalidatingCall(
         // carries the object's loan). Mirrors shouldTrackPointerImplicitObjectArg
         // in handleFunctionCall.
         if (isGslPointerType(Args[0]->getType().getNonReferenceType()))
-          invalidatePointeeChain(L, RequireOwnerLoan);
-        invalidateEnclosingObjects(L, RequireOwnerLoan);
+          invalidatePointeeChain(L, RecvGate);
+        invalidateEnclosingObjects(L, RecvGate);
       }
   }
   // The implicit object argument (I == 0 for implicit-this instance methods) is
@@ -2240,18 +2263,40 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD)
       continue;
-    if (!paramMayMutateOwner(PVD->getType()))
+    // The parameter's *static* type does not always reveal an owner the call may
+    // mutate: passing `*this` to a parameter typed as an abstract base erases the
+    // reachability edge, while a virtual call inside the callee dispatches right
+    // back to the derived object and can reallocate what it owns. So:
+    //  - If the static type shows a mutable owner, emit unconditionally.
+    //  - Otherwise, if the pointee is polymorphic (the dynamic type may add one),
+    //    still emit -- but gate it (OwnerLoanGate::DenotedOwner) so the checker acts
+    //    when a loan the argument actually carries points at a mutable owner.
+    //    This mirrors the receiver branch in case (1) above and is loan-based, so
+    //    an unrelated polymorphic argument that denotes no owner yields nothing.
+    bool MayMutate = paramMayMutateOwner(PVD->getType());
+    if (!MayMutate && !paramMayReachDynamicOwner(PVD->getType()))
       continue;
     if (OriginNode *L = getOriginNode(*Args[I])) {
-      invalidate(L->getOriginID());
+      // A dynamic-owner-only argument must be confirmed to DENOTE the mutated
+      // object (see OwnerLoanGate::DenotedOwner).
+      OwnerLoanGate ArgGate =
+          MayMutate ? OwnerLoanGate::None : OwnerLoanGate::DenotedOwner;
+      invalidate(L->getOriginID(), ArgGate);
       // A gsl::Pointer argument (a view/wrapper that reaches a mutable owner
       // through what it points at) carries its borrows on the pointee
       // origin(s), so also invalidate the whole pointee chain -- mirroring the
       // receiver branch above -- so a borrow taken directly from the aliased
       // owner is invalidated too, at any nesting depth.
       if (isGslPointerType(PVD->getType().getNonReferenceType()))
-        invalidatePointeeChain(L);
-      invalidateEnclosingObjects(L);
+        invalidatePointeeChain(L, ArgGate);
+      // Enclosing objects only when the static type itself shows a mutable owner.
+      // The dynamic-type case justifies "the callee may reallocate what the
+      // ARGUMENT object owns" (via virtual dispatch on it), not what an enclosing
+      // object owns: passing a field to a polymorphic callback (`drive(this->buf)`
+      // where buf is-a Sink) cannot reach a disjoint sibling field, so walking the
+      // parent chain there would flag borrows of siblings.
+      if (MayMutate)
+        invalidateEnclosingObjects(L);
     }
   }
 }
