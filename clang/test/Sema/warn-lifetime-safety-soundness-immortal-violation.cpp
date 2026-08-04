@@ -54,6 +54,47 @@ static const char G[] = "hi"; // static char array: genuinely immortal storage
 
 [[clang::lifetime_immortal]] const char *from_static() { return G; } // no-warning
 
+//===----------------------------------------------------------------------===//
+// Heap storage is not immortal.
+//===----------------------------------------------------------------------===//
+
+// `new` gives storage that lives until someone frees it, and the intra-procedural
+// analysis cannot see whether anyone does: the allocation is handed to the caller,
+// and a `delete` anywhere -- typically in the destructor of the object that cached
+// it, or of an owner the result is later given to -- ends its lifetime while
+// callers still trust the immortal promise. Storage *duration* alone does not make
+// a borrow immortal, exactly as for a global with a non-trivial destructor above.
+struct Arena {
+  int *p = nullptr;
+  ~Arena() { delete p; } // frees what alloc() handed out
+  // Lies: the result lives only as long as *this.
+  [[clang::lifetime_immortal]] int *alloc() { // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
+    int *n = new int(5);
+    p = n;
+    return n;
+  }
+};
+
+// Returning the allocation directly is equally unprovable.
+[[clang::lifetime_immortal]] int *fresh() { // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
+  return new int(1);
+}
+
+// A static-cached allocation is the same: nothing in the body distinguishes a
+// deliberately leaked allocation from one that is freed later. The immortal
+// alternative is a static of trivially-destructible type (see from_static above),
+// which needs no allocation at all.
+[[clang::lifetime_immortal]] int *cached() { // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
+  static int *c = new int(2);
+  return c;
+}
+
+// Reaching into the allocation does not launder it either.
+struct Box { int field; };
+[[clang::lifetime_immortal]] int *field_of_new() { // expected-warning {{returns a borrow of an object the analysis cannot prove is immortal}}
+  return &(new Box{3})->field;
+}
+
 // Composes: delegating to another immortal function yields an immortal (not
 // untracked) loan, so it is verified and stays silent.
 [[clang::lifetime_immortal]] string_view immortal_src();

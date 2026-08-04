@@ -404,7 +404,22 @@ public:
         const AccessPath &AP = EL->getAccessPath();
         switch (AP.getKind()) {
         case AccessPath::Kind::Immortal:
+          continue;
         case AccessPath::Kind::NewAllocation:
+          // A heap allocation is NOT immortal. `new` / an allocating function
+          // gives storage that lives until someone frees it, and whether anyone
+          // does is not something the intra-procedural analysis can see: the
+          // allocation is handed to the caller, and a `delete` anywhere -- most
+          // commonly the destructor of the very object that cached it, or of an
+          // owner the result is later given to -- ends its lifetime while callers
+          // are still trusting the immortal promise. This mirrors the treatment
+          // of a global whose type has a non-trivial destructor below: storage
+          // *duration* alone does not make a borrow immortal.
+          //
+          // A deliberately leaked allocation is genuinely immortal, but nothing
+          // in the body distinguishes it from one that is freed later, so it is
+          // reported as unprovable rather than accepted.
+          ImmortalReturnsUntracked = true;
           continue;
         case AccessPath::Kind::Unknown:
           // Untracked: the analysis cannot prove this borrow is immortal. It may
