@@ -8,14 +8,20 @@ using std::vector;
 volatile char sink;
 
 // Reentrancy through a base-typed parameter. Assumed-invalidation asks whether an
-// owner is reachable from a mutated parameter, using the parameter's STATIC type.
-// Upcasting the argument to an abstract interface erased that edge: `Reloader` has
-// no data members at all, so nothing looked mutable -- while the virtual call in
-// the callee dispatches straight back to the derived object and reallocates what it
-// owns. The `[[clang::noescape]]` here is truthful, so no body verifier applies,
-// and no annotation can express "this virtual call may invalidate anything reachable
-// from the argument's complete object". A polymorphic pointee is therefore treated
-// conservatively, confirmed against the loans the argument actually carries.
+// owner is reachable from a mutated parameter. Taking that from the parameter's
+// STATIC type erased the edge whenever the argument was upcast: `Reloader` has no
+// data members at all, so nothing looked mutable -- while the callee reaches the
+// derived object again and reallocates what it owns. The `[[clang::noescape]]` here
+// is truthful, so no body verifier applies, and no annotation can express "this
+// call may invalidate anything reachable from the argument's complete object".
+//
+// The two questions are therefore split. MUTABILITY comes from the parameter: can
+// the callee write through it at all (a non-const pointer/reference)? REACHABILITY
+// comes from neither static type -- not the parameter's, which may be the base, and
+// not the argument's, since the upcast may have happened earlier. It is confirmed
+// from the loans the argument actually carries (OwnerLoanGate::DenotedOwner): a loan
+// must denote an object that is-a the parameter's type and is (or contains) a mutable
+// owner. An argument denoting no owner therefore yields nothing.
 
 struct Reloader {
   virtual ~Reloader() = default;
@@ -118,8 +124,11 @@ struct ConstApp : Reader {
   }
 };
 
-// A non-polymorphic base with no owner is unaffected: there is no dynamic type
-// that could add one.
+// A NON-polymorphic base is reported too. Virtual dispatch is not the only route
+// back down to the derived object: the callee can reach it with a plain
+// `static_cast<PlainApp &>(B)`, no vtable involved. Gating on "the parameter's
+// pointee is polymorphic" was therefore the wrong criterion; the loan denotes
+// `PlainApp`, which owns `Cfg`, and that is what confirms the hazard.
 struct PlainBase {
   int Tag = 0;
 };
@@ -128,8 +137,48 @@ void tweak(PlainBase &B [[clang::noescape]]);
 struct PlainApp : PlainBase {
   string Cfg;
   void go() {
-    string_view V = Cfg;
-    tweak(*this); // no-warning: PlainBase is not polymorphic
+    string_view V = Cfg; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    tweak(*this);        // expected-note {{assumed to be invalidated by this operation}}
+    sink = *V.data();
+  }
+};
+
+// CRTP / static polymorphism is the same shape: `CrtpBase<CrtpApp>` is not
+// polymorphic, yet `static_cast<D *>(this)->doReload()` dispatches back down.
+template <class D> struct CrtpBase {
+  void reload() { static_cast<D *>(this)->doReload(); }
+};
+template <class D> void notifyCrtp(CrtpBase<D> &B [[clang::noescape]]);
+
+struct CrtpApp : CrtpBase<CrtpApp> {
+  string Cfg;
+  void doReload() { Cfg = string(); }
+  void go() {
+    string_view V = Cfg;  // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    notifyCrtp(*this);    // expected-note {{assumed to be invalidated by this operation}}
+    sink = *V.data();
+  }
+};
+
+// Negative: a base with no owner anywhere reachable from the object the loan
+// denotes still yields nothing -- reachability is a property of the loan, not of any
+// declared type.
+struct OwnerlessApp : PlainBase {
+  int n = 0;
+  void go() {
+    tweak(*this); // no-warning: nothing reachable from OwnerlessApp is an owner
+  }
+};
+
+// The upcast may also happen BEFORE the call, so the argument's static type is the
+// base too. This is why no static type can answer reachability and the loan has to:
+// the gate asks the parameter only whether it can be written through.
+struct PreUpcastApp : PlainBase {
+  string Cfg;
+  void go() {
+    string_view V = Cfg; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    PlainBase &B = *this;
+    tweak(B); // expected-note {{assumed to be invalidated by this operation}}
     sink = *V.data();
   }
 };

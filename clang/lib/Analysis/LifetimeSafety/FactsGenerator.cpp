@@ -179,32 +179,24 @@ static QualType arrayElementType(QualType T) {
   return T;
 }
 
+/// True if the callee can mutate anything through a parameter of type `PT` at all:
+/// it must be a non-const pointer or reference. This is the only thing the
+/// *parameter* decides for the assumed-invalidation gate; whether an owner is
+/// actually reachable is confirmed from the loans the argument carries
+/// (OwnerLoanGate::DenotedOwner), not from any static type. A static type cannot
+/// answer it: the parameter's may be a base that hides the owner, and so may the
+/// argument's if the upcast happened earlier (`Base &b = derived; f(b);`).
+static bool paramCanMutateThrough(QualType PT) {
+  if (!PT->isPointerType() && !PT->isReferenceType())
+    return false;
+  return !PT->getPointeeType().isConstQualified();
+}
+
 /// Returns true if a parameter of type `PT` lets the call mutate the owner the
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
 /// exposes mutable access to a non-const owner pointee. Shared by the assumed-
 /// invalidation and argument-overlap checks.
-/// True if a non-const pointer/reference parameter of type `PT` may reach an
-/// owner through its *dynamic* type even though its static pointee type reveals
-/// none: the pointee is a polymorphic record, so a virtual call inside the callee
-/// can dispatch back to a derived object that owns reallocatable storage. An
-/// abstract interface is the extreme case -- it has no data members at all, yet
-/// `void notify(Reloader &R) { R.reload(); }` can reallocate whatever the
-/// most-derived object owns. Neither the static type nor any annotation expresses
-/// that, so such a parameter is treated conservatively; the resulting
-/// invalidation is loan-gated (OwnerLoanGate::DenotedOwner) so the checker acts
-/// only when the argument actually denotes a mutable owner. Mirrors the
-/// MaybeDynamicOwner case for a virtual-call receiver.
-static bool paramMayReachDynamicOwner(QualType PT) {
-  if (!PT->isPointerType() && !PT->isReferenceType())
-    return false;
-  QualType Pointee = PT->getPointeeType();
-  if (Pointee.isConstQualified())
-    return false;
-  const CXXRecordDecl *RD = Pointee->getAsCXXRecordDecl();
-  return RD && RD->hasDefinition() && RD->isPolymorphic();
-}
-
 static bool paramMayMutateOwner(QualType PT) {
   if (PT->isPointerType() || PT->isReferenceType()) {
     QualType Pointee = PT->getPointeeType();
@@ -2343,17 +2335,24 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     if (!PVD)
       continue;
     // The parameter's *static* type does not always reveal an owner the call may
-    // mutate: passing `*this` to a parameter typed as an abstract base erases the
-    // reachability edge, while a virtual call inside the callee dispatches right
-    // back to the derived object and can reallocate what it owns. So:
-    //  - If the static type shows a mutable owner, emit unconditionally.
-    //  - Otherwise, if the pointee is polymorphic (the dynamic type may add one),
-    //    still emit -- but gate it (OwnerLoanGate::DenotedOwner) so the checker acts
-    //    when a loan the argument actually carries points at a mutable owner.
-    //    This mirrors the receiver branch in case (1) above and is loan-based, so
-    //    an unrelated polymorphic argument that denotes no owner yields nothing.
+    // mutate: passing `*this` to a parameter typed as a base erases the
+    // reachability edge, and the callee reaches the derived object again through a
+    // virtual call or a plain `static_cast`. Nor does the argument's static type
+    // answer it -- the upcast may have happened earlier (`Base &b = derived;
+    // f(b);`). So the parameter decides only MUTABILITY (can the callee write
+    // through it at all), and reachability is confirmed from the loans the argument
+    // actually carries:
+    //  - If the parameter's type itself shows a mutable owner, emit unconditionally.
+    //  - Otherwise, for any non-const pointer/reference to a class, still emit --
+    //    gated (OwnerLoanGate::DenotedOwner) so the checker acts only when a loan
+    //    the argument carries denotes an object that is-a the parameter's type and
+    //    is (or contains) a mutable owner. This is the same loan-based confirmation
+    //    the receiver branch uses; an argument denoting no owner yields nothing.
     bool MayMutate = paramMayMutateOwner(PVD->getType());
-    if (!MayMutate && !paramMayReachDynamicOwner(PVD->getType()))
+    bool LoanConfirmed =
+        !MayMutate && paramCanMutateThrough(PVD->getType()) &&
+        PVD->getType()->getPointeeType()->getAsCXXRecordDecl() != nullptr;
+    if (!MayMutate && !LoanConfirmed)
       continue;
     if (OriginNode *L = getOriginNode(*Args[I])) {
       // A dynamic-owner-only argument must be confirmed to DENOTE the mutated
