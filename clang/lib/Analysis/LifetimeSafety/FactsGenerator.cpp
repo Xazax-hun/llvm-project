@@ -374,6 +374,9 @@ void FactsGenerator::run() {
       else if (std::optional<CFGCleanupFunction> CleanupFunction =
                    Element.getAs<CFGCleanupFunction>())
         handleCleanupFunction(*CleanupFunction);
+      else if (std::optional<CFGMemberDtor> MemberDtor =
+                   Element.getAs<CFGMemberDtor>())
+        handleMemberDtor(*MemberDtor);
       else if (std::optional<CFGFullExprCleanup> FullExprCleanup =
                    Element.getAs<CFGFullExprCleanup>()) {
         handleFullExprCleanup(*FullExprCleanup);
@@ -1931,6 +1934,31 @@ bool FactsGenerator::escapesViaReturn(OriginID OID) const {
       return EF->getEscapedOriginID() == OID;
     return false;
   });
+}
+
+/// A member's destructor runs *after* the enclosing destructor's body, and it can
+/// read whatever that body stored into the member. The analysis is
+/// intra-procedural and does not see the member destructor's body, so model the
+/// member's destruction as a *use* of the member -- exactly as handleLifetimeEnds
+/// does for a local object at scope exit. This keeps a borrow the body deposited
+/// in the member live up to that point, so a local that died at the end of the
+/// body is reported as not living long enough.
+///
+/// Owners are excluded (their destruction frees their own storage, already modeled
+/// by expiry, rather than dereferencing a borrow into something else), and a
+/// trivial destructor cannot read anything.
+void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
+  const FieldDecl *FD = MemberDtor.getFieldDecl();
+  if (!FD)
+    return;
+  QualType FDTy = FD->getType();
+  const CXXRecordDecl *RD = FDTy->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
+      isGslOwnerType(FDTy) || !hasOrigins(FDTy))
+    return;
+  if (OriginNode *Node = getOriginNode(*FD))
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<UseFact>(AC.getDecl()->getEndLoc(), Node));
 }
 
 void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {

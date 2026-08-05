@@ -135,6 +135,9 @@ private:
   void handleCXXCtorInitializer(const CXXCtorInitializer *CII);
 
   void handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds);
+  /// Models a member's destructor, which runs after the enclosing destructor's
+  /// body, as a use of that member.
+  void handleMemberDtor(const CFGMemberDtor &MemberDtor);
 
   void handleCleanupFunction(const CFGCleanupFunction &CleanupFunction);
 

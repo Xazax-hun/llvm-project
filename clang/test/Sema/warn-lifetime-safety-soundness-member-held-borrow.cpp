@@ -93,3 +93,62 @@ struct [[gsl::Owner]] Untouched {
 private:
   vector<int> v; // an owner field, not a borrow-holding member
 };
+
+//===----------------------------------------------------------------------===//
+// A member's destructor runs AFTER the enclosing destructor's body, so it can
+// read what that body stored. Modeling the member's destruction as a use of the
+// member keeps such a borrow live up to that point.
+//===----------------------------------------------------------------------===//
+
+struct ReadsOnDestroy2 {
+  string_view v;
+  ~ReadsOnDestroy2(); // out-of-line: the analysis cannot see that it reads `v`
+};
+
+struct [[gsl::Owner]] StoresLocalInDtor {
+  ~StoresLocalInDtor() {
+    string tmp;
+    in.v = tmp; // expected-warning {{local variable 'tmp' does not live long enough}}
+  }             // expected-note {{destroyed here}} expected-note {{later used here}}
+
+private:
+  ReadsOnDestroy2 in;
+};
+
+// The same store in an ordinary member function, for contrast: there no member
+// destructor runs, so the borrow is reported through the field escape at exit
+// instead -- a different diagnostic for the same underlying store.
+struct [[gsl::Owner]] StoresLocalInMethod {
+  void bad() {
+    string tmp;
+    in.v = tmp; // expected-warning {{stack memory associated with local variable 'tmp' escapes to the field 'in' which will dangle}}
+  }
+
+private:
+  ReadsOnDestroy2 in; // expected-note {{this field dangles}}
+};
+
+// Negative: a member whose destructor is trivial cannot read anything, so its
+// destruction is not a use.
+struct TrivialDtor {
+  string_view v; // trivially destructible
+};
+
+struct [[gsl::Owner]] TrivialMemberIsNotAUse {
+  ~TrivialMemberIsNotAUse() {
+    string tmp;
+    in.v = tmp; // no-warning: nothing reads `in` after the body
+  }
+
+private:
+  TrivialDtor in;
+};
+
+// Negative: an owner member's destruction frees its own storage (already modeled
+// by expiry) rather than reading a borrow into something else.
+struct [[gsl::Owner]] OwnerMemberIsNotAUse {
+  ~OwnerMemberIsNotAUse() {} // no-warning
+
+private:
+  string owned;
+};
