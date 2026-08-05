@@ -2184,7 +2184,15 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
   const FieldDecl *MutatedField = nullptr;
   if (const auto *ME = dyn_cast<MemberExpr>(Recv))
     if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
-        FD && isMutableOwnerType(FD->getType()))
+        FD && isMutableOwnerType(FD->getType()) &&
+        // A *reference* member is an alias, not storage of its own: the receiver's
+        // loan names the referent, not the field. Scoping the invalidation to the
+        // field would then match nothing (and the early return in
+        // IsExactInvalidated also skips the generic access-path comparison that
+        // does match), so `c.items.clear()` through a `vector<T> &items` member
+        // invalidated nothing -- while the pointer spelling of the same design,
+        // whose receiver is a dereference rather than a MemberExpr, worked.
+        !FD->getType()->isReferenceType())
       MutatedField = FD;
   QualType RecvTy = Recv->getType();
   bool OwnerReceiver =
