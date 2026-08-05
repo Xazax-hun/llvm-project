@@ -2950,11 +2950,13 @@ void delete_param_pointer(int* x) { // expected-warning {{parameter does not liv
   (void)x;                          // expected-note {{later used here}}
 }
 
-// FIXME: false-negative
+// A borrow held by a pointer member, freed through that member and then read.
+// The member's seed loan has no anchor of its own; it is reported against the
+// member declaration, which is what makes this reachable at all.
 struct S {
-  int *x;
+  int *x; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
   void foo() {
-    delete x;
+    delete x; // expected-note {{freed here}}
     (void)x;
   }
 };

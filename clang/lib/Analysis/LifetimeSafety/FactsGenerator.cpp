@@ -2000,12 +2000,20 @@ void FactsGenerator::handleFullExprCleanup(
 }
 
 void FactsGenerator::handleExitBlock() {
+  // A field does not outlive a DESTRUCTOR: by the time one returns the object is
+  // gone, so nothing can read its members afterwards and "this borrow escapes to
+  // a field" is vacuous there. Emitting the fact anyway makes a destructor's own
+  // cleanup (`~Box() { delete pv; }`) look like it strands a borrow in `pv`, and
+  // keeps every field origin spuriously live back through the destructor body.
+  // Globals still escape from a destructor, so only the field facts are skipped.
+  const bool InDestructor = isa<CXXDestructorDecl>(AC.getDecl());
   for (const Origin &O : FactMgr.getOriginMgr().getOrigins())
-    if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl()))
+    if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl())) {
       // Create FieldEscapeFacts for all field origins that remain live at exit.
-      EscapesInCurrentBlock.push_back(
-          FactMgr.createFact<FieldEscapeFact>(O.ID, FD));
-    else if (auto *VD = dyn_cast_if_present<VarDecl>(O.getDecl())) {
+      if (!InDestructor)
+        EscapesInCurrentBlock.push_back(
+            FactMgr.createFact<FieldEscapeFact>(O.ID, FD));
+    } else if (auto *VD = dyn_cast_if_present<VarDecl>(O.getDecl())) {
       // Create GlobalEscapeFacts for all origins with global-storage that
       // remain live at exit.
       if (VD->hasGlobalStorage()) {

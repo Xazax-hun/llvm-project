@@ -15,10 +15,12 @@ volatile char sink;
 // the call (so the liveness-based invalidation pass misses it).
 
 struct [[gsl::Pointer]] W {
-  string *p;
+  // The wrapper's borrow lives in this member, so the mutation through it is also
+  // reported against the member (in addition to the argument-overlap hazard).
+  string *p; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
   W(string &s [[clang::lifetimebound]]); // captures &s into the pointee origin
   void grow_and_use(string_view v [[clang::noescape]]) {
-    p->push_back('z'); // reallocates *p
+    p->push_back('z'); // reallocates *p // expected-note {{invalidated here}}
     sink = *v.data();  // v aliased *p -> dangling
   }
 };

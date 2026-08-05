@@ -1856,6 +1856,13 @@ public:
           CausingFact = Warning.CausingFact;
       const ParmVarDecl *InvalidatedPVD =
           L->getAccessPath().getAsPlaceholderParam();
+      // A borrow taken through a pointer/view MEMBER of `this` carries the seed
+      // loan issued at entry, which has no issuing expression and is not rooted
+      // at a parameter. Its access path names the member it came through, which
+      // is a usable anchor -- without it the escape-caused branches below have
+      // nothing to report and the diagnostic is silently dropped.
+      const auto *InvalidatedField = dyn_cast_or_null<FieldDecl>(
+          L->getAccessPath().getAsUninitialized());
       const Expr *MovedExpr = Warning.MovedExpr;
       SourceLocation ExpiryLoc = Warning.ExpiryLoc;
 
@@ -1909,6 +1916,12 @@ public:
               SemaHelper->reportInvalidatedField(InvalidatedPVD,
                                                  FieldEscape->getFieldDecl(),
                                                  Warning.InvalidatedByExpr);
+            else if (InvalidatedField)
+              // The borrow came through a pointer/view member of `this`, whose
+              // seed loan has no anchor of its own; anchor at that member.
+              SemaHelper->reportInvalidatedField(InvalidatedField,
+                                                 FieldEscape->getFieldDecl(),
+                                                 Warning.InvalidatedByExpr);
           } else if (const auto *GlobalEscape =
                          dyn_cast<GlobalEscapeFact>(OEF)) {
             // Invalidated object escapes to global or static storage.
@@ -1921,6 +1934,11 @@ public:
             else if (InvalidatedPVD)
               // Invalidated parameter escapes to global or static storage.
               SemaHelper->reportInvalidatedGlobal(InvalidatedPVD,
+                                                  GlobalEscape->getGlobal(),
+                                                  Warning.InvalidatedByExpr);
+            else if (InvalidatedField)
+              // See above: anchor at the member the borrow came through.
+              SemaHelper->reportInvalidatedGlobal(InvalidatedField,
                                                   GlobalEscape->getGlobal(),
                                                   Warning.InvalidatedByExpr);
           } else if (isa<ReturnEscapeFact>(OEF)) {

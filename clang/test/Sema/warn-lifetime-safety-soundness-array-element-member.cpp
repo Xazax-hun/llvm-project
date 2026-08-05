@@ -16,6 +16,10 @@ using std::string_view;
 class [[gsl::Owner(char)]] MyStr {
   string buf{"x"};
   string *self[1]; // private array-of-pointers self alias
+  // The self-aliasing borrow lives in this member, so each mutation through it is
+  // also reported against the member (once per mutating method below).
+  // expected-warning@-3 2 {{borrow held by this member which escapes to a field is later invalidated}}
+  // expected-note@-4 2 {{this field dangles}}
 
 public:
   MyStr() {
@@ -24,11 +28,11 @@ public:
   string_view view() const [[clang::lifetimebound]] { return buf; }
   // A const method reallocating the owner through the array element pointer.
   void grow() const {
-    self[0]->push_back('z'); // expected-warning {{mutating an owner through a pointer member}}
+    self[0]->push_back('z'); // expected-warning {{mutating an owner through a pointer member}} expected-note {{invalidated here}}
   }
   // The `*this->arr[i]` deref form is covered too.
   void grow_deref() const {
-    (*self[0]).push_back('z'); // expected-warning {{mutating an owner through a pointer member}}
+    (*self[0]).push_back('z'); // expected-warning {{mutating an owner through a pointer member}} expected-note {{invalidated here}}
   }
 };
 

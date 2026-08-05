@@ -123,10 +123,19 @@ public:
   virtual void reportInvalidatedField(const ParmVarDecl *PVD,
                                       const FieldDecl *Field,
                                       const Expr *InvalidationExpr) {}
+  // Variant for a borrow whose loan has no anchor of its own because it came
+  // through a pointer/view MEMBER of `this`, seeded at entry (the caller-provided
+  // contents). `HoldingField` is that member; it anchors the diagnostic.
+  virtual void reportInvalidatedField(const FieldDecl *HoldingField,
+                                      const FieldDecl *Field,
+                                      const Expr *InvalidationExpr) {}
   virtual void reportInvalidatedGlobal(const Expr *IssueExpr,
                                        const VarDecl *Global,
                                        const Expr *InvalidationExpr) {}
   virtual void reportInvalidatedGlobal(const ParmVarDecl *PVD,
+                                       const VarDecl *Global,
+                                       const Expr *InvalidationExpr) {}
+  virtual void reportInvalidatedGlobal(const FieldDecl *HoldingField,
                                        const VarDecl *Global,
                                        const Expr *InvalidationExpr) {}
 

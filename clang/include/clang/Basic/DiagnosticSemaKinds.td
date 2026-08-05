@@ -11009,11 +11009,11 @@ def warn_lifetime_safety_invalidation
       InGroup<LifetimeSafetyInvalidation>,
       DefaultIgnore;
 def warn_lifetime_safety_invalidated_field
-    : Warning<"%select{object whose reference|parameter which}0 escapes to a field is later invalidated">,
+    : Warning<"%select{object whose reference|parameter which|borrow held by this member which}0 escapes to a field is later invalidated">,
       InGroup<LifetimeSafetyInvalidation>,
       DefaultIgnore;
 def warn_lifetime_safety_invalidated_global
-    : Warning<"%select{object whose reference|parameter which}0 escapes to global or static storage is later invalidated">,
+    : Warning<"%select{object whose reference|parameter which|borrow held by this member which}0 escapes to global or static storage is later invalidated">,
       InGroup<LifetimeSafetyInvalidation>,
       DefaultIgnore;
 
