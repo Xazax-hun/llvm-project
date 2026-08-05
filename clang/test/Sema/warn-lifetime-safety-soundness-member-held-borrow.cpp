@@ -35,18 +35,20 @@ private:
   const int *p;
 };
 
-// Same method: store into a member, invalidate, then read locally.
+// Same method: store into a member, invalidate, then read locally. Here the
+// dangling read is in this function, so the dereference itself is a use and
+// anchors the report -- more precise than the member declaration.
 struct [[gsl::Owner]] SameMethod {
   SameMethod();
   ~SameMethod();
   void bad() {
     p = pv->data();
     pv->push_back(99); // expected-note {{invalidated here}}
-    sink = *p;
+    sink = *p;         // expected-warning {{object whose reference is captured is later invalidated}} expected-note {{later used here}}
   }
 
 private:
-  vector<int> *pv; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
+  vector<int> *pv;
   const int *p;
 };
 

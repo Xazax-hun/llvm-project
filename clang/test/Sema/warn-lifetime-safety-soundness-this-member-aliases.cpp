@@ -7,59 +7,60 @@
 // recognized; the `*this` and base-cast spellings routed the borrow to a fresh,
 // disconnected origin and dropped it -- so a dangling field bound through them
 // was silent (a real use-after-scope). All spellings are now treated alike.
+//
+// Each is reported as a use-after-scope at the store, naming the local that does
+// not live long enough, with notes at its destruction and at the later read.
 
 struct [[gsl::Owner]] Holder {
-  const int *p = nullptr; // expected-note 3 {{this field dangles}} \
-                          // expected-warning {{public data member 'p' of a [[gsl::Owner]] type can hold a borrow}}
+  const int *p = nullptr; // expected-warning {{public data member 'p' of a [[gsl::Owner]] type can hold a borrow}}
 
   // (*this).p : deref of this.
   int via_deref() {
     {
       int local = 7;
-      (*this).p = &local; // expected-warning {{escapes to the field 'p' which will dangle}}
-    }
-    return *p;
+      (*this).p = &local; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return *p; // expected-note {{later used here}}
   }
 
   // (*&*this).p : a `*&` round-trip wrapping this.
   int via_deref_addrof() {
     {
       int local = 7;
-      (*&*this).p = &local; // expected-warning {{escapes to the field 'p' which will dangle}}
-    }
-    return *p;
+      (*&*this).p = &local; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return *p; // expected-note {{later used here}}
   }
 
   // Control: this->p (already recognized).
   int via_arrow() {
     {
       int local = 7;
-      this->p = &local; // expected-warning {{escapes to the field 'p' which will dangle}}
-    }
-    return *p;
+      this->p = &local; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return *p; // expected-note {{later used here}}
   }
 };
 
 // Base-class field stored through a derived-to-base cast of `this`.
 struct [[gsl::Owner]] Base {
-  const int *q = nullptr; // expected-note 2 {{this field dangles}} \
-                          // expected-warning {{public data member 'q' of a [[gsl::Owner]] type can hold a borrow}}
+  const int *q = nullptr; // expected-warning {{public data member 'q' of a [[gsl::Owner]] type can hold a borrow}}
 };
 struct [[gsl::Owner]] Derived : Base {
   // static_cast<Base*>(this)->q
   int via_static_cast() {
     {
       int local = 7;
-      static_cast<Base *>(this)->q = &local; // expected-warning {{escapes to the field 'q' which will dangle}}
-    }
-    return *q;
+      static_cast<Base *>(this)->q = &local; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return *q; // expected-note {{later used here}}
   }
   // C-style ((Base*)this)->q
   int via_cstyle_cast() {
     {
       int local = 7;
-      ((Base *)this)->q = &local; // expected-warning {{escapes to the field 'q' which will dangle}}
-    }
-    return *q;
+      ((Base *)this)->q = &local; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return *q; // expected-note {{later used here}}
   }
 };

@@ -1015,7 +1015,8 @@ void non_lifetimebound_make_unique() {
 }
 
 void lifetimebound_make_unique_temp() {
-  std::unique_ptr<LifetimeBoundCtor> ptr = std::make_unique<LifetimeBoundCtor>(MyObj()); // tu-warning {{local temporary object does not live long enough}} \
+  std::unique_ptr<LifetimeBoundCtor> ptr = std::make_unique<LifetimeBoundCtor>(MyObj()); // tu-warning {{local temporary object may not live long enough. This could be a false positive as the storage may have been moved later}} \
+                                                                                         // tu-note {{potentially moved here}} \
                                                                                          // tu-note {{destroyed here}}
   (void)ptr; // tu-note {{later used here}}
 }
@@ -3427,7 +3428,8 @@ struct [[gsl::Pointer]] function_ref {
 // lifetimebound(2) could enable tracking inner lifetimes, which would
 // avoid this warning for non-capturing lambdas.
 void assign_non_capturing_to_function_ref(function_ref &r) {
-  r = []() {}; // expected-warning {{local temporary object does not live long enough}} \
+  r = []() {}; // expected-warning {{local temporary object may not live long enough. This could be a false positive as the storage may have been moved later}} \
+               // expected-note {{potentially moved here}} \
                // expected-note {{destroyed here}}
   (void)r; // expected-note {{later used here}}
 }

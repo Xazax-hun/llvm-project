@@ -10,6 +10,7 @@
 #include <string>
 
 #include "clang/AST/Decl.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -70,7 +71,13 @@ bool FactsGenerator::hasOrigins(const Expr *E) const {
 ///   - `S s2 = s;` flows the top-level origin and recursively flows each
 ///     matching `FieldDecl` subtree, so loans on `s.v.inner` propagate to
 ///     `s2.v.inner`.
-void FactsGenerator::flow(OriginNode *Dst, OriginNode *Src, bool Kill) {
+///
+/// \param Block Optional. If provided, the generated flow facts are appended to
+///              this specific CFG block instead of the block being visited. Used
+///              to path-isolate a conditional operator's arms (see
+///              VisitConditionalOperator).
+void FactsGenerator::flow(OriginNode *Dst, OriginNode *Src, bool Kill,
+                          const CFGBlock *Block) {
   if (!Dst)
     return;
   assert(Src &&
@@ -79,12 +86,16 @@ void FactsGenerator::flow(OriginNode *Dst, OriginNode *Src, bool Kill) {
          "Pointee chains must have the same length");
 
   while (Dst && Src) {
-    CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
-        Dst->getOriginID(), Src->getOriginID(), Kill));
+    Fact *F = FactMgr.createFact<OriginFlowFact>(Dst->getOriginID(),
+                                                 Src->getOriginID(), Kill);
+    if (Block)
+      FactMgr.appendBlockFact(Block, F);
+    else
+      CurrentBlockFacts.push_back(F);
     for (const OriginNode::Edge &E : Dst->children())
       if (E.FD)
         if (OriginNode *SrcF = Src->getFieldChild(E.FD))
-          flow(E.Child, SrcF, Kill);
+          flow(E.Child, SrcF, Kill, Block);
     Dst = Dst->getPointeeChild();
     Src = Src->getPointeeChild();
   }
@@ -1011,6 +1022,14 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   }
   case UO_Deref: {
     const Expr *SubExpr = UO->getSubExpr();
+    // Dereferencing reads the pointer's VALUE in order to follow it, so this is
+    // a use of the borrow the operand holds -- including for a write through the
+    // deref (`*p = x`), where the pointee is overwritten but `p` itself is still
+    // read. A read of a pointer *member* registers no use of its own
+    // (VisitMemberExpr does not call handleUse, and `this` supplies no UseFact to
+    // narrow), so without this a borrow held in a member and then dereferenced is
+    // not live where the loan sits, and an invalidation before it is missed.
+    handleUse(SubExpr);
     killAndFlowOrigin(*UO, *SubExpr);
     return;
   }
@@ -1382,59 +1401,57 @@ void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
   // TODO: Handle assignments involving dereference like `*p = q`.
 }
 
+/// Finds the CFG predecessor of \p MergeBlock that evaluates \p ArmExpr -- i.e.
+/// the branch that produces the conditional operator's value on that path.
+/// Returns null when no predecessor does, which also covers an arm that cannot
+/// produce a value at all (a `throw`, or a call to a `noreturn` function): such
+/// an arm has no edge into the merge block.
+static const CFGBlock *findPredBlockForExpr(const CFGBlock *MergeBlock,
+                                            const Expr *ArmExpr) {
+  if (!ArmExpr)
+    return nullptr;
+  const Expr *Target = ArmExpr->IgnoreParenImpCasts();
+  // For the GNU binary conditional `a ?: b`, getTrueExpr() is an
+  // OpaqueValueExpr wrapping the common subexpression, and it is that
+  // subexpression which appears in the predecessor block.
+  if (const auto *OVE = dyn_cast<OpaqueValueExpr>(Target))
+    if (const Expr *Src = OVE->getSourceExpr())
+      Target = Src->IgnoreParenImpCasts();
+
+  for (const CFGBlock *Pred : MergeBlock->preds()) {
+    if (!Pred)
+      continue;
+    for (const CFGElement &Elt : *Pred)
+      if (auto CS = Elt.getAs<CFGStmt>())
+        if (const auto *E = dyn_cast<Expr>(CS->getStmt()))
+          if (E->IgnoreParenImpCasts() == Target)
+            return Pred;
+  }
+  return nullptr;
+}
+
+/// Flows each arm of a conditional operator into its result, generating the flow
+/// facts in the arm's own predecessor block rather than in the merge block.
+///
+/// Emitting both arms' flows in the merge block leaks liveness across a loop
+/// backedge: they must then be applied sequentially (one `Kill`, one merge), so
+/// going backwards the second arm's origin stays live through the first arm's
+/// branch, and around the loop. Path-isolating them lets each arm `Kill`, so
+/// `&x` is not live on the `&y` path and vice versa:
+///
+///   for (int i = 0; i < 2; i++) { int x, y; consume(cond ? &x : &y); }
+void FactsGenerator::handleConditionalArms(const Expr &CO, const Expr *TrueExpr,
+                                           const Expr *FalseExpr) {
+  if (const CFGBlock *TBPred = findPredBlockForExpr(CurrentBlock, TrueExpr))
+    flow(getOriginNode(CO), getOriginNode(*TrueExpr), /*Kill=*/true, TBPred);
+  if (const CFGBlock *FBPred = findPredBlockForExpr(CurrentBlock, FalseExpr))
+    flow(getOriginNode(CO), getOriginNode(*FalseExpr), /*Kill=*/true, FBPred);
+}
+
 void FactsGenerator::VisitConditionalOperator(const ConditionalOperator *CO) {
   if (!hasOrigins(CO))
     return;
-
-  const Expr *TrueExpr = CO->getTrueExpr();
-  const Expr *FalseExpr = CO->getFalseExpr();
-
-  const auto Preds = CurrentBlock->preds();
-
-  // Skip origin flow from conditional operator arms that cannot produce the
-  // result value: throw arms and calls to noreturn functions.
-  bool TBHasEdge = true;
-  bool FBHasEdge = true;
-
-  switch (CurrentBlock->pred_size()) {
-  case 0:
-    return;
-  case 1: {
-    TBHasEdge = llvm::any_of(**Preds.begin(),
-                             [ExpectedStmt = TrueExpr->IgnoreParenImpCasts()](
-                                 const CFGElement &Elt) {
-                               if (auto CS = Elt.getAs<CFGStmt>())
-                                 return CS->getStmt() == ExpectedStmt;
-                               return false;
-                             });
-    FBHasEdge = !TBHasEdge;
-    break;
-  }
-  case 2: {
-    const auto *It = Preds.begin();
-    TBHasEdge = It->isReachable();
-    FBHasEdge = (++It)->isReachable();
-    break;
-  }
-  default:
-    llvm_unreachable("expected at most 2 predecessors");
-    return;
-  }
-
-  bool FirstFlow = true;
-  auto HandleFlow = [&](const Expr *E) {
-    if (FirstFlow) {
-      killAndFlowOrigin(*CO, *E);
-      FirstFlow = false;
-    } else {
-      flowOrigin(*CO, *E);
-    }
-  };
-
-  if (TBHasEdge)
-    HandleFlow(TrueExpr);
-  if (FBHasEdge)
-    HandleFlow(FalseExpr);
+  handleConditionalArms(*CO, CO->getTrueExpr(), CO->getFalseExpr());
 }
 
 void FactsGenerator::VisitBinaryConditionalOperator(
@@ -1442,11 +1459,11 @@ void FactsGenerator::VisitBinaryConditionalOperator(
   if (!hasOrigins(BCO))
     return;
   // The GNU binary conditional `a ?: b` yields `a` when `a` is truthy, else `b`.
-  // Merge both candidate values' loans into the result (a conservative union),
-  // so a borrow produced by either is tracked -- the common subexpression is the
-  // "true" value (its OpaqueValueExpr forwards to it in getOrCreateNode).
-  killAndFlowOrigin(*BCO, *BCO->getCommon());
-  flowOrigin(*BCO, *BCO->getFalseExpr());
+  // Path-isolate the two candidates the same way as the ternary, so neither
+  // leaks liveness onto the other's path (see handleConditionalArms). The common
+  // subexpression is the "true" value (its OpaqueValueExpr forwards to it in
+  // getOrCreateNode).
+  handleConditionalArms(*BCO, BCO->getCommon(), BCO->getFalseExpr());
 }
 
 void FactsGenerator::VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *OCE) {
@@ -2168,11 +2185,18 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   bool IsInstance =
       Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
 
+  // The origin of the call's own result, if it has one. A borrow the call returns
+  // is taken after whatever the call does, so this same call cannot have
+  // invalidated it -- see InvalidateOriginFact::getResultOrigin.
+  std::optional<OriginID> ResultOrigin;
+  if (hasOrigins(Call))
+    if (OriginNode *CallNode = getOriginNode(*Call))
+      ResultOrigin = CallNode->getOriginID();
   auto invalidate = [&](OriginID OID,
                         OwnerLoanGate LoanGate = OwnerLoanGate::None) {
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
         OID, Call, /*Assumed=*/true, /*Deallocation=*/false,
-        /*MutatedField=*/nullptr, LoanGate));
+        /*MutatedField=*/nullptr, LoanGate, ResultOrigin));
   };
   // A gsl::Pointer object/argument carries the borrows it holds on its pointee
   // origin(s). Invalidate the *entire* pointee chain, not just the first level:
@@ -2792,7 +2816,19 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
                         : UntrackedConstructReason::OwnerOfIndirection,
         Call, Nested));
   handleInvalidatingCall(Call, FD, Args);
-  handleAssumedInvalidatingCall(Call, FD, Args);
+  // Emit the assumed invalidation AFTER the flows that carry this call's own
+  // result out (lifetimebound parameter->return, accessor results, ...).
+  // Liveness runs backwards, so with the invalidation emitted first the result
+  // flow is processed first and propagates the result's liveness back onto the
+  // RECEIVER, which then looks live at the call -- and the call appears to
+  // invalidate the borrow it just produced. Emitting it last means the live
+  // origin at that point is the result itself, which
+  // InvalidateOriginFact::getResultOrigin lets the checker exclude. A borrow that
+  // existed *before* the call is live there either way, so real invalidations are
+  // unaffected. Deferring to scope exit keeps this correct on every early-return
+  // path below.
+  auto EmitAssumedInvalidation = llvm::make_scope_exit(
+      [&] { handleAssumedInvalidatingCall(Call, FD, Args); });
   handleLambdaCallInvalidation(Call, FD, Args);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);

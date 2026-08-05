@@ -21,9 +21,9 @@ struct Latch {
       string tmp = "a long heap string value exceeding the sso buffer now!!";
       set(tmp); // expected-warning {{does not live long enough}}
     } // expected-note {{destroyed here}}
-    const char *p = last.data();
+    const char *p = last.data(); // expected-note {{later used here}}
     (void)p;
-  } // expected-note {{later used here}}
+  }
 };
 
 // Negative: the captured local outlives the read, so no dangle.

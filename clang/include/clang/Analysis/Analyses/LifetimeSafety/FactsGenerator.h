@@ -89,7 +89,13 @@ private:
   bool hasOrigins(QualType QT) const;
   bool hasOrigins(const Expr *E) const;
 
-  void flow(OriginNode *Dst, OriginNode *Src, bool Kill);
+  void flow(OriginNode *Dst, OriginNode *Src, bool Kill,
+            const CFGBlock *Block = nullptr);
+
+  /// Flows each arm of a conditional operator into its result, path-isolated
+  /// into the arm's own predecessor block.
+  void handleConditionalArms(const Expr &CO, const Expr *TrueExpr,
+                             const Expr *FalseExpr);
 
   /// Emits a single-level (top-level only) origin flow Dst <- Src, and then, if
   /// Dst carries deeper levels of indirection (a pointee chain) that the shallow

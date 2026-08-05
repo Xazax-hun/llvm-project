@@ -401,10 +401,16 @@ void SelfInvalidatingMap() {
   // Therefore the following is safe in practice.
   // On the other hand, std::flat_map (since C++23) does not provide pointer stability on
   // insertion and following is unsafe for this container.
-  mp[1] = "42";
-  mp[2]     // expected-note {{invalidated here}}
+  // Both subscripts may insert, and their evaluation order is unspecified, so each
+  // one's result may be invalidated by the other -- reported symmetrically.
+  mp[1] = "42"; // expected-warning {{object whose reference is captured is later invalidated}} \
+                // expected-note {{invalidated here}} expected-note {{later used here}}
+  mp[2]     // expected-note {{invalidated here}} \
+            // expected-warning {{object whose reference is captured is later invalidated}} \
+            // expected-note {{later used here}}
     =
-    mp[1];  // expected-warning {{object whose reference is captured is later invalidated}} expected-note {{later used here}}
+    mp[1];  // expected-warning {{object whose reference is captured is later invalidated}} \
+            // expected-note {{later used here}} expected-note {{invalidated here}}
 }
 
 void InvalidateErase() {
@@ -736,9 +742,10 @@ void MapSubscriptMultipleCallsDoesNotInvalidate(std::map<int, int> mp, int a, in
 }
 
 void FlatMapSubscriptMultipleCallsInvalidate(std::flat_map<int, int> mp, int a, int b) {
-    PrintMax(mp[a], mp[b]); // expected-warning {{object whose reference is captured is later invalidated}} \
-                                 // expected-note {{invalidated here}} \
-                                 // expected-note {{later used here}}
+    // Symmetric: either subscript may invalidate the other's result.
+    PrintMax(mp[a], mp[b]); // expected-warning 2 {{object whose reference is captured is later invalidated}} \
+                                 // expected-note 2 {{invalidated here}} \
+                                 // expected-note 2 {{later used here}}
 }
 
 } // namespace AssociativeContainers

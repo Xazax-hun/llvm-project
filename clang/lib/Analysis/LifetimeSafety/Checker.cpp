@@ -672,6 +672,13 @@ public:
     // For each live origin, check if it holds an invalidated loan and report.
     LivenessMap Origins = LiveOrigins.getLiveOriginsAt(IOF);
     for (auto &[OID, LiveInfo] : Origins) {
+      // Skip the invalidating call's own result: a borrow the call returns is
+      // taken after whatever the call does, so that call cannot have invalidated
+      // it. It is nonetheless live here and carries the receiver's loan (that is
+      // what [[clang::lifetimebound]] means), so without this every non-const
+      // method returning a borrow of its object would report its own result.
+      if (IOF->getResultOrigin() == OID)
+        continue;
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
       llvm::SmallVector<LoanID, 2> Invalidated;
       for (LoanID L : HeldLoans)
@@ -1054,6 +1061,15 @@ public:
       return false;
     };
     for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
+      // Skip the invalidating call's own result. A borrow the call returns is
+      // taken *after* whatever the call does, so that call cannot have
+      // invalidated it -- yet it is live here and carries the receiver's loan
+      // (that is what `[[clang::lifetimebound]]` means), so without this every
+      // non-const method returning a borrow of its object would report its own
+      // result (`int *p = b.data();` warning about `p`). A borrow that existed
+      // before the call is live here too and is unaffected.
+      if (IOF->getResultOrigin() == OID)
+        continue;
       // Among this origin's invalidated loans, prefer one with a precise anchor
       // (an issuing expression or a placeholder parameter) so the diagnostic
       // points at the borrow. Only if none exists fall back to the `$this`

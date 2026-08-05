@@ -180,7 +180,9 @@ struct LifetimeBoundCtor {
 };
 
 auto lifetimebound_make_unique_single_param() {
-  return std::make_unique<LifetimeBoundCtor>(MyIntOwner{}); // tu-warning {{stack memory associated with local temporary object is returned}} tu-note {{returned here}}
+  return std::make_unique<LifetimeBoundCtor>(MyIntOwner{}); // tu-warning {{stack memory associated with local temporary object may be returned later. This could be a false positive as the storage may have been moved. Consider moving first and then aliasing later to resolve the issue}} \
+                                                            // tu-note {{potentially moved here}} \
+                                                            // tu-note {{returned here}}
 }
 
 

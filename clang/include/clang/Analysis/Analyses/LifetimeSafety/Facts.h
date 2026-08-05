@@ -365,6 +365,14 @@ class InvalidateOriginFact : public Fact {
   /// actually carries, that it really denotes a mutable owner. Used when the
   /// *static* type of the mutated receiver/argument does not reveal one.
   OwnerLoanGate LoanGate;
+  /// For an invalidation caused by a call, the origin of the call's own RESULT.
+  /// A borrow the call returns is taken *after* whatever the call does, so it
+  /// cannot have been invalidated by that same call -- even though it carries the
+  /// receiver's loan (that is what `[[clang::lifetimebound]]` means) and is live
+  /// at the call. Without excluding it, every non-const method returning a borrow
+  /// of its object appears to invalidate its own result
+  /// (`int *p = b.data();` warning about `p`).
+  std::optional<OriginID> ResultOrigin;
 
 public:
   static bool classof(const Fact *F) {
@@ -374,11 +382,12 @@ public:
   InvalidateOriginFact(OriginID OID, const Stmt *InvalidationOp,
                        bool Assumed = false, bool Deallocation = false,
                        const FieldDecl *MutatedField = nullptr,
-                       OwnerLoanGate LoanGate = OwnerLoanGate::None)
+                       OwnerLoanGate LoanGate = OwnerLoanGate::None,
+                       std::optional<OriginID> ResultOrigin = std::nullopt)
       : Fact(Kind::InvalidateOrigin), OID(OID),
         InvalidationOp(InvalidationOp), Assumed(Assumed),
         Deallocation(Deallocation), MutatedField(MutatedField),
-        LoanGate(LoanGate) {}
+        LoanGate(LoanGate), ResultOrigin(ResultOrigin) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   /// The invalidating operation as a statement (never null). Use this for the
@@ -396,6 +405,7 @@ public:
     return LoanGate != OwnerLoanGate::None;
   }
   OwnerLoanGate getOwnerLoanGate() const { return LoanGate; }
+  std::optional<OriginID> getResultOrigin() const { return ResultOrigin; }
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;
 };
@@ -705,6 +715,10 @@ public:
   void addBlockFacts(const CFGBlock *B, llvm::ArrayRef<Fact *> NewFacts) {
     if (!NewFacts.empty())
       BlockToFacts[B->getBlockID()].assign(NewFacts.begin(), NewFacts.end());
+  }
+
+  void appendBlockFact(const CFGBlock *B, const Fact *F) {
+    BlockToFacts[B->getBlockID()].push_back(F);
   }
 
   template <typename FactType, typename... Args>
