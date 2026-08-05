@@ -717,8 +717,28 @@ public:
         const CXXRecordDecl *ObjRD = nullptr;
         for (LoanID L : HeldLoans) {
           const AccessPath &AP = LoanAP(L);
-          if (const ValueDecl *VD = AP.getAsValueDecl(); VD && isa<FieldDecl>(VD))
-            HoldsFieldLoan = true;
+          // Only a field loan that is PRECISE with respect to this mutation
+          // suppresses the conservative arm. A loan naming a field that
+          // *contains* the mutated one (`v = w.d.text()` carries field `d`'s
+          // loan while `w.d.s.assign(...)` names `s`) is imprecise here: it is
+          // not matched exactly above, yet mutating the inner field can
+          // reallocate storage it points into. Treating any field loan as
+          // precise made the field-precise path strictly weaker than the
+          // generic one -- routing the same mutation through a reference, which
+          // leaves MutatedField null, reported it immediately.
+          if (const ValueDecl *VD = AP.getAsValueDecl();
+              VD && isa<FieldDecl>(VD)) {
+            const auto *LoanField = cast<FieldDecl>(VD);
+            llvm::SmallPtrSet<const CXXRecordDecl *, 8> FieldVisited;
+            bool ContainsMutated =
+                LoanField != MutatedField &&
+                recordReachesField(
+                    LoanField->getType().getNonReferenceType()
+                        ->getAsCXXRecordDecl(),
+                    MutatedField, FieldVisited);
+            if (!ContainsMutated)
+              HoldsFieldLoan = true;
+          }
           if (!ObjRD)
             if (const CXXRecordDecl *RD = invalidatedObjectRecord(AP)) {
               llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
