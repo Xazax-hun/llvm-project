@@ -7,14 +7,21 @@ using std::vector;
 
 volatile char sink;
 
-// A borrow rooted at the callee's `$this` placeholder is deliberately NOT treated
-// as invalidated by a mutation reached through a *parameter*: that would fire on
-// every method that mutates itself. The rule is sound only because the CALLER-side
-// argument-overlap check flags the aliasing call that makes the two the same
-// object. That check used to miss `this` entirely -- the `$this` placeholder loan
-// carries neither an issuing expression nor a placeholder parameter, so the alias
-// was detected and then dropped as unreportable. It is now anchored at the method
-// whose implicit object it stands for.
+// A borrow rooted at the callee's `$this` placeholder was once not treated as
+// invalidated by a mutation reached through a *parameter*, so soundness rested
+// entirely on the CALLER-side argument-overlap check flagging the aliasing call
+// that makes the two the same object. That check used to miss `this` entirely --
+// the `$this` placeholder loan carries neither an issuing expression nor a
+// placeholder parameter, so the alias was detected and then dropped as
+// unreportable. It is now anchored at the method whose implicit object it stands
+// for.
+//
+// The callee side is now also covered: a parameter placeholder yields its record,
+// so a non-const call on a parameter whose type contains the borrowed field is
+// treated as possibly invalidating it. That is the same hazard seen from inside,
+// and it is targeted -- a parameter of an unrelated type cannot reach the field
+// and stays silent. Each case below therefore reports twice: once in the callee at
+// the borrow, and once in the caller at the aliasing call.
 
 struct [[gsl::Owner]] Registry {
   vector<string> items;
@@ -22,8 +29,8 @@ struct [[gsl::Owner]] Registry {
   void wipe() { items.clear(); }
 
   void report(Registry *other [[clang::noescape]]) {
-    string_view sv = items[0]; // borrow rooted at $this
-    other->wipe();             // frees it when other == this
+    string_view sv = items[0]; // borrow rooted at $this // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    other->wipe();             // frees it when other == this // expected-note {{assumed to be invalidated by this operation}}
     sink = *sv.data();
   }
 
@@ -38,8 +45,8 @@ struct [[gsl::Owner]] RefForm {
   vector<string> items;
   void wipe() { items.clear(); }
   void report(RefForm &other [[clang::noescape]]) {
-    string_view sv = items[0];
-    other.wipe();
+    string_view sv = items[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    other.wipe(); // expected-note {{assumed to be invalidated by this operation}}
     sink = *sv.data();
   }
   // expected-warning@+1 {{implicit object parameter may be invalidated by an operation}}
@@ -54,8 +61,8 @@ struct [[gsl::Owner]] LocalForm {
   vector<string> items;
   void wipe() { items.clear(); }
   void report(LocalForm *other [[clang::noescape]]) {
-    string_view sv = items[0];
-    other->wipe();
+    string_view sv = items[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    other->wipe(); // expected-note {{assumed to be invalidated by this operation}}
     sink = *sv.data();
   }
   // expected-warning@+1 {{implicit object parameter may be invalidated by an operation}}
@@ -73,8 +80,8 @@ struct [[gsl::Owner]] FreeForm {
 };
 static void twice(FreeForm *a [[clang::noescape]],
                   FreeForm *b [[clang::noescape]]) {
-  string_view sv = a->items[0];
-  b->wipe();
+  string_view sv = a->items[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  b->wipe(); // expected-note {{assumed to be invalidated by this operation}}
   sink = *sv.data();
 }
 // expected-warning@+1 {{implicit object parameter may be invalidated by an operation}}

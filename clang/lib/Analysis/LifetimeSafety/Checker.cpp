@@ -81,16 +81,33 @@ struct PendingWarning {
   bool CausingFactDominatesExpiry;
 };
 
-/// If `AP` names an object -- the implicit `this`, or a variable/parameter of
+/// If `AP` names an object -- the implicit `this`, a parameter, or a variable of
 /// record type -- returns that record; otherwise null. The safe model treats
 /// invalidating an object (e.g. a non-const member call) as also invalidating
 /// borrows into its (possibly transitive / inherited) owner fields.
 static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
+  // Peels a reference and then a pointer, so `T&`, `T*` and `T` all yield `T`.
+  auto recordOf = [](QualType T) -> const CXXRecordDecl * {
+    T = T.getNonReferenceType();
+    if (T->isPointerType())
+      T = T->getPointeeType();
+    return T->getAsCXXRecordDecl();
+  };
   if (const CXXMethodDecl *MD = AP.getAsPlaceholderThis())
     return MD->getParent();
+  // A parameter placeholder names the object the caller passed. Like `$this` it
+  // designates a whole object, so invalidating it reaches that object's owner
+  // fields. getAsValueDecl() is gated on Kind::ValueDecl and returns null for a
+  // placeholder, so without this a borrow taken through a reference/pointer
+  // PARAMETER yielded no record at all: the conservative "imprecise borrow into
+  // the object" arm was skipped and an imprecise borrow -- one from a
+  // [[clang::lifetimebound]] accessor, say -- went unreported, even though the
+  // identical code with a `this` or a local receiver was caught.
+  if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
+    return recordOf(PVD->getType());
   if (const ValueDecl *VD = AP.getAsValueDecl())
     if (!isa<FieldDecl>(VD))
-      return VD->getType().getNonReferenceType()->getAsCXXRecordDecl();
+      return recordOf(VD->getType());
   return nullptr;
 }
 
