@@ -2000,20 +2000,23 @@ void FactsGenerator::handleFullExprCleanup(
 }
 
 void FactsGenerator::handleExitBlock() {
-  // A field does not outlive a DESTRUCTOR: by the time one returns the object is
-  // gone, so nothing can read its members afterwards and "this borrow escapes to
-  // a field" is vacuous there. Emitting the fact anyway makes a destructor's own
-  // cleanup (`~Box() { delete pv; }`) look like it strands a borrow in `pv`, and
-  // keeps every field origin spuriously live back through the destructor body.
-  // Globals still escape from a destructor, so only the field facts are skipped.
-  const bool InDestructor = isa<CXXDestructorDecl>(AC.getDecl());
+  // Fields DO escape a destructor. Member and base destructors run *after* the
+  // destructor body and can read what it stored there, so "nothing can read the
+  // members afterwards" is false. This fact is also, today, the only thing that
+  // keeps a member-held borrow live across an invalidation inside the body, since
+  // a read of a pointer/view member emits no UseFact. Skipping these facts in a
+  // destructor was tried in order to silence one report -- a hand-rolled owner's
+  // own `~Box() { delete pv; }` cleanup, which leaves the member dangling at exit
+  // where that is harmless -- and it lost several genuine bug classes. That is a
+  // bad trade: destructors are exactly where owners free things. The remaining
+  // report on a raw owning pointer freed in its own destructor is accepted for now
+  // (a `unique_ptr` or by-value owner member does not produce it).
   for (const Origin &O : FactMgr.getOriginMgr().getOrigins())
-    if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl())) {
+    if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl()))
       // Create FieldEscapeFacts for all field origins that remain live at exit.
-      if (!InDestructor)
-        EscapesInCurrentBlock.push_back(
-            FactMgr.createFact<FieldEscapeFact>(O.ID, FD));
-    } else if (auto *VD = dyn_cast_if_present<VarDecl>(O.getDecl())) {
+      EscapesInCurrentBlock.push_back(
+          FactMgr.createFact<FieldEscapeFact>(O.ID, FD));
+    else if (auto *VD = dyn_cast_if_present<VarDecl>(O.getDecl())) {
       // Create GlobalEscapeFacts for all origins with global-storage that
       // remain live at exit.
       if (VD->hasGlobalStorage()) {
