@@ -1911,6 +1911,15 @@ public:
               SemaHelper->reportUseAfterInvalidation(
                   InvalidatedPVD, UF->getImplicitLoc(),
                   Warning.InvalidatedByExpr);
+            else if (const CXXMethodDecl *MD =
+                         L->getAccessPath().getAsPlaceholderThis())
+              // Neither anchor: the `$this` placeholder loan (a borrow laundered
+              // through a lifetimebound accessor of `this`). The explicit-use
+              // branch below falls back to the use expression, but an implicit
+              // use has none, so anchor at the method the placeholder stands for.
+              // Without this the invalidation is detected and then emits nothing.
+              SemaHelper->reportUseAfterInvalidation(
+                  MD, UF->getImplicitLoc(), Warning.InvalidatedByExpr);
           } else
             SemaHelper->reportUseAfterScope(IssueExpr, UF->getImplicitLoc(),
                                             MovedExpr, ExpiryLoc);

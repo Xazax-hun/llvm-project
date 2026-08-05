@@ -243,6 +243,21 @@ public:
     S.Diag(UseLoc, diag::note_lifetime_safety_used_here);
   }
 
+  void reportUseAfterInvalidation(const CXXMethodDecl *MD, SourceLocation UseLoc,
+                                  const Expr *InvalidationExpr) override {
+    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
+                        ? diag::warn_lifetime_safety_use_after_free
+                        : diag::warn_lifetime_safety_invalidation;
+    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
+                       ? diag::note_lifetime_safety_freed_here
+                       : diag::note_lifetime_safety_invalidated_here;
+    S.Diag(MD->getBeginLoc(), WarnDiag)
+        << /*borrow held by this object=*/2 << MD->getSourceRange();
+    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
+        << InvalidationExpr->getSourceRange();
+    S.Diag(UseLoc, diag::note_lifetime_safety_used_here);
+  }
+
   void reportInvalidatedField(const Expr *IssueExpr,
                               const FieldDecl *DanglingField,
                               const Expr *InvalidationExpr) override {

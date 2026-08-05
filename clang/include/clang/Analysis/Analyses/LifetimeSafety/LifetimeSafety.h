@@ -117,6 +117,13 @@ public:
   virtual void reportUseAfterInvalidation(const ParmVarDecl *PVD,
                                           SourceLocation UseLoc,
                                           const Expr *InvalidationExpr) {}
+  // Variant for a borrow whose loan has no anchor of its own -- the `$this`
+  // placeholder, from a lifetimebound accessor of `this` -- read by an implicit
+  // use (a destructor at scope exit) that has no source expression either.
+  // Anchored at the method whose implicit object the loan stands for.
+  virtual void reportUseAfterInvalidation(const CXXMethodDecl *MD,
+                                          SourceLocation UseLoc,
+                                          const Expr *InvalidationExpr) {}
   virtual void reportInvalidatedField(const Expr *IssueExpr,
                                       const FieldDecl *Field,
                                       const Expr *InvalidationExpr) {}

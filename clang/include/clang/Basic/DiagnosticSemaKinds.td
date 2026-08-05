@@ -10991,7 +10991,7 @@ def warn_lifetime_safety_use_after_scope_moved : Warning<
    InGroup<LifetimeSafetyUseAfterScopeMoved>, DefaultIgnore;
 
 def warn_lifetime_safety_use_after_free : Warning<
-    "%select{allocated object|parameter}0 does not live long enough">,
+    "%select{allocated object|parameter|borrow held by this object}0 does not live long enough">,
     InGroup<LifetimeSafetyUseAfterFree>, DefaultIgnore;
 
 def warn_lifetime_safety_return_stack_addr : Warning<
@@ -11005,7 +11005,7 @@ def warn_lifetime_safety_return_stack_addr_moved : Warning<
   InGroup<LifetimeSafetyReturnStackAddrMoved>, DefaultIgnore;
 
 def warn_lifetime_safety_invalidation
-    : Warning<"%select{object whose reference is captured|parameter}0 is later invalidated">,
+    : Warning<"%select{object whose reference is captured|parameter|borrow held by this object}0 is later invalidated">,
       InGroup<LifetimeSafetyInvalidation>,
       DefaultIgnore;
 def warn_lifetime_safety_invalidated_field
