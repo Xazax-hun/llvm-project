@@ -273,14 +273,20 @@ static bool isSetjmpLongjmp(const FunctionDecl *FD) {
   return false;
 }
 
-/// Returns true if `MD` is a known non-invalidating accessor of a standard
-/// library type -- one that returns a borrow into the container (or smart
-/// pointer pointee) without reallocating it. Non-const member calls on an owner
-/// are otherwise conservatively assumed to invalidate; this allow-list keeps the
-/// common read accessors (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...)
-/// from being treated as mutating. Restricted to the std namespace: a user
-/// type's accessors are not recognized and are treated conservatively.
+/// Returns true if `MD` is known not to invalidate borrows into the object it is
+/// called on: either it carries `[[clang::lifetime_non_invalidating]]`, or it is
+/// a recognized non-invalidating accessor of a standard library type -- one that
+/// returns a borrow into the container (or smart pointer pointee) without
+/// reallocating it. Non-const member calls on an owner are otherwise
+/// conservatively assumed to invalidate; this keeps the common read accessors
+/// (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...) from being treated as
+/// mutating. The std allow-list is by name and so cannot cover user types; those
+/// use the attribute.
 static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
+  // An explicit promise from the author covers user-defined owners, whose
+  // accessors the name-based allow-list below cannot recognize.
+  if (MD.hasAttr<LifetimeNonInvalidatingAttr>())
+    return true;
   // The read-accessor allow-list encodes knowledge about *standard library*
   // owner types, so it must apply only to types in the genuine `std` namespace
   // -- including libc++'s inline versioning namespace `std::__1`, which has a
@@ -2240,10 +2246,15 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     // `operator[]`, ...) does not reallocate, whether the owner is the direct
     // receiver (`v.data()`) or reached through a pointer (`p->data()`). Test the
     // pointee record so the allow-list applies in both cases -- otherwise a read
-    // through a pointer-to-owner is spuriously treated as a mutation.
+    // through a pointer-to-owner is spuriously treated as a mutation. The
+    // name-based allow-list only describes std types, so it is gated on the
+    // receiver being an owner; an explicit
+    // `[[clang::lifetime_non_invalidating]]` promise is not, since it also covers
+    // an accessor of a record that merely *contains* owners.
     bool PointeeIsOwner = isGslOwnerType(RecvRecordTy);
-    if ((StaticallyOwner || RecvRD) &&
-        !(PointeeIsOwner && isNonInvalidatingMethod(*Method)))
+    bool NonInvalidating = Method->hasAttr<LifetimeNonInvalidatingAttr>() ||
+                           (PointeeIsOwner && isNonInvalidatingMethod(*Method));
+    if ((StaticallyOwner || RecvRD) && !NonInvalidating)
       if (OriginNode *L = getOriginNode(*Args[0])) {
         OwnerLoanGate RecvGate = StaticallyOwner ? OwnerLoanGate::None
                                                  : OwnerLoanGate::ReachableOwner;

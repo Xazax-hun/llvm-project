@@ -4599,6 +4599,50 @@ functions that do not return a pointer-like type.
   }];
 }
 
+def LifetimeNonInvalidatingDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``lifetime_non_invalidating`` attribute marks a non-``const`` member function
+that does not invalidate borrows into the object it is called on -- it may read
+the object, and may mutate parts of it that no borrow can point into, but it does
+not reallocate or destroy any storage a previously-taken borrow refers to.
+
+The lifetime safety analysis conservatively assumes that *any* non-``const``
+member call on an owner may reallocate it, and therefore invalidates borrows into
+it (``-Wlifetime-safety-assumed-invalidation``). That assumption is necessary in
+general, but it is wrong for a mutable accessor that only hands out a reference
+into stable storage:
+
+.. code-block:: c++
+
+    struct [[gsl::Owner]] Pool {
+      std::vector<int> v;
+      // Returns a reference into `v` without reallocating it.
+      [[clang::lifetime_non_invalidating]]
+      int &at(unsigned i) [[clang::lifetimebound]] { return v[i]; }
+    };
+
+    void f(Pool &p [[clang::noescape]]) {
+      int &a = p.at(0);   // no assumed-invalidation: `at` promises not to invalidate
+      use(a);
+    }
+
+Equivalent accessors on standard library types (``v[i]``, ``v.at(i)``,
+``v.data()``, ``m.find(k)``, ``*p``, ...) are recognized automatically; this
+attribute extends the same treatment to user-defined owners, which the analysis
+cannot recognize by name.
+
+Like ``lifetime_immortal``, this attribute appertains to the function itself, so
+it is written *before* the declaration (unlike ``lifetimebound``, which applies to
+a parameter or the implicit object and follows the parameter list).
+
+The attribute only suppresses the *assumed* invalidation. An operation the
+analysis can see actually invalidating a borrow -- a container mutation, a
+``delete`` -- is still reported, so annotating a method that does reallocate does
+not hide a mutation performed in that method's own body.
+  }];
+}
+
 def LifetimeBoundDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{

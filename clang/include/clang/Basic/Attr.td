@@ -2169,6 +2169,13 @@ def LifetimeImmortal : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+def LifetimeNonInvalidating : InheritableAttr {
+  let Spellings = [Clang<"lifetime_non_invalidating", 0>];
+  let Subjects = SubjectList<[CXXMethod], ErrorDiag>;
+  let Documentation = [LifetimeNonInvalidatingDocs];
+  let SimpleHandler = 1;
+}
+
 def TrivialABI : InheritableAttr {
   // This attribute does not have a C [[]] spelling because it requires the
   // CPlusPlus language option.

@@ -14,6 +14,14 @@
 //       template <class T> struct SELF_CONTAINED SlotMap { ... };
 //       struct VIEW StringRef { ... };
 //
+//   * PRESERVES_BORROWS - this non-const member function does not invalidate
+//     borrows into the object ([[clang::lifetime_non_invalidating]]). Any
+//     non-const member call on an owner is otherwise conservatively assumed to
+//     reallocate it, which would dangle every borrow taken from it -- including
+//     the one the call itself returns. Place it before the declaration.
+//
+//       PRESERVES_BORROWS T &at(std::uint32_t i) [[clang::lifetimebound]];
+//
 // Region markers (bracket a block of code):
 //   * LIFETIME_SAFE_START / LIFETIME_SAFE_END - enable the whole
 //     -Wlifetime-safety-soundness group *as errors* between the markers.
@@ -42,6 +50,12 @@
 // semantics; expand to nothing so the code still compiles.
 #define SELF_CONTAINED
 #define VIEW
+#endif
+
+#if defined(__clang__) && __has_cpp_attribute(clang::lifetime_non_invalidating)
+#define PRESERVES_BORROWS [[clang::lifetime_non_invalidating]]
+#else
+#define PRESERVES_BORROWS
 #endif
 
 #if defined(__clang__)

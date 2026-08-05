@@ -106,13 +106,17 @@ struct SELF_CONTAINED SlotMap {
   // valid only as long as the pool is. Index form is used by the hot iteration
   // loop (caller guards with aliveAt); handle form is the safe random-access
   // path that validates the generation.
-  T &at(std::uint32_t i) [[clang::lifetimebound]] { return data_[i]; }
+  // PRESERVES_BORROWS: handing out a reference does not reallocate the pool, so
+  // borrows taken from it (including this one) stay valid across the call.
+  PRESERVES_BORROWS T &at(std::uint32_t i) [[clang::lifetimebound]] {
+    return data_[i];
+  }
   const T &at(std::uint32_t i) const [[clang::lifetimebound]] {
     return data_[i];
   }
 
   // Returns nullptr for a stale/invalid handle. Pointer is bound to `this`.
-  T *find(SlotHandle h) [[clang::lifetimebound]] {
+  PRESERVES_BORROWS T *find(SlotHandle h) [[clang::lifetimebound]] {
     return contains(h) ? &data_[h.index] : nullptr;
   }
   const T *find(SlotHandle h) const [[clang::lifetimebound]] {
