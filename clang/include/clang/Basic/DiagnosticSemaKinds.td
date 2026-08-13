@@ -2350,6 +2350,12 @@ def warn_lifetime_safety_override_of_immortal : Warning<
   "must also be 'lifetime_immortal' (binding the return to the object with "
   "'[[clang::lifetimebound]]' is a weaker guarantee and is not sufficient)">,
   InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_of_non_invalidating : Warning<
+  "this override of a '[[clang::lifetime_non_invalidating]]' method does not "
+  "carry that promise; a call through the base class is assumed not to "
+  "invalidate anything, so a borrow the caller took beforehand would be left "
+  "silently dangling by this override">,
+  InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
 def note_cat_conform_to_noescape_prot : Note<
   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
 

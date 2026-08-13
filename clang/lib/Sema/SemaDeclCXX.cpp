@@ -19173,6 +19173,21 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
       Diag(New->getLocation(), diag::warn_lifetime_safety_override_of_immortal);
       Diag(Old->getLocation(), diag::note_overridden_virtual_function);
     }
+    // Same reasoning for '[[clang::lifetime_non_invalidating]]'. The promise is
+    // consumed at the CALL SITE, against the statically resolved callee: a call
+    // through the base suppresses the invalidation it would otherwise assume.
+    // Verification, by contrast, is per-declaration and checks only the body
+    // carrying the attribute. So a truthful base and an override that drops the
+    // attribute and reallocates is a hole -- the caller's borrow is left
+    // dangling with nothing reported anywhere. Requiring the override to repeat
+    // the promise also routes its body through the existing verifier, which
+    // then reports the untruth.
+    if (Old->hasAttr<LifetimeNonInvalidatingAttr>() &&
+        !New->hasAttr<LifetimeNonInvalidatingAttr>()) {
+      Diag(New->getLocation(),
+           diag::warn_lifetime_safety_override_of_non_invalidating);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
   }
 
   // SME attributes must match when overriding a function declaration.

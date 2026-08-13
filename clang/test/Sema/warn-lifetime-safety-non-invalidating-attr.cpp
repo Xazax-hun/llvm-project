@@ -136,3 +136,57 @@ struct [[gsl::Owner]] Reader {
     tmp.push_back(1); // no-warning: 'tmp' is a local
   }
 };
+
+//===----------------------------------------------------------------------===//
+// The promise must be repeated on overrides.
+//
+// It is consumed at the CALL SITE against the statically resolved callee, so a
+// call through the base suppresses the invalidation it would otherwise assume.
+// Verification is per-declaration and checks only the body carrying the
+// attribute. A truthful base plus an override that drops it and reallocates is
+// therefore a hole: the caller's borrow dangles with nothing reported.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Owner]] Buf {
+  vector<int> v;
+  // expected-note@+1 {{overridden virtual function is here}}
+  [[clang::lifetime_non_invalidating]] virtual int &at(int i) [[clang::lifetimebound]] {
+    return v[i];
+  }
+  virtual ~Buf();
+};
+
+struct [[gsl::Owner]] Compacting : Buf {
+  // expected-warning@+1 {{does not carry that promise}}
+  int &at(int i) [[clang::lifetimebound]] override {
+    v.push_back(1); // reallocates: the base's promise is a lie for this override
+    return v[i];
+  }
+};
+
+// Repeating the promise routes the override's own body through the verifier,
+// which reports the untruth there instead.
+struct [[gsl::Owner]] CompactingAnnotated : Buf {
+  // expected-warning@+1 {{invalidates the implicit this parameter, which it promises not to invalidate}}
+  [[clang::lifetime_non_invalidating]] int &at(int i) [[clang::lifetimebound]] override {
+    v.push_back(1); // expected-note {{invalidated here}}
+    return v[i];
+  }
+};
+
+// Negative: a truthful override that keeps the promise is clean.
+struct [[gsl::Owner]] Reading : Buf {
+  [[clang::lifetime_non_invalidating]] int &at(int i) [[clang::lifetimebound]] override {
+    return v[i];
+  }
+};
+
+// Negative: the base makes no promise, so an override need not either.
+struct [[gsl::Owner]] Plain {
+  vector<int> v;
+  virtual int &at(int i) [[clang::lifetimebound]] { return v[i]; }
+  virtual ~Plain();
+};
+struct [[gsl::Owner]] PlainDerived : Plain {
+  int &at(int i) [[clang::lifetimebound]] override { return v[i]; }
+};

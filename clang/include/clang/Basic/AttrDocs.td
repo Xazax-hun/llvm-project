@@ -4647,6 +4647,12 @@ taken before the call is never reported as invalidated by it.
 
 Invalidating a *local* is fine and is not reported: locals die with the call, so
 no caller borrow can point into one.
+
+An override of a method carrying this attribute must carry it too. The promise is
+consumed at the call site against the statically resolved callee, so a call
+through the base class would suppress the invalidation an override performs --
+and verification only ever checks the body that carries the attribute. Requiring
+the override to repeat the promise puts its body through the same check.
   }];
 }
 
