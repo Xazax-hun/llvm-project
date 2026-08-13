@@ -43,6 +43,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_lifetimebound_violation,
       diag::warn_lifetime_safety_capture_by_violation,
       diag::warn_lifetime_safety_immortal_violation,
+      diag::warn_lifetime_safety_non_invalidating_violation,
       diag::warn_lifetime_safety_cross_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_intra_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_invalidated_field,

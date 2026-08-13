@@ -1,4 +1,8 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify %s
+// Also verify the group enables the analysis on its own, not only as part of
+// -Wlifetime-safety-soundness.
+// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-non-invalidating-violation %s 2>&1 | FileCheck %s
+// CHECK: promises not to invalidate
 
 #include "Inputs/lifetime-analysis.h"
 using std::vector;
