@@ -201,8 +201,7 @@ public:
     LoanSet ProjectedLoans = LoanSetFactory.getEmptySet();
     PathElement Element = F.getPathElement();
     for (LoanID LID : Loans) {
-      Loan *Projected =
-          FactMgr.getLoanMgr().getOrCreateProjectedLoan(
+      Loan *Projected = FactMgr.getLoanMgr().getOrCreateProjectedLoan(
           LID, Element, F.getProjectingExpr());
       ProjectedLoans = LoanSetFactory.add(ProjectedLoans, Projected->getID());
     }
@@ -226,23 +225,51 @@ public:
   llvm::SmallVector<OriginID>
   buildOriginFlowChain(ProgramPoint StartPoint, const OriginID StartOID,
                        const LoanID TargetLoan) const {
+    // Precondition: the caller asks about a loan that really is held by this
+    // origin here. (Upstream keeps this assertion too.)
     assert(getLoans(StartOID, StartPoint).contains(TargetLoan) &&
            "TargetLoan must be present in the StartOID at the StartPoint");
 
+    // The loan's IDENTITY changes as it flows: a ProjectionFact replaces a loan
+    // with a projection of it, so the loan issued upstream is not the loan
+    // reaching StartPoint. Track the current loan alongside the current origin
+    // and step back across projections (below), or the walk loses the borrow at
+    // the first projection and never reaches its IssueFact.
     OriginID CurrOID = StartOID;
+    LoanID CurrLoanID = TargetLoan;
     llvm::SmallVector<OriginID> OriginFlowChain;
     llvm::ArrayRef<const Fact *> Facts = FactMgr.getBlockContaining(StartPoint);
     const auto *StartIt = llvm::find(Facts, StartPoint);
     assert(StartIt != Facts.end());
 
+    auto StateBefore = [&](const Fact *F) {
+      const auto *It = llvm::find(Facts, F);
+      assert(It != Facts.end());
+      // This walk is confined to one block (see the FIXME below), so the state
+      // before its first fact is not reachable from here; treat it as empty,
+      // which just declines the step-back rather than taking a wrong one.
+      return It == Facts.begin() ? Lattice{} : getState(*(It - 1));
+    };
+
     for (const Fact *F :
          llvm::reverse(llvm::make_range(Facts.begin(), StartIt))) {
-      if (const auto *IF = F->getAs<IssueFact>())
-        if (IF->getLoanID() == TargetLoan) {
-          assert(IF->getOriginID() == CurrOID);
+      if (const auto *IF = F->getAs<IssueFact>()) {
+        if (IF->getLoanID() == CurrLoanID && IF->getOriginID() == CurrOID)
           return OriginFlowChain;
-        }
-
+        continue;
+      }
+      if (const auto *PF = F->getAs<ProjectionFact>()) {
+        // Step back from a projected loan to the loan it was projected from
+        // (`obj.field` -> `obj`), so the walk keeps following one borrow even
+        // though its identity changed here.
+        if (PF->getOriginID() != CurrOID)
+          continue;
+        if (std::optional<LoanID> BaseLoanID =
+                FactMgr.getLoanMgr().getBaseLoan(CurrLoanID))
+          if (getLoans(StateBefore(PF), CurrOID).contains(*BaseLoanID))
+            CurrLoanID = *BaseLoanID;
+        continue;
+      }
       const auto *OFF = F->getAs<OriginFlowFact>();
       if (!OFF)
         continue;
@@ -250,7 +277,7 @@ public:
         continue;
 
       const OriginID SrcOriginID = OFF->getSrcOriginID();
-      if (!getLoans(SrcOriginID, OFF).contains(TargetLoan))
+      if (!getLoans(SrcOriginID, OFF).contains(CurrLoanID))
         continue;
       OriginFlowChain.push_back(SrcOriginID);
       CurrOID = SrcOriginID;

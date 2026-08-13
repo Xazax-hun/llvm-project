@@ -80,7 +80,12 @@ public:
     auto IsInvalidated = [&](const AccessPath &Path) {
       for (LoanID LID : ImmediatelyMovedLoans) {
         const Loan *MovedLoan = LoanMgr.getLoan(LID);
-        if (MovedLoan->getAccessPath() == Path)
+        // Moving an object moves everything below it: a borrow of `s.buf`, or
+        // an imprecise `s.*` from a lifetimebound accessor, goes with `s`. So
+        // this is containment rather than equality -- `.*` expands as a
+        // wildcard, so `s` is a prefix of `s.*` and the two are recognized as
+        // the same borrow.
+        if (MovedLoan->getAccessPath().isPrefixOf(Path))
           return true;
       }
       return false;

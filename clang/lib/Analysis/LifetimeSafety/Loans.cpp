@@ -71,9 +71,16 @@ Loan *LoanManager::getOrCreateProjectedLoan(LoanID BaseLoanID,
   // field when the base has no expression at all -- a placeholder base such as
   // `$this` -- which would otherwise leave a borrow of `this->field`
   // unanchored, reportable only from its use.
-  Loan *NewLoan = createLoan(ExtendedPath, BaseLoan->getIssuingExpr()
-                                               ? BaseLoan->getIssuingExpr()
-                                               : ProjectingExpr);
+  //
+  // An Interior (`.*`) projection is the exception: it records that the borrow
+  // is somewhere inside the base, naming no new storage of its own, so it must
+  // not manufacture an anchor the base did not have. Doing so would describe a
+  // borrow of a parameter as a borrow of the accessor call, losing the
+  // "parameter"/"implicit object" subject the diagnostics report.
+  const Expr *Anchor = BaseLoan->getIssuingExpr();
+  if (!Anchor && !Element.isInterior())
+    Anchor = ProjectingExpr;
+  Loan *NewLoan = createLoan(ExtendedPath, Anchor);
   BaseLoansMap[NewLoan->getID()] = BaseLoanID;
   // try_emplace may have rehashed during createLoan; re-find rather than reuse
   // the iterator.

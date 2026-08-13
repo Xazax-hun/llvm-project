@@ -28,8 +28,19 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, LoanID ID) {
 }
 
 /// One step of an access path below its root: a named field, or an unnamed
-/// interior region (the storage an owner manages, e.g. the buffer a
-/// `std::string_view` borrows from a `std::string`).
+/// interior region.
+///
+/// `Interior` (printed `.*`) means "some subobject, but the analysis does not
+/// know which". It is what a `[[clang::lifetimebound]]` result honestly denotes:
+/// the annotation promises the borrow points somewhere inside the object, not
+/// that it points at the object itself, and not at any particular field. Naming
+/// a concrete field there would assert storage that need not exist (projecting
+/// `.a` onto a loan of `o` yields `o.a` even when `a` is a field of `o.in`), and
+/// two such fictions can look provably disjoint from the truth.
+///
+/// Because it stands for an unknown element, `Interior` compares as *may-match*
+/// against everything: paths containing it are never provably disjoint. See
+/// AccessPath::isPrefixOf / divergesFrom.
 ///
 /// Ported from upstream's field-sensitive AccessPath.
 class PathElement {
@@ -47,6 +58,9 @@ public:
   bool isInterior() const { return K == Kind::Interior; }
   const FieldDecl *getFieldDecl() const { return FD; }
 
+  /// Exact identity, used for hashing and memoization. To ask whether two
+  /// *paths* can denote the same storage, use AccessPath::isPrefixOf, which
+  /// expands `Interior` as a wildcard.
   bool operator==(const PathElement &Other) const {
     return K == Other.K && FD == Other.FD;
   }
@@ -162,17 +176,31 @@ public:
 
   llvm::ArrayRef<PathElement> getElements() const { return Elements; }
 
-  /// True if this path is a prefix of `Other` (or equal to it). `x` is a prefix
-  /// of `x`, `x.f` and `x.f.*`; `x.f` is not a prefix of `x.g`.
+  /// True if this path *may* be a prefix of `Other` (or denote the same
+  /// storage). `x` is a prefix of `x`, `x.f` and `x.f.g`; `x.f` is not a prefix
+  /// of `x.g`.
+  ///
+  /// An `Interior` (`.*`) element stands for an unknown subobject: ZERO, one or
+  /// many member accesses. So `x.*` may denote `x` itself, `x.f`, or `x.f.g`,
+  /// and matching is a wildcard match rather than element-by-element equality.
+  /// Getting that wrong -- treating `.*` as exactly one element -- makes `x` and
+  /// `x.*` different storage, so anything keyed on the pair (moved loans,
+  /// diagnostic anchors) stops recognizing them as the same borrow.
+  ///
+  /// This is a may-analysis: callers use it to decide whether an invalidation
+  /// reaches a borrow, where "might" must behave like "does".
   bool isPrefixOf(const AccessPath &Other) const {
-    if (K != Other.K || Root != Other.Root ||
-        Elements.size() > Other.Elements.size())
+    if (K != Other.K || Root != Other.Root)
       return false;
-    return std::equal(Elements.begin(), Elements.end(), Other.Elements.begin());
+    return elementsMayPrefix(Elements, Other.Elements);
   }
 
-  /// True if neither path is a prefix of the other, i.e. they denote disjoint
-  /// storage below a common root (`x.a` vs `x.b`).
+  /// True if the two paths *provably* denote disjoint storage: same root, but
+  /// neither may be a prefix of the other (`x.a` vs `x.b`).
+  ///
+  /// A path containing `.*` is never disjoint from one it might overlap, since
+  /// the wildcard may expand to match. Only concrete, definitely-different
+  /// elements make two paths disjoint.
   bool divergesFrom(const AccessPath &Other) const {
     return K == Other.K && Root == Other.Root && !isPrefixOf(Other) &&
            !Other.isPrefixOf(*this);
@@ -233,6 +261,41 @@ public:
   void dump(llvm::raw_ostream &OS) const;
 
 private:
+  /// Wildcard prefix match: can `Pat` describe a prefix of `Path`, treating each
+  /// `Interior` element in either sequence as zero or more elements?
+  ///
+  /// The classic greedy glob algorithm, in O(n): walk both sequences, and on a
+  /// wildcard remember where to backtrack to if the rest fails to line up.
+  static bool elementsMayPrefix(llvm::ArrayRef<PathElement> Pat,
+                                llvm::ArrayRef<PathElement> Path) {
+    size_t P = 0, S = 0;
+    size_t StarP = static_cast<size_t>(-1), StarS = 0;
+    while (S < Path.size()) {
+      if (P < Pat.size() && Pat[P].isInterior()) {
+        // Wildcard: try matching zero elements first, and record the position so
+        // a later mismatch can consume one more.
+        StarP = P++;
+        StarS = S;
+      } else if (P < Pat.size() &&
+                 (Path[S].isInterior() || Pat[P] == Path[S])) {
+        ++P;
+        ++S;
+      } else if (StarP != static_cast<size_t>(-1)) {
+        // Mismatch after a wildcard: let it absorb one more element.
+        P = StarP + 1;
+        S = ++StarS;
+      } else {
+        // `Pat` ran out with elements left in `Path`: it is a proper prefix,
+        // which is a match. Anything else is a genuine mismatch.
+        return P >= Pat.size();
+      }
+    }
+    // Trailing wildcards may match the empty remainder.
+    while (P < Pat.size() && Pat[P].isInterior())
+      ++P;
+    return P >= Pat.size();
+  }
+
   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
   AccessPath(Kind K, const CXXMethodDecl *MD) : K(K), Root(MD) {}
   AccessPath(Kind K, const FunctionDecl *FD) : K(K), Root(FD) {}

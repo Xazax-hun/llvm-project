@@ -106,9 +106,17 @@ static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
   // Under the projection model a field borrow keeps its enclosing prefix
   // (`w.c` is rooted at `w`), so the object a loan denotes is the type of the
   // last named field, falling back to the root's type when the path names none.
-  for (const PathElement &E : llvm::reverse(AP.getElements()))
+  //
+  // An `Interior` (`.*`) element stops the walk: the borrow is inside some
+  // unknown subobject, so no named field identifies the object it denotes. The
+  // root's type is then the right answer -- it still contains whatever was
+  // borrowed, which keeps the type-based reachability tests conservative.
+  for (const PathElement &E : llvm::reverse(AP.getElements())) {
+    if (E.isInterior())
+      break;
     if (E.isField())
       return recordOf(E.getFieldDecl()->getType());
+  }
   if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
     return recordOf(PVD->getType());
   if (const ValueDecl *VD = AP.getAsValueDecl())
@@ -140,11 +148,20 @@ static bool recordReachesField(const CXXRecordDecl *RD, const FieldDecl *Field,
 }
 
 /// The last field named by `AP`, or null if the path names none (it denotes its
-/// root). Under the projection model this is the subobject the loan borrows.
+/// root) or ends in an unknown subobject. Under the projection model this is the
+/// subobject the loan borrows.
+///
+/// A trailing `Interior` (`.*`) element makes the answer unknown rather than
+/// "the field before it": for `o.*.a` the borrow is inside *some* subobject of
+/// `o`, so `a` does not identify it precisely. Skipping past `.*` to the nearest
+/// named field would restore the false precision `.*` exists to avoid.
 static const FieldDecl *lastNamedField(const AccessPath &AP) {
-  for (const PathElement &E : llvm::reverse(AP.getElements()))
+  for (const PathElement &E : llvm::reverse(AP.getElements())) {
+    if (E.isInterior())
+      return nullptr;
     if (E.isField())
       return E.getFieldDecl();
+  }
   return nullptr;
 }
 
@@ -175,8 +192,22 @@ static bool pathsCannotOverlap(const AccessPath &A, const AccessPath &B) {
 /// *different* instance of the same type, a deliberate over-approximation under
 /// the safe model (`isPrefixOf` at the call sites handles the same-instance
 /// case precisely, and this covers the rest).
+/// The deepest field NAMED anywhere in `AP`, ignoring a trailing unknown
+/// subobject. For `o.*.a` and `o.a.*` alike this is `a`.
+///
+/// Use this to ask "does the borrow reach a member of RD at all", which a `.*`
+/// suffix does not change: `pick(this->str)` borrows inside `str`, so it still
+/// borrows a member. Use `lastNamedField` instead to ask "which subobject does
+/// the borrow denote *precisely*", where `.*` must answer "unknown".
+static const FieldDecl *deepestNamedField(const AccessPath &AP) {
+  for (const PathElement &E : llvm::reverse(AP.getElements()))
+    if (E.isField())
+      return E.getFieldDecl();
+  return nullptr;
+}
+
 static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
-  const FieldDecl *FD = lastNamedField(L->getAccessPath());
+  const FieldDecl *FD = deepestNamedField(L->getAccessPath());
   if (!RD || !FD)
     return false;
   llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
@@ -1988,8 +2019,54 @@ public:
   void issuePendingWarnings() {
     if (!SemaHelper)
       return;
+    // Maps a base loan to its Interior projection, so the dedupe below can look
+    // along the edge in both directions.
+    llvm::DenseMap<LoanID, LoanID> InteriorProjectionOf;
     for (const auto &[LID, Warning] : FinalWarningsMap) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      if (AP.getElements().empty() || !AP.getElements().back().isInterior())
+        continue;
+      if (std::optional<LoanID> Base = FactMgr.getLoanMgr().getBaseLoan(LID))
+        InteriorProjectionOf[*Base] = LID;
+    }
+    for (const auto &[LID, Warning] : FinalWarningsMap) {
+      // FinalWarningsMap is keyed by loan, and an Interior (`.*`) projection
+      // describes the same borrow as its base -- `$m` and `$m.*` both stand for
+      // the borrow taken through member `m`, since `.*` adds no storage of its
+      // own. Both can be invalidated by one operation, which would emit two
+      // diagnostics for one bug.
+      //
+      // Keep whichever is anchored at a USE. The base of such a projection is
+      // typically a seeded loan with no anchor of its own, which falls back to
+      // blaming the member declaration; the projection carries the use that
+      // actually reads the dangling borrow, which is the better report.
       const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
+      // An Interior (`.*`) projection and its base describe the same borrow --
+      // `.*` adds no storage of its own -- so reporting both emits two
+      // diagnostics for one bug. Keep exactly one.
+      //
+      // Prefer the one caused by a USE: it points at the read that actually
+      // touches the dangling borrow, whereas an escape has no such site and
+      // falls back to blaming a member declaration. When neither is use-caused
+      // the two reports are equivalent, so keep the base and drop the
+      // projection, which is the pre-existing attribution.
+      auto CausedByUse = [&](LoanID Other) {
+        return FinalWarningsMap.lookup(Other)
+                   .CausingFact.template dyn_cast<const UseFact *>() != nullptr;
+      };
+      bool ThisFromUse = CausedByUse(LID);
+      if (std::optional<LoanID> Base = FactMgr.getLoanMgr().getBaseLoan(LID))
+        if (!L->getAccessPath().getElements().empty() &&
+            L->getAccessPath().getElements().back().isInterior() &&
+            FinalWarningsMap.contains(*Base) &&
+            (CausedByUse(*Base) || !ThisFromUse))
+          continue;
+      // The mirror case: this is the base and its projection reports from a use.
+      if (!ThisFromUse) {
+        auto It = InteriorProjectionOf.find(LID);
+        if (It != InteriorProjectionOf.end() && CausedByUse(It->second))
+          continue;
+      }
       const Expr *IssueExpr = L->getIssuingExpr();
       llvm::PointerUnion<const UseFact *, const OriginEscapesFact *>
           CausingFact = Warning.CausingFact;

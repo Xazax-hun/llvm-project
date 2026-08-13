@@ -118,6 +118,17 @@ public:
     return List->getOriginID();
   }
 
+  /// The access path a loan denotes, as printed (`o`, `o.f`, `o.*`). Loan IDs
+  /// are not stable under field-sensitivity -- a projection makes a NEW loan --
+  /// so tests compare paths rather than identities.
+  std::string getAccessPathString(LoanID LID) {
+    const Loan *L = Analysis.getFactManager().getLoanMgr().getLoan(LID);
+    std::string S;
+    llvm::raw_string_ostream OS(S);
+    L->getAccessPath().dump(OS);
+    return S;
+  }
+
   std::vector<LoanID> getLoansForVar(llvm::StringRef VarName) {
     auto *VD = findDecl<VarDecl>(VarName);
     if (!VD) {
@@ -303,36 +314,36 @@ MATCHER_P2(HasLoansToImpl, LoanVars, Annotation, "") {
                      << Annotation << "'";
     return false;
   }
-  std::vector<LoanID> ActualLoans(ActualLoansSetOpt->begin(),
-                                  ActualLoansSetOpt->end());
-
-  std::vector<LoanID> ExpectedLoans;
-  for (const auto &LoanVar : LoanVars) {
-    std::vector<LoanID> ExpectedLIDs = Info.Helper.getLoansForVar(LoanVar);
-    if (ExpectedLIDs.empty()) {
-      *result_listener << "could not find loan for var '" << LoanVar << "'";
-      return false;
-    }
-    ExpectedLoans.insert(ExpectedLoans.end(), ExpectedLIDs.begin(),
-                         ExpectedLIDs.end());
+  // Compare ACCESS PATHS, not loan IDs. Under field-sensitivity a loan's
+  // identity is not stable: projecting it (`o` -> `o.f`, or `o` -> `o.*` for an
+  // imprecise [[lifetimebound]] result) creates a new loan. What a test means by
+  // "v1 borrows o" is that the loan's path is rooted at `o`, whether or not it
+  // was later refined -- so match on the path's root, ignoring any suffix.
+  std::vector<std::string> ActualRoots;
+  for (LoanID LID : *ActualLoansSetOpt) {
+    std::string Path = Info.Helper.getAccessPathString(LID);
+    ActualRoots.push_back(Path.substr(0, Path.find('.')));
   }
-  std::sort(ExpectedLoans.begin(), ExpectedLoans.end());
-  std::sort(ActualLoans.begin(), ActualLoans.end());
-  if (ExpectedLoans != ActualLoans) {
-    *result_listener << "Expected: {";
-    for (const auto &LoanID : ExpectedLoans) {
-      *result_listener << LoanID.Value << ", ";
-    }
+
+  std::vector<std::string> ExpectedRoots;
+  for (const auto &LoanVar : LoanVars)
+    ExpectedRoots.push_back(std::string(LoanVar));
+
+  std::sort(ExpectedRoots.begin(), ExpectedRoots.end());
+  std::sort(ActualRoots.begin(), ActualRoots.end());
+  ActualRoots.erase(std::unique(ActualRoots.begin(), ActualRoots.end()),
+                    ActualRoots.end());
+  if (ExpectedRoots != ActualRoots) {
+    *result_listener << "Expected paths rooted at: {";
+    for (const auto &R : ExpectedRoots)
+      *result_listener << R << ", ";
     *result_listener << "} Actual: {";
-    for (const auto &LoanID : ActualLoans) {
-      *result_listener << LoanID.Value << ", ";
-    }
+    for (const auto &R : ActualRoots)
+      *result_listener << R << ", ";
     *result_listener << "}";
     return false;
   }
-
-  return ExplainMatchResult(UnorderedElementsAreArray(ExpectedLoans),
-                            ActualLoans, result_listener);
+  return true;
 }
 
 enum class LivenessKindFilter { Maybe, Must, All };

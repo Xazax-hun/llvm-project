@@ -3007,6 +3007,38 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
       // Unknown loan so the view's own (inner) borrow is reported as lost rather
       // than silently dropped (which a control-flow merge could otherwise mask).
       flowSingleLevelWithUnknownDepth(CallNode, ArgNode, Call, KillSrc);
+      // The result borrows *somewhere inside* the argument: [[lifetimebound]]
+      // promises no more than that, not that it borrows the argument itself and
+      // not which subobject. Record that as an Interior (`.*`) step so a later
+      // member access cannot turn the imprecision into a precise claim --
+      // `o.get().a` must become `o.*.a`, not `o.a`, which would name storage
+      // that need not exist (`a` is a field of `o.in`) and would then look
+      // provably disjoint from the real borrow `o.in.a`.
+      //
+      // Only when the result is a BORROW. `.*` describes which subobject a
+      // borrow points into, so it is meaningless on a result that owns its
+      // value: a constructor initializes the object being built, and a factory
+      // like `make_unique<T>(tmp)` returns an owner, not a view into `tmp`.
+      // Marking those changes the loan's identity for no benefit, and anything
+      // keyed on loans (moved loans, diagnostic anchors) then fails to relate it
+      // to the argument's own loan.
+      // ...and only when the borrowed thing HAS subobjects to be imprecise
+      // about. A borrow of a scalar (`int *choose(int*, int*)`) cannot later be
+      // refined by a member access, so `.*` would add nothing while changing the
+      // loan's identity -- which everything keyed on loans (moved loans,
+      // origin-flow chains, diagnostic anchors) then fails to match.
+      QualType RetTy = Call->getType();
+      QualType Pointee = RetTy->isPointerType() || RetTy->isReferenceType()
+                             ? RetTy->getPointeeType()
+                             : RetTy.getNonReferenceType();
+      bool ResultIsBorrow = Call->isGLValue() || RetTy->isPointerType() ||
+                            RetTy->isReferenceType() ||
+                            isGslPointerType(RetTy.getNonReferenceType());
+      bool BorrowsARecord =
+          Pointee->getAsCXXRecordDecl() || isGslPointerType(Pointee);
+      if (ResultIsBorrow && BorrowsARecord && !isa<CXXConstructorDecl>(FD))
+        CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
+            CallNode->getOriginID(), PathElement::getInterior(), Call));
       KillSrc = false;
     }
   }

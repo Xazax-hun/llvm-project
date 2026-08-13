@@ -205,6 +205,7 @@ private:
   void issueUnknownLoanIfUntrackedBorrow(const Expr *Call, OriginNode *CallNode,
                                          bool FlowedIntoResult);
 
+
   // Detect methods that invalidate iterators/references/pointees.
   // For instance methods, Args[0] is the implicit 'this' pointer.
   void handleInvalidatingCall(const Expr *Call, const FunctionDecl *FD,

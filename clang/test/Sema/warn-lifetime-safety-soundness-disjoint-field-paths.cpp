@@ -171,3 +171,43 @@ void params_may_alias(Box &X [[clang::noescape]], Box &Y [[clang::noescape]]) {
   Y.grow();            // expected-note {{assumed to be invalidated by this operation}}
   sink = *V.data();
 }
+
+//===----------------------------------------------------------------------===//
+// An imprecise borrow: a [[clang::lifetimebound]] accessor.
+//
+// Such a result carries the whole object's loan -- the annotation promises only
+// "somewhere inside it", not which subobject. Naming a concrete field on top of
+// that would assert storage that need not exist: projecting `.text` onto a loan
+// of `w` yields `w.text`, while the real borrow is `w.d.text`. The two then look
+// like disjoint siblings of `w`, and a mutation of one is judged unable to reach
+// the other -- a FALSE claim of disjointness, which silently dropped the report.
+//
+// The imprecision is recorded as an Interior (`.*`) element instead, which
+// matches zero, one or many accesses, so the paths stay comparable.
+//===----------------------------------------------------------------------===//
+
+struct Doc {
+  string text;
+};
+
+struct Wrap {
+  Doc d;
+  Doc &get() [[clang::lifetimebound]] { return d; }
+};
+
+void borrow_through_lifetimebound_accessor() {
+  Wrap w;
+  string_view v = w.get().text; // expected-warning {{object whose reference is captured is later invalidated}}
+  w.d.text += "x";              // expected-note {{invalidated here}}
+  sink = *v.data();             // expected-note {{later used here}}
+}
+
+// The same through a conditional, whose base is not a call at all -- the
+// imprecision travels with the loan, not with the expression's shape.
+void borrow_through_conditional_accessor(bool c) {
+  Wrap w;
+  // One report per arm: each carries its own imprecise loan.
+  string_view v = (c ? w.get() : w.get()).text; // expected-warning 2 {{object whose reference is captured is later invalidated}}
+  w.d.text += "x";                              // expected-note 2 {{invalidated here}}
+  sink = *v.data();                             // expected-note 2 {{later used here}}
+}
