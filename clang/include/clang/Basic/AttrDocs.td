@@ -4636,10 +4636,17 @@ Like ``lifetime_immortal``, this attribute appertains to the function itself, so
 it is written *before* the declaration (unlike ``lifetimebound``, which applies to
 a parameter or the implicit object and follows the parameter list).
 
-The attribute only suppresses the *assumed* invalidation. An operation the
-analysis can see actually invalidating a borrow -- a container mutation, a
-``delete`` -- is still reported, so annotating a method that does reallocate does
-not hide a mutation performed in that method's own body.
+The promise is verified against the body. A method that invalidates one of its
+inputs -- the implicit object or a parameter -- is reported under
+``-Wlifetime-safety-non-invalidating-violation``, whether the analysis sees the
+mutation directly (a container mutation, a ``delete``) or merely assumes it from
+a non-const call it did not examine. Verification is essential rather than
+cosmetic: the attribute suppresses the invalidation at every *call site*, so an
+untrue promise silently hides a use-after-free in the caller, where a borrow
+taken before the call is never reported as invalidated by it.
+
+Invalidating a *local* is fine and is not reported: locals die with the call, so
+no caller borrow can point into one.
   }];
 }
 

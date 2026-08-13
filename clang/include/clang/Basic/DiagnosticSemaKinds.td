@@ -11061,6 +11061,15 @@ def warn_lifetime_safety_immortal_violation
       InGroup<LifetimeSafetyImmortalViolation>,
       DefaultIgnore;
 
+def warn_lifetime_safety_non_invalidating_violation
+    : Warning<"'[[clang::lifetime_non_invalidating]]' method invalidates "
+              "%select{the implicit this parameter|parameter %1}0, which it "
+              "promises not to invalidate; the promise suppresses this "
+              "operation at every call site, so a borrow the caller took "
+              "beforehand is left silently dangling">,
+      InGroup<LifetimeSafetyNonInvalidatingViolation>,
+      DefaultIgnore;
+
 def warn_lifetime_safety_intra_tu_misplaced_lifetimebound
     : Warning<"'lifetimebound' attribute on this definition is not visible to callers before the definition; add it to the declaration instead">,
       InGroup<LifetimeSafetyIntraTUMisplacedLifetimebound>,

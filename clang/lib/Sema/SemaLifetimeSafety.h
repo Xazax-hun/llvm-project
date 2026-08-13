@@ -425,6 +425,19 @@ public:
     S.Diag(Loc, diag::warn_lifetime_safety_immortal_violation) << Subject;
   }
 
+  void reportNonInvalidatingViolation(const CXXMethodDecl *MD,
+                                      const ParmVarDecl *Parm,
+                                      SourceLocation Loc) override {
+    // Anchor at the attribute: that is the claim being contradicted, and it is
+    // where the author must act. Point at the invalidating operation too.
+    const auto *Attr = MD->getAttr<LifetimeNonInvalidatingAttr>();
+    SourceLocation AttrLoc = Attr ? Attr->getLocation() : MD->getLocation();
+    S.Diag(AttrLoc, diag::warn_lifetime_safety_non_invalidating_violation)
+        << (Parm ? 1 : 0) << Parm;
+    if (Loc.isValid())
+      S.Diag(Loc, diag::note_lifetime_safety_invalidated_here);
+  }
+
   void reportMisplacedLifetimebound(WarningScope Scope,
                                     const CXXMethodDecl *FDef,
                                     const CXXMethodDecl *FDecl) override {

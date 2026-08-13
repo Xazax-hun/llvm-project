@@ -312,6 +312,18 @@ static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
   case OO_Star:      // operator* (smart pointers, iterators)
   case OO_Arrow:     // operator->
     return true;
+  // Iterator traversal mutates the ITERATOR, never the container it points
+  // into, so it cannot invalidate a borrow of that container. These are
+  // non-const by necessity (they update the iterator's own position), so
+  // without this a plain read-only loop over a member container looks like a
+  // mutation of the enclosing object: the iterator carries the container's
+  // loan, and `++it` is a non-const call on something holding it.
+  case OO_PlusPlus:   // ++it / it++
+  case OO_MinusMinus: // --it / it--
+  case OO_PlusEqual:  // it += n
+  case OO_MinusEqual: // it -= n
+    return isGslPointerType(
+        MD.getASTContext().getCanonicalTagType(MD.getParent()));
   default:
     break;
   }
@@ -2290,9 +2302,18 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     // receiver being an owner; an explicit
     // `[[clang::lifetime_non_invalidating]]` promise is not, since it also covers
     // an accessor of a record that merely *contains* owners.
+    // The name-based allow-list only describes std types, so it is gated on the
+    // receiver being a std owner -- or a std VIEW: iterator traversal
+    // (`++it`) has a view receiver, mutates only the iterator, and cannot
+    // reallocate the container the iterator points into. Without admitting
+    // views here a plain read-only loop over a member container looks like a
+    // mutation of the enclosing object, since the iterator carries that
+    // object's loan.
     bool PointeeIsOwner = isGslOwnerType(RecvRecordTy);
-    bool NonInvalidating = Method->hasAttr<LifetimeNonInvalidatingAttr>() ||
-                           (PointeeIsOwner && isNonInvalidatingMethod(*Method));
+    bool PointeeIsView = isGslPointerType(RecvRecordTy);
+    bool NonInvalidating =
+        Method->hasAttr<LifetimeNonInvalidatingAttr>() ||
+        ((PointeeIsOwner || PointeeIsView) && isNonInvalidatingMethod(*Method));
     if ((StaticallyOwner || RecvRD) && !NonInvalidating)
       if (OriginNode *L = getOriginNode(*Args[0])) {
         OwnerLoanGate RecvGate = StaticallyOwner ? OwnerLoanGate::None

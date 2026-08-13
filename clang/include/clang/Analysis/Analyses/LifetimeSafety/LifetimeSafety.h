@@ -181,6 +181,13 @@ public:
   virtual void reportImmortalViolation(const FunctionDecl *FD,
                                        unsigned Subject) {}
 
+  // Reports a [[clang::lifetime_non_invalidating]] method whose body invalidates
+  // one of the function's inputs. `Parm` is the offending parameter, or null
+  // when the invalidated input is the implicit object parameter.
+  virtual void reportNonInvalidatingViolation(const CXXMethodDecl *MD,
+                                              const ParmVarDecl *Parm,
+                                              SourceLocation Loc) {}
+
   // Reports a member function definition that has [[clang::lifetimebound]] on
   // the implicit this parameter when the canonical declaration does not.
   virtual void reportMisplacedLifetimebound(WarningScope Scope,

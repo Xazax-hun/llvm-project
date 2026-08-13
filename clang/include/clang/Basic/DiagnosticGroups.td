@@ -711,11 +711,27 @@ programming model.
   }];
 }
 
+def LifetimeSafetyNonInvalidatingViolation
+    : DiagGroup<"lifetime-safety-non-invalidating-violation"> {
+  code Documentation = [{
+Detects a method marked '[[clang::lifetime_non_invalidating]]' whose body
+invalidates one of the function's inputs -- the implicit object ('this') or a
+parameter -- for example by calling a mutating method on an owner it reaches, or
+by destroying it. The attribute suppresses the assumed-invalidation diagnostic at
+every call site, so an untrue promise silently hides a use-after-free in the
+caller: a borrow taken before the call is never reported as invalidated by it.
+
+Invalidating a *local* is fine and is not reported; locals cannot be observed by
+the caller.
+  }];
+}
+
 def LifetimeSafetyValidations : DiagGroup<"lifetime-safety-validations",
                                           [LifetimeSafetyNoescape,
                                            LifetimeSafetyLifetimeboundViolation,
                                            LifetimeSafetyImmortalViolation,
                                            LifetimeSafetyCaptureByViolation,
+                                           LifetimeSafetyNonInvalidatingViolation,
                                            LifetimeSafetyMisplacedLifetimebound]> {
   code Documentation = [{
 Verify function implementations adhere to the annotated lifetime contracts through lifetime safety
@@ -1043,6 +1059,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyLifetimeboundViolation,
                                          LifetimeSafetyImmortalViolation,
                                          LifetimeSafetyCaptureByViolation,
+                                         LifetimeSafetyNonInvalidatingViolation,
                                          // A borrow of `this`/a parameter that
                                          // escapes (via return or a field) from
                                          // an unannotated function is a soundness

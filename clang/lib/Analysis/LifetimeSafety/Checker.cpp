@@ -330,6 +330,10 @@ private:
   llvm::DenseSet<std::pair<const void *, const Expr *>> ReportedArgOverlap;
   /// Field-store expressions already reported as self-referential.
   llvm::DenseSet<const Expr *> ReportedSelfRefStores;
+  /// Methods already reported for breaking their non-invalidating promise; the
+  /// diagnostic is about the annotation, so one report per method suffices even
+  /// when the body invalidates an input more than once.
+  llvm::DenseSet<const CXXMethodDecl *> ReportedNonInvalidating;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
   /// after the precise warnings are finalized.
   llvm::SmallVector<std::tuple<LoanID, const Stmt *, const Expr *>>
@@ -372,6 +376,7 @@ public:
           checkExpiry(EF);
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
           checkConstSubversion(IOF);
+          checkNonInvalidatingPromise(IOF);
           if (IOF->isAssumed())
             checkAssumedInvalidation(IOF);
           else {
@@ -804,6 +809,52 @@ public:
   /// has no constructor parameter to flag) into a dangling alias the caller
   /// cannot see. Verify the body rather than trust the annotation (cf.
   /// immortal-violation / lifetimebound-violation).
+  /// Verifies the '[[clang::lifetime_non_invalidating]]' promise against the
+  /// body: the method must not invalidate any of the function's INPUTS -- the
+  /// implicit object or a parameter.
+  ///
+  /// The attribute suppresses the assumed-invalidation fact at every call site
+  /// (see FactsGenerator's isNonInvalidatingMethod), so an untrue promise
+  /// silently hides a use-after-free in the caller: a borrow taken before the
+  /// call is never reported as invalidated by it. Nothing else verifies it --
+  /// unlike lifetimebound / noescape / lifetime_immortal, which all check their
+  /// bodies.
+  ///
+  /// Invalidating a LOCAL is fine and must not be reported: locals die with the
+  /// call, so no caller borrow can point into one. This is decided from the
+  /// loans the invalidated origin carries rather than from the syntax of the
+  /// operation. A local's loan is rooted at its own ValueDecl, while an input is
+  /// a placeholder ($this / a parameter) -- and a borrow reached *through* an
+  /// input keeps that placeholder as its path root, so mutating `p->buf` or a
+  /// member of `*this` is caught just like mutating the input directly.
+  void checkNonInvalidatingPromise(const InvalidateOriginFact *IOF) {
+    if (!SemaHelper)
+      return;
+    const auto *MD = dyn_cast_or_null<CXXMethodDecl>(FD);
+    if (!MD || !MD->hasAttr<LifetimeNonInvalidatingAttr>())
+      return;
+    // Assumed invalidations are NOT exempt. Exempting them would reopen the very
+    // hole this check closes: the attribute's whole effect is to suppress the
+    // assumed channel at call sites, so a method that reallocates by calling an
+    // unexamined non-const helper on itself is precisely the untrue promise that
+    // must be caught -- and it is the shape the attribute makes invisible.
+    for (LoanID LID :
+         LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      // Only the caller-visible inputs matter. Placeholder roots are exactly
+      // those: they denote storage from the caller's scope.
+      const ParmVarDecl *Parm = AP.getAsPlaceholderParam();
+      if (!Parm && !AP.getAsPlaceholderThis())
+        continue;
+      if (!ReportedNonInvalidating.insert(MD).second)
+        return; // one report per method is enough
+      const Stmt *S = IOF->getInvalidationStmt();
+      SemaHelper->reportNonInvalidatingViolation(
+          MD, Parm, S ? S->getBeginLoc() : SourceLocation());
+      return;
+    }
+  }
+
   void checkNakedDeallocation(const InvalidateOriginFact *IOF) {
     if (!SemaHelper)
       return;
