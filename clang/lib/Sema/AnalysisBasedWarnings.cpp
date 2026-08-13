@@ -2962,6 +2962,60 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
       .TraverseTranslationUnitDecl(TU);
 }
 
+/// Runs the lifetime safety analysis over every namespace-scope variable whose
+/// initializer is dynamic.
+///
+/// Such an initializer is code, but no other entry point reaches it. The
+/// per-declaration path runs when a *function* scope is popped, and the TU-mode
+/// sweeps walk callables and the call graph -- a file-scope VarDecl is neither,
+/// and CallGraph does not descend into initializer statements. So a borrow
+/// stored by one of these initializers was never analyzed at all: not refused,
+/// simply invisible. The classic bug it hides is a store into another global
+/// that reads it from a destructor, after the borrowed global has already been
+/// destroyed.
+///
+/// AnalysisDeclContext already models a file-scope VarDecl by treating its
+/// initializer as the body, so this needs no new machinery.
+static void LifetimeSafetyFileVarInitAnalysis(
+    Sema &S, TranslationUnitDecl *TU,
+    clang::lifetimes::LifetimeSafetyStats &LSStats) {
+  llvm::TimeTraceScope TimeProfile("LifetimeSafetyFileVarInitAnalysis");
+  lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
+
+  std::function<void(const DeclContext *)> Visit = [&](const DeclContext *DC) {
+    for (const Decl *D : DC->decls()) {
+      // Namespaces, extern "C" blocks and (for static data members) records all
+      // nest further file-scope variables.
+      if (const auto *Inner = dyn_cast<DeclContext>(D))
+        if (isa<NamespaceDecl, LinkageSpecDecl, CXXRecordDecl>(D))
+          Visit(Inner);
+      const auto *VD = dyn_cast<VarDecl>(D);
+      if (!VD || !VD->isFileVarDecl() || !VD->hasInit() ||
+          VD->getDeclContext()->isDependentContext())
+        continue;
+      // A constant initializer performs no stores at runtime and cannot create
+      // a dangling borrow, so skip it rather than pay for a CFG.
+      if (VD->hasConstantInitialization())
+        continue;
+      if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
+        continue;
+      AnalysisDeclContext AC(nullptr, VD);
+      AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
+      AC.getCFGBuildOptions().AddLifetime = true;
+      AC.getCFGBuildOptions().AddInitializers = true;
+      AC.getCFGBuildOptions().AddImplicitDtors = true;
+      AC.getCFGBuildOptions().AddTemporaryDtors = true;
+      AC.getCFGBuildOptions().setAllAlwaysAdd();
+      if (AC.getCFG())
+        runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
+      else
+        SemaHelper.reportAnalysisBailout(
+            VD, lifetimes::BailoutReason::CFGUnavailable);
+    }
+  };
+  Visit(TU);
+}
+
 static bool shouldRunUnsafeBufferUsageAnalysis(const Sema &S,
                                                SourceLocation Loc) {
   const DiagnosticsEngine &Diags = S.getDiagnostics();
@@ -3031,6 +3085,11 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
   if (S.getLangOpts().CPlusPlus &&
       S.getLangOpts().EnableLifetimeSafetyTUAnalysis)
     LifetimeSafetyTUAnalysis(S, TU, LSStats);
+
+  // Namespace-scope dynamic initializers, in both modes: neither the per-
+  // function path nor the TU sweeps above reach them.
+  if (S.getLangOpts().CPlusPlus)
+    LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
 }
 
 void clang::sema::AnalysisBasedWarnings::

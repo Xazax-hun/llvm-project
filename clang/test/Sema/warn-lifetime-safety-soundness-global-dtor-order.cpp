@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-view-on-mutable-global -Wlifetime-safety-immortal-violation -verify %s
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-view-on-mutable-global -Wlifetime-safety-immortal-violation -verify=expected %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -verify=expected,soundness %s
 
 #include "Inputs/lifetime-analysis.h"
 
@@ -30,7 +30,13 @@ void store_const_to_global() {
 struct Holder {
   string_view v;
 };
-Holder g_holder; // expected-warning {{borrows from a global or static object with a non-trivial destructor and escapes to global or static storage}}
+// Two diagnostics on this initialization: the dangling escape, and the
+// type-level ban -- `Holder` holds a borrow but is annotated neither
+// [[gsl::Owner]] nor [[gsl::Pointer]]. The latter surfaces now that a
+// namespace-scope variable's initialization is analyzed like any other code.
+// The type-level ban is only in the full soundness set, not in the two narrow
+// groups the first RUN line enables.
+Holder g_holder; // expected-warning {{borrows from a global or static object with a non-trivial destructor and escapes to global or static storage}} soundness-warning {{can hold a borrow but is annotated neither}}
 
 void store_const_to_global_field() {
   g_holder.v = g_const_str;
