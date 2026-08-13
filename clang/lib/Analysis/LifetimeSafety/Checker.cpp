@@ -723,9 +723,17 @@ public:
     // storage is what the receiver's loans denote, and invalidating storage
     // invalidates everything below it (freeing `p` kills a borrow of `p->v`),
     // so this is containment, not equality.
+    //
+    // The field test must FALL THROUGH to the generic one rather than decide the
+    // answer. `namesFieldLast` asks whether the borrow denotes the mutated field
+    // itself, which is false for a borrow *below* it: `o.v[0].a` names `a` last
+    // while `o.v.clear()` names `v`. The generic comparison does match there --
+    // `o.v` is a prefix of `o.v.a` -- so returning early made the field-precise
+    // path strictly weaker than the generic one, and the member spelling of a
+    // bug the local spelling catches went unreported.
     auto IsExactInvalidated = [&](LoanID L) {
-      if (MutatedField)
-        return namesFieldLast(LoanAP(L), MutatedField);
+      if (MutatedField && namesFieldLast(LoanAP(L), MutatedField))
+        return true;
       for (LoanID InvalidID : DirectlyInvalidatedLoans)
         if (LoanAP(InvalidID).isPrefixOf(LoanAP(L)))
           return true;

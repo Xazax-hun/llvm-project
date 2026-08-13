@@ -88,3 +88,53 @@ void same_field() {
   t.a.push_back('z');  // expected-note {{invalidated here}}
   sink = *v.data();    // expected-note {{later used here}}
 }
+
+//===----------------------------------------------------------------------===//
+// A borrow BELOW the mutated field.
+//
+// The field test decides whether the borrow denotes the mutated field itself,
+// which is false for a borrow of something inside it: `w.v[0].a` names `a` last
+// while `w.v.clear()` names `v`. That test must fall through to the generic
+// access-path comparison, which does match (`w.v` is a prefix of `w.v.a`) --
+// otherwise the field-precise path is strictly weaker than the generic one, and
+// the MEMBER spelling of a bug the LOCAL spelling catches goes unreported.
+//===----------------------------------------------------------------------===//
+
+struct Elem { string s; };
+
+struct VecHolder {
+  std::vector<Elem> v;
+};
+
+void borrow_below_mutated_field() {
+  VecHolder w;
+  w.v.push_back(Elem{"a string long enough to be heap allocated for sure"});
+  string_view sv = w.v[0].s; // expected-warning {{object whose reference is captured is later invalidated}}
+  w.v.clear();               // expected-note {{invalidated here}}
+  sink = *sv.data();         // expected-note {{later used here}}
+}
+
+// The same shape through the implicit object.
+struct VecHolderMethod {
+  std::vector<Elem> v;
+  void bad() {
+    string_view sv = v[0].s; // expected-warning {{object whose reference is captured is later invalidated}}
+    v.clear();               // expected-note {{invalidated here}}
+    sink = *sv.data();       // expected-note {{later used here}}
+  }
+};
+
+// Precision is unaffected: a mutation of one field still does not reach a
+// borrow of a disjoint sibling.
+struct TwoVecs {
+  std::vector<Elem> a;
+  std::vector<Elem> b;
+};
+
+void sibling_below_is_clean() {
+  TwoVecs t;
+  t.a.push_back(Elem{"a string long enough to be heap allocated for sure"});
+  string_view sv = t.a[0].s;
+  t.b.clear(); // no-warning: 'b' is disjoint from 'a'
+  sink = *sv.data();
+}
