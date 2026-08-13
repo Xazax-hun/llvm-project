@@ -98,6 +98,15 @@ static void dumpUsedOrigins(const OriginNode *N, const FieldDecl *FD,
     dumpUsedOrigins(E.Child, E.FD, OM, OS, First);
 }
 
+void ProjectionFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                          const OriginManager &OM) const {
+  OS << "Projection (";
+  OM.dump(getOriginID(), OS);
+  OS << ", Element: ";
+  getPathElement().dump(OS);
+  OS << ")\n";
+}
+
 void UseFact::dump(llvm::raw_ostream &OS, const LoanManager &,
                    const OriginManager &OM) const {
   OS << "Use (";

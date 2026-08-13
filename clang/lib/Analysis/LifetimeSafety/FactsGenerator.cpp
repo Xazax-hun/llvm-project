@@ -776,6 +776,16 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         Dst->getOriginID(), Src->getOriginID(),
         /*Kill=*/!OwnerField));
+    // Field-sensitivity: extend the loans that flowed in from the base by this
+    // field, so `w.c` denotes `w.c` rather than merely `w`. Two accesses of
+    // different fields of one object then hold distinct loans, which is what
+    // lets a mutation of one be told apart from a borrow of the other.
+    //
+    // An owner field already got its own FieldDecl-rooted loan above; that loan
+    // names the field directly, so projecting it again would yield `buf.buf`.
+    if (!OwnerField)
+      CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
+          Dst->getOriginID(), PathElement::getField(*FD)));
   }
 
   // Only narrow when the field is in the base's tree; otherwise the

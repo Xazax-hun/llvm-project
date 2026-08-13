@@ -27,6 +27,44 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, LoanID ID) {
   return OS << ID.Value;
 }
 
+/// One step of an access path below its root: a named field, or an unnamed
+/// interior region (the storage an owner manages, e.g. the buffer a
+/// `std::string_view` borrows from a `std::string`).
+///
+/// Ported from upstream's field-sensitive AccessPath.
+class PathElement {
+public:
+  enum class Kind { Field, Interior };
+
+  static PathElement getField(const FieldDecl &FD) {
+    return PathElement(Kind::Field, &FD);
+  }
+  static PathElement getInterior() {
+    return PathElement(Kind::Interior, nullptr);
+  }
+
+  bool isField() const { return K == Kind::Field; }
+  bool isInterior() const { return K == Kind::Interior; }
+  const FieldDecl *getFieldDecl() const { return FD; }
+
+  bool operator==(const PathElement &Other) const {
+    return K == Other.K && FD == Other.FD;
+  }
+  bool operator!=(const PathElement &Other) const { return !(*this == Other); }
+
+  void dump(llvm::raw_ostream &OS) const {
+    if (isField())
+      OS << "." << FD->getNameAsString();
+    else
+      OS << ".*";
+  }
+
+private:
+  PathElement(Kind K, const FieldDecl *FD) : K(K), FD(FD) {}
+  Kind K;
+  const FieldDecl *FD;
+};
+
 /// Represents the storage location being borrowed, e.g., a specific stack
 /// variable or a field within it: var.field.*
 ///
@@ -39,11 +77,14 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, LoanID ID) {
 ///   - Immortal: storage that lives for the whole program (the return value of
 ///     a `[[clang::lifetime_immortal]]` function)
 ///
+/// ...followed by a sequence of `PathElement`s naming the subobject borrowed
+/// below that root, so `x`, `x.field` and `x.field.*` are distinguishable.
+///
 /// Placeholder and Immortal paths never expire within the function scope, as
 /// they represent storage from the caller's scope or storage that outlives the
 /// program's execution.
 ///
-/// TODO: Model access paths of other types, e.g. field, array subscript, heap
+/// TODO: Model access paths of other types, e.g. array subscript, heap
 /// allocation not through `new`, and globals.
 class AccessPath {
 public:
@@ -73,12 +114,20 @@ public:
 private:
   Kind K;
   llvm::PointerUnion<const Expr *, const Decl *> Root;
+  /// The subobject below `Root` that is borrowed. Empty for the root itself.
+  llvm::SmallVector<PathElement, 1> Elements;
 
 public:
   AccessPath(const clang::ValueDecl *D) : K(Kind::ValueDecl), Root(D) {}
   AccessPath(const clang::MaterializeTemporaryExpr *MTE)
       : K(Kind::MaterializeTemporary), Root(MTE) {}
   AccessPath(const CXXNewExpr *New) : K(Kind::NewAllocation), Root(New) {}
+  /// Creates an extended path by appending one element: `AccessPath(x, .f)` is
+  /// the path to `x.f`.
+  AccessPath(const AccessPath &Other, PathElement E)
+      : K(Other.K), Root(Other.Root), Elements(Other.Elements) {
+    Elements.push_back(E);
+  }
   static AccessPath Placeholder(const ParmVarDecl *PVD) {
     return AccessPath(Kind::PlaceholderParam, PVD);
   }
@@ -107,8 +156,27 @@ public:
     return AccessPath(Kind::Unknown, Producer);
   }
   bool isUnknown() const { return K == Kind::Unknown; }
-  AccessPath(const AccessPath &Other) : K(Other.K), Root(Other.Root) {}
+  AccessPath(const AccessPath &Other)
+      : K(Other.K), Root(Other.Root), Elements(Other.Elements) {}
   AccessPath &operator=(const AccessPath &) = delete;
+
+  llvm::ArrayRef<PathElement> getElements() const { return Elements; }
+
+  /// True if this path is a prefix of `Other` (or equal to it). `x` is a prefix
+  /// of `x`, `x.f` and `x.f.*`; `x.f` is not a prefix of `x.g`.
+  bool isPrefixOf(const AccessPath &Other) const {
+    if (K != Other.K || Root != Other.Root ||
+        Elements.size() > Other.Elements.size())
+      return false;
+    return std::equal(Elements.begin(), Elements.end(), Other.Elements.begin());
+  }
+
+  /// True if neither path is a prefix of the other, i.e. they denote disjoint
+  /// storage below a common root (`x.a` vs `x.b`).
+  bool divergesFrom(const AccessPath &Other) const {
+    return K == Other.K && Root == Other.Root && !isPrefixOf(Other) &&
+           !Other.isPrefixOf(*this);
+  }
 
   Kind getKind() const { return K; }
 
@@ -159,7 +227,7 @@ public:
   }
 
   bool operator==(const AccessPath &RHS) const {
-    return K == RHS.K && Root == RHS.Root;
+    return K == RHS.K && Root == RHS.Root && Elements == RHS.Elements;
   }
   bool operator!=(const AccessPath &RHS) const { return !(*this == RHS); }
   void dump(llvm::raw_ostream &OS) const;
@@ -199,6 +267,8 @@ public:
 
 /// Manages the creation, storage and retrieval of loans.
 class LoanManager {
+  using ProjectionCacheKey = std::pair<LoanID, PathElement>;
+
 public:
   LoanManager() = default;
 
@@ -208,6 +278,15 @@ public:
     AllLoans.push_back(NewLoan);
     return NewLoan;
   }
+
+  /// Gets or creates the loan obtained by projecting `BaseLoanID` through
+  /// `Element`, i.e. the loan to `<base path>.<element>`. Memoized: projecting
+  /// the same loan with the same element must yield the same LoanID, or the
+  /// loan-propagation dataflow would never reach a fixpoint.
+  Loan *getOrCreateProjectedLoan(LoanID BaseLoanID, PathElement Element);
+
+  /// The loan `ProjectedLoanID` was projected from, if it was projected at all.
+  std::optional<LoanID> getBaseLoan(LoanID ProjectedLoanID) const;
 
   const Loan *getLoan(LoanID ID) const {
     assert(ID.Value < AllLoans.size());
@@ -219,6 +298,11 @@ public:
 private:
   LoanID getNextLoanID() { return NextLoanID++; }
 
+  /// Memo for getOrCreateProjectedLoan; see there for why it is required.
+  llvm::DenseMap<ProjectionCacheKey, Loan *> LoanProjectionCache;
+  /// Maps a projected loan back to the loan it was projected from.
+  llvm::DenseMap<LoanID, LoanID> BaseLoansMap;
+
   LoanID NextLoanID{0};
   /// TODO(opt): Profile and evaluate the usefullness of small buffer
   /// optimisation.
@@ -226,5 +310,25 @@ private:
   llvm::BumpPtrAllocator LoanAllocator;
 };
 } // namespace clang::lifetimes::internal
+
+namespace llvm {
+template <> struct DenseMapInfo<clang::lifetimes::internal::PathElement> {
+  using PathElement = clang::lifetimes::internal::PathElement;
+  static PathElement getEmptyKey() {
+    return PathElement::getField(
+        *DenseMapInfo<const clang::FieldDecl *>::getEmptyKey());
+  }
+  static PathElement getTombstoneKey() {
+    return PathElement::getField(
+        *DenseMapInfo<const clang::FieldDecl *>::getTombstoneKey());
+  }
+  static unsigned getHashValue(const PathElement &Val) {
+    return llvm::hash_combine(Val.isInterior(), Val.getFieldDecl());
+  }
+  static bool isEqual(const PathElement &LHS, const PathElement &RHS) {
+    return LHS == RHS;
+  }
+};
+} // namespace llvm
 
 #endif // LLVM_CLANG_ANALYSIS_ANALYSES_LIFETIMESAFETY_LOANS_H

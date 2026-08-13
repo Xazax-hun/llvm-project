@@ -47,11 +47,35 @@ void AccessPath::dump(llvm::raw_ostream &OS) const {
     OS << "Unknown";
     break;
   }
+  for (const PathElement &E : Elements)
+    E.dump(OS);
 }
 
 void Loan::dump(llvm::raw_ostream &OS) const {
   OS << getID() << " (Path: ";
   Path.dump(OS);
   OS << ")";
+}
+Loan *LoanManager::getOrCreateProjectedLoan(LoanID BaseLoanID,
+                                            PathElement Element) {
+  ProjectionCacheKey Key = {BaseLoanID, Element};
+  auto [It, Inserted] = LoanProjectionCache.try_emplace(Key, nullptr);
+  if (!Inserted)
+    return It->second;
+  const Loan *BaseLoan = getLoan(BaseLoanID);
+  AccessPath ExtendedPath(BaseLoan->getAccessPath(), Element);
+  Loan *NewLoan = createLoan(ExtendedPath, BaseLoan->getIssuingExpr());
+  BaseLoansMap[NewLoan->getID()] = BaseLoanID;
+  // try_emplace may have rehashed during createLoan; re-find rather than reuse
+  // the iterator.
+  LoanProjectionCache[Key] = NewLoan;
+  return NewLoan;
+}
+
+std::optional<LoanID> LoanManager::getBaseLoan(LoanID ProjectedLoanID) const {
+  auto It = BaseLoansMap.find(ProjectedLoanID);
+  if (It != BaseLoansMap.end())
+    return It->second;
+  return std::nullopt;
 }
 } // namespace clang::lifetimes::internal

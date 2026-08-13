@@ -192,6 +192,22 @@ public:
     return setLoans(In, DestOID, MergedLoans);
   }
 
+  /// A projection extends, in place, each loan the origin holds by one path
+  /// element: `{x}` projected through `.f` becomes `{x.f}`. The projected loans
+  /// are memoized in the LoanManager so repeated evaluation converges.
+  Lattice transfer(Lattice In, const ProjectionFact &F) {
+    OriginID OID = F.getOriginID();
+    LoanSet Loans = getLoans(In, OID);
+    LoanSet ProjectedLoans = LoanSetFactory.getEmptySet();
+    PathElement Element = F.getPathElement();
+    for (LoanID LID : Loans) {
+      Loan *Projected =
+          FactMgr.getLoanMgr().getOrCreateProjectedLoan(LID, Element);
+      ProjectedLoans = LoanSetFactory.add(ProjectedLoans, Projected->getID());
+    }
+    return setLoans(In, OID, ProjectedLoans);
+  }
+
   Lattice transfer(Lattice In, const KillOriginFact &F) {
     return setLoans(In, F.getKilledOrigin(), LoanSetFactory.getEmptySet());
   }

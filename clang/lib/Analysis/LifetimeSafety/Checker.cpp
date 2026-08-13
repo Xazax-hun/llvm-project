@@ -614,7 +614,10 @@ public:
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, EF);
       for (LoanID HeldLoanID : HeldLoans) {
         const Loan *HeldLoan = FactMgr.getLoanMgr().getLoan(HeldLoanID);
-        if (ExpiredPath != HeldLoan->getAccessPath())
+        // When storage expires, everything *below* it expires with it: the
+        // scope end of `obj` kills a borrow of `obj.a` too. Access paths are
+        // field-sensitive, so this is containment rather than equality.
+        if (!ExpiredPath.isPrefixOf(HeldLoan->getAccessPath()))
           continue;
         // HeldLoan is expired because its AccessPath is expired.
         PendingWarning &CurWarning = FinalWarningsMap[HeldLoan->getID()];
@@ -675,7 +678,9 @@ public:
       if (MutatedField)
         return LoanAP(L).getAsValueDecl() == MutatedField;
       for (LoanID InvalidID : DirectlyInvalidatedLoans)
-        if (LoanAP(InvalidID) == LoanAP(L))
+        // Invalidating storage invalidates everything below it: freeing `p`
+        // kills a borrow of `p->v`. Containment, not equality.
+        if (LoanAP(InvalidID).isPrefixOf(LoanAP(L)))
           return true;
       return false;
     };
@@ -1086,7 +1091,8 @@ public:
       for (LoanID InvalidID : MatchLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
-        if (AP == L->getAccessPath())
+        // See IsExactInvalidated: containment, not equality.
+        if (AP.isPrefixOf(L->getAccessPath()))
           return true;
         // Invalidating an object also invalidates borrows into its owner fields
         // (a non-const member call may reallocate one). Same-instance borrows
@@ -1649,8 +1655,11 @@ public:
       bool SharesObject = false, BorrowsMember = false;
       for (LoanID SL : Stored) {
         const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
-        if (L->getAccessPath() == CAP)
-          SharesObject = true; // same instance
+        // "Same instance" means the stored borrow points at the container or
+        // into it: a borrow of `this->inner` is `$this.inner`, contained in
+        // the container's `$this` rather than equal to it.
+        if (CAP.isPrefixOf(L->getAccessPath()))
+          SharesObject = true;
         if (isFieldBorrowOf(L, RD))
           BorrowsMember = true; // borrows a member of it
       }
@@ -1728,7 +1737,9 @@ public:
               break;
             const AccessPath &MAP =
                 FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
-            if (MAP == BAP)
+            // The co-argument aliases the mutated one if it borrows that
+            // storage or anything below it.
+            if (MAP.isPrefixOf(BAP))
               Aliases = true;
           }
         }
