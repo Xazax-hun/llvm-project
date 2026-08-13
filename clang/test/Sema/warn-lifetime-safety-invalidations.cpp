@@ -471,19 +471,21 @@ void ConditionalContainerInvalidatesIterator(bool flag) {
     (flag ? v1 : v2).push_back(42); // expected-note {{invalidated here}}
     (void)it;                       // expected-note {{later used here}}
 }
+// Only the borrowed field is reported. Field-sensitive access paths tell the two
+// arms apart: the borrow denotes `s.strings1`, and only the `strings1` arm of the
+// conditional invalidates it -- the `strings2` arm is a disjoint sibling.
 void ConditionalFieldInvalidatesIterator(bool flag) {
     S s;
-    auto it = s.strings1.begin();                    // expected-warning 2 {{object whose reference is captured is later invalidated}}
-    (flag ? s.strings1 : s.strings2).push_back("1"); // expected-note 2 {{invalidated here}}
-    *it;                                             // expected-note 2 {{later used here}}
+    auto it = s.strings1.begin();                    // expected-warning {{object whose reference is captured is later invalidated}}
+    (flag ? s.strings1 : s.strings2).push_back("1"); // expected-note {{invalidated here}}
+    *it;                                             // expected-note {{later used here}}
 }
-// FIXME: Requires field-sensitive AccessPaths to fix.
 void Invalidate1Use2ViaRefIsOk() {
     S s;
-    auto it = s.strings2.begin(); // expected-warning {{object whose reference is captured is later invalidated}}
+    auto it = s.strings2.begin();
     auto& strings1 = s.strings1;
-    strings1.push_back("1");      // expected-note {{invalidated here}}
-    *it;                          // expected-note {{later used here}}
+    strings1.push_back("1"); // no-warning: mutating 'strings1' cannot reach the sibling 'strings2'
+    *it;
 }
 void Invalidate1UseSIsOk() {
   S s;
@@ -880,12 +882,15 @@ struct StringOwner {
   std::string s, t;
 };
 
-// FIXME: False-positive
+// Destroying a sibling field does not dangle a borrow of another one: the borrow
+// denotes `owner.s`, the destruction names `owner.t`, and the two paths diverge.
+// (The destructor call itself draws assumed-invalidation and naked-delete, but
+// those are not in -Wlifetime-safety.)
 void member_destructor_invalidates_pointer() {
   StringOwner owner = {"42", "43"};
-  const char *p = owner.s.data(); // expected-warning {{object whose reference is captured is later invalidated}}
-  owner.t.~basic_string();        // expected-note {{invalidated here}}
-  (void)*p;                       // expected-note {{later used here}}
+  const char *p = owner.s.data();
+  owner.t.~basic_string();
+  (void)*p;
 }
 
 } // namespace explicit_destructor

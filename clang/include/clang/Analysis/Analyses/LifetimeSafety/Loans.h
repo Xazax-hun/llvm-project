@@ -280,10 +280,12 @@ public:
   }
 
   /// Gets or creates the loan obtained by projecting `BaseLoanID` through
-  /// `Element`, i.e. the loan to `<base path>.<element>`. Memoized: projecting
-  /// the same loan with the same element must yield the same LoanID, or the
-  /// loan-propagation dataflow would never reach a fixpoint.
-  Loan *getOrCreateProjectedLoan(LoanID BaseLoanID, PathElement Element);
+  /// `Element`, i.e. the loan to `<base path>.<element>`, issued by
+  /// `ProjectingExpr`. Memoized: projecting the same loan with the same element
+  /// must yield the same LoanID, or the loan-propagation dataflow would never
+  /// reach a fixpoint.
+  Loan *getOrCreateProjectedLoan(LoanID BaseLoanID, PathElement Element,
+                                 const Expr *ProjectingExpr);
 
   /// The loan `ProjectedLoanID` was projected from, if it was projected at all.
   std::optional<LoanID> getBaseLoan(LoanID ProjectedLoanID) const;

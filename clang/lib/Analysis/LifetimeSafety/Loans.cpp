@@ -57,14 +57,23 @@ void Loan::dump(llvm::raw_ostream &OS) const {
   OS << ")";
 }
 Loan *LoanManager::getOrCreateProjectedLoan(LoanID BaseLoanID,
-                                            PathElement Element) {
+                                            PathElement Element,
+                                            const Expr *ProjectingExpr) {
   ProjectionCacheKey Key = {BaseLoanID, Element};
   auto [It, Inserted] = LoanProjectionCache.try_emplace(Key, nullptr);
   if (!Inserted)
     return It->second;
   const Loan *BaseLoan = getLoan(BaseLoanID);
   AccessPath ExtendedPath(BaseLoan->getAccessPath(), Element);
-  Loan *NewLoan = createLoan(ExtendedPath, BaseLoan->getIssuingExpr());
+  // Keep the base's issuing expression when it has one: it names the storage
+  // being borrowed (`Y{}.a` is a borrow of the temporary `Y{}`), which is what
+  // a diagnostic wants to point at. Fall back to the access that named the
+  // field when the base has no expression at all -- a placeholder base such as
+  // `$this` -- which would otherwise leave a borrow of `this->field`
+  // unanchored, reportable only from its use.
+  Loan *NewLoan = createLoan(ExtendedPath, BaseLoan->getIssuingExpr()
+                                               ? BaseLoan->getIssuingExpr()
+                                               : ProjectingExpr);
   BaseLoansMap[NewLoan->getID()] = BaseLoanID;
   // try_emplace may have rehashed during createLoan; re-find rather than reuse
   // the iterator.

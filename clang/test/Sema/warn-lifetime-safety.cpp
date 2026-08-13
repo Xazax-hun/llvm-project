@@ -2962,8 +2962,8 @@ struct S {
   }
 };
 
-void use_inner_origin_after_delete(MyObj* obj) { // expected-warning {{parameter does not live long enough}}
-    int* p = &obj->id;
+void use_inner_origin_after_delete(MyObj* obj) {
+    int* p = &obj->id;                            // expected-warning {{allocated object does not live long enough}}
     delete obj;                                   // expected-note {{freed here}}
     (void)*p;                                     // expected-note {{later used here}}
 }

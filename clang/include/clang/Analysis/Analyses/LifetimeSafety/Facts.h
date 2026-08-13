@@ -172,17 +172,24 @@ public:
 class ProjectionFact : public Fact {
   OriginID OID;
   PathElement Element;
+  /// The expression performing the projection (the `MemberExpr`). Becomes the
+  /// projected loan's issuing expression, so a borrow of a field anchors at the
+  /// field access rather than at whatever produced the base -- for a `$this`
+  /// base that has no expression at all.
+  const Expr *ProjectingExpr;
 
 public:
   static bool classof(const Fact *F) {
     return F->getKind() == Kind::Projection;
   }
 
-  ProjectionFact(OriginID OID, PathElement Element)
-      : Fact(Kind::Projection), OID(OID), Element(Element) {}
+  ProjectionFact(OriginID OID, PathElement Element, const Expr *ProjectingExpr)
+      : Fact(Kind::Projection), OID(OID), Element(Element),
+        ProjectingExpr(ProjectingExpr) {}
 
   OriginID getOriginID() const { return OID; }
   PathElement getPathElement() const { return Element; }
+  const Expr *getProjectingExpr() const { return ProjectingExpr; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

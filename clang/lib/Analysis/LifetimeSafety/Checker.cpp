@@ -103,11 +103,16 @@ static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
   // the object" arm was skipped and an imprecise borrow -- one from a
   // [[clang::lifetimebound]] accessor, say -- went unreported, even though the
   // identical code with a `this` or a local receiver was caught.
+  // Under the projection model a field borrow keeps its enclosing prefix
+  // (`w.c` is rooted at `w`), so the object a loan denotes is the type of the
+  // last named field, falling back to the root's type when the path names none.
+  for (const PathElement &E : llvm::reverse(AP.getElements()))
+    if (E.isField())
+      return recordOf(E.getFieldDecl()->getType());
   if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
     return recordOf(PVD->getType());
   if (const ValueDecl *VD = AP.getAsValueDecl())
-    if (!isa<FieldDecl>(VD))
-      return recordOf(VD->getType());
+    return recordOf(VD->getType());
   return nullptr;
 }
 
@@ -134,19 +139,39 @@ static bool recordReachesField(const CXXRecordDecl *RD, const FieldDecl *Field,
   return false;
 }
 
-/// True if loan `L` is a field-rooted borrow whose field is a (possibly
-/// transitive / inherited) member of `RD`. Field loans are FieldDecl-rooted and
-/// instance-insensitive, so this can match a field of a *different* instance of
-/// the same type -- a deliberate over-approximation under the safe model.
+/// The last field named by `AP`, or null if the path names none (it denotes its
+/// root). Under the projection model this is the subobject the loan borrows.
+static const FieldDecl *lastNamedField(const AccessPath &AP) {
+  for (const PathElement &E : llvm::reverse(AP.getElements()))
+    if (E.isField())
+      return E.getFieldDecl();
+  return nullptr;
+}
+
+/// True if loan `L` borrows a subobject below its root -- i.e. its path names
+/// at least one field -- and that field is a (possibly transitive / inherited)
+/// member of `RD`.
+///
+/// Under the projection model a field borrow keeps its whole prefix
+/// (`w.c.buf`), so the *root* is the enclosing variable, never the field. The
+/// field being borrowed is therefore the last named element of the path. This
+/// remains instance-insensitive by design: it can match a field of a
+/// *different* instance of the same type, a deliberate over-approximation under
+/// the safe model (`isPrefixOf` at the call sites handles the same-instance
+/// case precisely, and this covers the rest).
 static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
-  if (!RD)
+  const FieldDecl *FD = lastNamedField(L->getAccessPath());
+  if (!RD || !FD)
     return false;
-  if (const ValueDecl *VD = L->getAccessPath().getAsValueDecl())
-    if (const auto *FD = dyn_cast<FieldDecl>(VD)) {
-      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-      return recordReachesField(RD, FD, Visited);
-    }
-  return false;
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+  return recordReachesField(RD, FD, Visited);
+}
+
+/// True if the last field named by `AP` is `Field`, i.e. the path denotes that
+/// field itself rather than something containing it. `w.c` names `c` last;
+/// `w.c.buf` does not.
+static bool namesFieldLast(const AccessPath &AP, const FieldDecl *Field) {
+  return lastNamedField(AP) == Field;
 }
 
 /// True if a borrow rooted at the `$this` placeholder of `MD` is aliased by a
@@ -673,23 +698,17 @@ public:
     };
     // Exact match: the loan directly borrows the invalidated storage. For a
     // field mutation (`s.buf.append(...)`) this is the specific field; for a
-    // container mutation it is the receiver's loans.
+    // container mutation it is the receiver's loans. Either way the mutated
+    // storage is what the receiver's loans denote, and invalidating storage
+    // invalidates everything below it (freeing `p` kills a borrow of `p->v`),
+    // so this is containment, not equality.
     auto IsExactInvalidated = [&](LoanID L) {
       if (MutatedField)
-        return LoanAP(L).getAsValueDecl() == MutatedField;
+        return namesFieldLast(LoanAP(L), MutatedField);
       for (LoanID InvalidID : DirectlyInvalidatedLoans)
-        // Invalidating storage invalidates everything below it: freeing `p`
-        // kills a borrow of `p->v`. Containment, not equality.
         if (LoanAP(InvalidID).isPrefixOf(LoanAP(L)))
           return true;
       return false;
-    };
-    // True if origin `OID` is a borrow *into* an object of record `ObjRD` (a
-    // view, or a raw pointer/reference whose pointee is some sub-buffer), as
-    // opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
-    // which a field mutation does not dangle).
-    auto OriginBorrowsInto = [&](OriginID OID, const CXXRecordDecl *ObjRD) {
-      return originBorrowsInto(OID, ObjRD);
     };
     // For each live origin, check if it holds an invalidated loan and report.
     LivenessMap Origins = LiveOrigins.getLiveOriginsAt(IOF);
@@ -707,54 +726,29 @@ public:
         if (IsExactInvalidated(L))
           Invalidated.push_back(L);
 
-      // Conservative case for a field mutation: an *imprecise* borrow into the
-      // object is also invalidated. Such a borrow (a view, or a raw
-      // pointer/reference into the object) holds the enclosing object's loan
-      // but no precise field loan -- e.g. one produced by a lifetimebound
-      // accessor (`v = doc.getView()`, `p = doc.data()`), where we do not know
-      // which subobject it borrows, so any owner-field mutation of the object
-      // may invalidate it. A borrow that directly named a field carries that
-      // field's loan and is matched exactly above (so a sibling-field mutation
-      // does not reach it); a pointer *at* the whole object is excluded.
-      if (MutatedField && Invalidated.empty()) {
-        bool HoldsFieldLoan = false;
-        LoanID ObjectLoan;
-        const CXXRecordDecl *ObjRD = nullptr;
+      // Conservative arm, in path terms: the borrow denotes storage that
+      // *encloses* what is being invalidated. A borrow of `d` may point
+      // anywhere inside `d`, so invalidating `d.content` may dangle it. This is
+      // the imprecise borrow a [[clang::lifetimebound]] accessor produces
+      // (`v = doc.getView()`), where the subobject actually borrowed is
+      // unknown. A borrow that named the field precisely is contained in the
+      // mutated path instead, and is matched exactly above -- which is what
+      // keeps a sibling mutation (`d.other`) from reaching it.
+      //
+      // `originBorrowsInto` excludes a pointer *at* the whole object, whose
+      // pointee is the object itself: mutating a field does not dangle it.
+      if (Invalidated.empty()) {
         for (LoanID L : HeldLoans) {
           const AccessPath &AP = LoanAP(L);
-          // Only a field loan that is PRECISE with respect to this mutation
-          // suppresses the conservative arm. A loan naming a field that
-          // *contains* the mutated one (`v = w.d.text()` carries field `d`'s
-          // loan while `w.d.s.assign(...)` names `s`) is imprecise here: it is
-          // not matched exactly above, yet mutating the inner field can
-          // reallocate storage it points into. Treating any field loan as
-          // precise made the field-precise path strictly weaker than the
-          // generic one -- routing the same mutation through a reference, which
-          // leaves MutatedField null, reported it immediately.
-          if (const ValueDecl *VD = AP.getAsValueDecl();
-              VD && isa<FieldDecl>(VD)) {
-            const auto *LoanField = cast<FieldDecl>(VD);
-            llvm::SmallPtrSet<const CXXRecordDecl *, 8> FieldVisited;
-            bool ContainsMutated =
-                LoanField != MutatedField &&
-                recordReachesField(
-                    LoanField->getType().getNonReferenceType()
-                        ->getAsCXXRecordDecl(),
-                    MutatedField, FieldVisited);
-            if (!ContainsMutated)
-              HoldsFieldLoan = true;
+          bool Encloses = false;
+          for (LoanID InvalidID : DirectlyInvalidatedLoans)
+            if (AP.isPrefixOf(LoanAP(InvalidID)) && AP != LoanAP(InvalidID))
+              Encloses = true;
+          if (Encloses && originBorrowsInto(OID, invalidatedObjectRecord(AP))) {
+            Invalidated.push_back(L);
+            break;
           }
-          if (!ObjRD)
-            if (const CXXRecordDecl *RD = invalidatedObjectRecord(AP)) {
-              llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-              if (recordReachesField(RD, MutatedField, Visited)) {
-                ObjectLoan = L;
-                ObjRD = RD;
-              }
-            }
         }
-        if (ObjRD && !HoldsFieldLoan && OriginBorrowsInto(OID, ObjRD))
-          Invalidated.push_back(ObjectLoan);
       }
 
       for (LoanID LiveLoanID : Invalidated) {
@@ -1094,6 +1088,13 @@ public:
         // See IsExactInvalidated: containment, not equality.
         if (AP.isPrefixOf(L->getAccessPath()))
           return true;
+        // Two paths under a common root that are neither a prefix of the other
+        // denote provably disjoint storage (`t.a` vs `t.b`), so mutating one
+        // cannot reach a borrow of the other. Field-sensitive paths are what
+        // make this decidable; without them the type-based fallback below would
+        // flag any same-typed sibling.
+        if (AP.divergesFrom(L->getAccessPath()))
+          continue;
         // Invalidating an object also invalidates borrows into its owner fields
         // (a non-const member call may reallocate one). Same-instance borrows
         // also carry the object loan and match above; this additionally covers

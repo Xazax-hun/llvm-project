@@ -29,9 +29,8 @@ void annotated_is_exempt(Pool &p [[clang::noescape]]) {
   sink = a;
 }
 
-// expected-warning@+1 {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
 void unannotated_is_assumed(Pool &p [[clang::noescape]]) {
-  int &a = p.v[0];
+  int &a = p.v[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
   p.untracked_tick(); // expected-note {{assumed to be invalidated by this operation}}
   sink = a;
 }

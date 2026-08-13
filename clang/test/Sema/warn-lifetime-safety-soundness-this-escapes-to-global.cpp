@@ -24,8 +24,8 @@ void S::leak_this() { // expected-warning {{a borrow of the enclosing object or 
   g_obj = this;
 }
 
-void S::leak_field() { // expected-warning {{a borrow of the enclosing object or one of its members escapes to global or static storage 'g_int'}}
-  g_int = &f;
+void S::leak_field() {
+  g_int = &f; // expected-warning {{a borrow of the enclosing object or one of its members escapes to global or static storage 'g_int'}}
 }
 
 // Storing into a static local counts as global/static storage.

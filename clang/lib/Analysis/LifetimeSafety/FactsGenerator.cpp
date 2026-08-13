@@ -744,48 +744,25 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
   if (doesDeclHaveStorage(FD)) {
     assert(Src && "Base expression should be a pointer/reference type");
 
-    // Safe-model soundness: a borrow of an OWNER field (e.g. `this->buf` where
-    // `buf` is a std::string/std::vector) borrows the field's heap buffer.
-    // Issue a field-rooted loan -- mirroring the storage loan a *local* owner
-    // gets in VisitDeclRefExpr -- so a later mutation of the field, whether
-    // directly (`buf.append(...)`) or via a non-const method on the containing
-    // object, can invalidate views into it.
-    //
-    // The MemberExpr origin must end up holding BOTH this field loan and the
-    // base's loans (notably `$this`, which lifetimebound-`this` verification of
-    // borrow-returning accessors relies on). Since IssueFact *replaces* an
-    // origin's loan set, issue the field loan first (the MemberExpr origin is
-    // fresh) and then *merge* the base flow (Kill=false) rather than replacing.
-    // Issue the field-rooted owner loan only when the field access denotes
-    // STABLE storage -- i.e. the access is an lvalue (`this->buf`, a local
-    // `h.buf`). When the base is a materialized temporary, the field access is an
-    // xvalue (`Holder{}.s`): the owner subobject lives only as long as the
-    // temporary (a lifetime-extended-temporary reference does not give it
-    // borrowable storage, Origins.cpp TODO), so manufacturing a FieldDecl-rooted
-    // loan here would launder a lost loan into a tracked one that never expires.
-    // Leave such a borrow lost so it surfaces as -Wlifetime-safety-lost-loan,
-    // matching the direct `const std::string& r = std::string(...)` form.
-    bool OwnerField = isMutableOwnerType(FD->getType()) && ME->isLValue();
-    if (OwnerField) {
-      const Loan *L = FactMgr.getLoanMgr().createLoan(AccessPath(FD), ME);
-      CurrentBlockFacts.push_back(
-          FactMgr.createFact<IssueFact>(L->getID(), Dst->getOriginID()));
-    }
     // The field's glvalue (outermost origin) holds the same loans as the base
-    // expression.
+    // expression...
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         Dst->getOriginID(), Src->getOriginID(),
-        /*Kill=*/!OwnerField));
-    // Field-sensitivity: extend the loans that flowed in from the base by this
-    // field, so `w.c` denotes `w.c` rather than merely `w`. Two accesses of
-    // different fields of one object then hold distinct loans, which is what
-    // lets a mutation of one be told apart from a borrow of the other.
+        /*Kill=*/true));
+    // ...extended by this field, so `w.c` denotes `w.c` rather than merely `w`.
+    // Two accesses of different fields of one object then hold distinct loans,
+    // which is what lets a mutation of one be told apart from a borrow of the
+    // other.
     //
-    // An owner field already got its own FieldDecl-rooted loan above; that loan
-    // names the field directly, so projecting it again would yield `buf.buf`.
-    if (!OwnerField)
-      CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
-          Dst->getOriginID(), PathElement::getField(*FD)));
+    // This is also what makes a borrow of an OWNER field (e.g. `this->buf` where
+    // `buf` is a std::string/std::vector) denote the field's heap buffer, so a
+    // later mutation of the field -- directly (`buf.append(...)`) or via a
+    // non-const method on the containing object -- can invalidate views into it.
+    // Projecting the base rather than rooting a fresh loan at the FieldDecl
+    // keeps the whole prefix (`w.c.buf`, not `buf`), which is what lets the
+    // enclosing object be recovered and disjoint siblings be told apart.
+    CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
+        Dst->getOriginID(), PathElement::getField(*FD), ME));
   }
 
   // Only narrow when the field is in the base's tree; otherwise the

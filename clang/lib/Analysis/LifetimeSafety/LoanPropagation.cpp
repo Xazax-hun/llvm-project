@@ -202,7 +202,8 @@ public:
     PathElement Element = F.getPathElement();
     for (LoanID LID : Loans) {
       Loan *Projected =
-          FactMgr.getLoanMgr().getOrCreateProjectedLoan(LID, Element);
+          FactMgr.getLoanMgr().getOrCreateProjectedLoan(
+          LID, Element, F.getProjectingExpr());
       ProjectedLoans = LoanSetFactory.add(ProjectedLoans, Projected->getID());
     }
     return setLoans(In, OID, ProjectedLoans);

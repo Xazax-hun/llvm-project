@@ -36,9 +36,9 @@ void nested() {
 struct [[gsl::Owner]] Wrapper2 {
   Doc d;
   void bad() {
-    string_view v = d.text();
+    string_view v = d.text(); // expected-warning {{object whose reference is captured is later invalidated}}
     d.s.push_back('y'); // expected-note {{invalidated here}}
-    sink = *v.data();   // expected-warning {{object whose reference is captured is later invalidated}} expected-note {{later used here}}
+    sink = *v.data();   // expected-note {{later used here}}
   }
 };
 
