@@ -211,3 +211,55 @@ void borrow_through_conditional_accessor(bool c) {
   w.d.text += "x";                              // expected-note 2 {{invalidated here}}
   sink = *v.data();                             // expected-note 2 {{later used here}}
 }
+
+//===----------------------------------------------------------------------===//
+// The wildcard must match on BOTH sides.
+//
+// `.*` stands for zero or more elements wherever it appears. A matcher that
+// backtracks only on wildcards in one sequence makes a `.*` in the other behave
+// as exactly one element, so the comparison becomes length-sensitive:
+// `$this.node.v` would not match `$this.*.s` even though `.*` may expand to
+// `node.v`. Since divergesFrom is built on isPrefixOf, the two paths would then
+// be declared PROVABLY DISJOINT -- the unsoundness `.*` exists to prevent.
+//===----------------------------------------------------------------------===//
+
+struct Elem { string s; };
+struct Level { std::vector<Elem> v; };
+
+struct Deep {
+  Level node;
+  Elem &first() [[clang::lifetimebound]] { return node.v[0]; }
+  void bug() {
+    // loan path `$this.*.s` vs mutated path `$this.node.v`: different lengths,
+    // and the wildcard sits on the loan side.
+    string_view sv = first().s; // expected-warning {{object whose reference is captured is later invalidated}}
+    node.v.clear();             // expected-note {{invalidated here}}
+    sink = *sv.data();          // expected-note {{later used here}}
+  }
+};
+
+// The same through a free function, so it does not depend on `this`.
+Elem &firstOf(Deep &d [[clang::lifetimebound]]);
+void bug_free() {
+  Deep d;
+  string_view sv = firstOf(d).s; // expected-warning {{object whose reference is captured is later invalidated}}
+  d.node.v.clear();              // expected-note {{invalidated here}}
+  sink = *sv.data();             // expected-note {{later used here}}
+}
+
+// ACCEPTED IMPRECISION: once a borrow is imprecise, a sibling mutation is
+// reported even though it cannot reach it. The accessor's result is only known
+// to be "somewhere inside `this`", so `$this.*.s` may expand to cover `b` --
+// the paths are genuinely not provably disjoint, and a may-analysis must
+// report. Sibling precision survives for borrows that name their field
+// (see the pairs above); it is the imprecision, not the fix, that costs it.
+struct TwoLevels {
+  Level a;
+  Level b;
+  Elem &firstA() [[clang::lifetimebound]] { return a.v[0]; }
+  void clean() {
+    string_view sv = firstA().s; // expected-warning {{object whose reference is captured is later invalidated}}
+    b.v.clear();                 // expected-note {{invalidated here}}
+    sink = *sv.data();           // expected-note {{later used here}}
+  }
+};

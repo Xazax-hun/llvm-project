@@ -261,39 +261,48 @@ public:
   void dump(llvm::raw_ostream &OS) const;
 
 private:
-  /// Wildcard prefix match: can `Pat` describe a prefix of `Path`, treating each
-  /// `Interior` element in either sequence as zero or more elements?
+  /// Wildcard prefix match: may `Pat` describe a prefix of `Path`, treating an
+  /// `Interior` element on EITHER side as zero or more elements?
   ///
-  /// The classic greedy glob algorithm, in O(n): walk both sequences, and on a
-  /// wildcard remember where to backtrack to if the rest fails to line up.
+  /// Both sides matter. A greedy glob that backtracks only on wildcards in
+  /// `Pat` makes an `Interior` in `Path` behave as *exactly one* element, so the
+  /// match becomes length-sensitive: `[node, v]` would not match `[*, s]` even
+  /// though `.*` may expand to `node.v`. That understates matching, and since
+  /// `divergesFrom` is built on this, the two paths are then declared PROVABLY
+  /// DISJOINT -- the unsoundness `Interior` exists to prevent.
+  ///
+  /// Exhaustive search rather than a greedy walk: paths are a handful of
+  /// elements, and the greedy formulation is what got this wrong.
   static bool elementsMayPrefix(llvm::ArrayRef<PathElement> Pat,
                                 llvm::ArrayRef<PathElement> Path) {
-    size_t P = 0, S = 0;
-    size_t StarP = static_cast<size_t>(-1), StarS = 0;
-    while (S < Path.size()) {
-      if (P < Pat.size() && Pat[P].isInterior()) {
-        // Wildcard: try matching zero elements first, and record the position so
-        // a later mismatch can consume one more.
-        StarP = P++;
-        StarS = S;
-      } else if (P < Pat.size() &&
-                 (Path[S].isInterior() || Pat[P] == Path[S])) {
-        ++P;
-        ++S;
-      } else if (StarP != static_cast<size_t>(-1)) {
-        // Mismatch after a wildcard: let it absorb one more element.
-        P = StarP + 1;
-        S = ++StarS;
-      } else {
-        // `Pat` ran out with elements left in `Path`: it is a proper prefix,
-        // which is a match. Anything else is a genuine mismatch.
-        return P >= Pat.size();
-      }
+    return elementsMayPrefixFrom(Pat, 0, Path, 0, /*Loose=*/false);
+  }
+
+  /// \p Loose becomes true once a wildcard has absorbed part of the other
+  /// sequence. The two are then no longer aligned element-for-element, so `Pat`
+  /// running past the end of `Path` no longer proves it denotes deeper storage:
+  /// the wildcard may have stood for fewer elements than it consumed.
+  static bool elementsMayPrefixFrom(llvm::ArrayRef<PathElement> Pat, size_t P,
+                                    llvm::ArrayRef<PathElement> Path, size_t S,
+                                    bool Loose) {
+    if (P == Pat.size())
+      return true; // `Pat` consumed: it is a prefix.
+    if (Pat[P].isInterior()) {
+      for (size_t K = S; K <= Path.size(); ++K)
+        if (elementsMayPrefixFrom(Pat, P + 1, Path, K, Loose || K > S))
+          return true;
+      return false;
     }
-    // Trailing wildcards may match the empty remainder.
-    while (P < Pat.size() && Pat[P].isInterior())
-      ++P;
-    return P >= Pat.size();
+    if (S == Path.size())
+      return Loose;
+    if (Path[S].isInterior()) {
+      for (size_t K = P; K <= Pat.size(); ++K)
+        if (elementsMayPrefixFrom(Pat, K, Path, S + 1, Loose || K > P))
+          return true;
+      return false;
+    }
+    return Pat[P] == Path[S] &&
+           elementsMayPrefixFrom(Pat, P + 1, Path, S + 1, Loose);
   }
 
   AccessPath(Kind K, const ParmVarDecl *PVD) : K(K), Root(PVD) {}
