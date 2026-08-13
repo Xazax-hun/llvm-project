@@ -138,16 +138,27 @@ int constOwnerFieldIsClean(ConstHolder &c [[clang::noescape]]) {
 }
 
 //===----------------------------------------------------------------------===//
-// Conservative cross-instance behavior: field loans are FieldDecl-rooted and
-// instance-insensitive, so a mutation of one instance is assumed to invalidate
-// a view into another instance of the same type. Sound, but an over-
-// approximation (documented).
+// Cross-instance precision: two distinct local variables are distinct objects,
+// so mutating one cannot reach a view into the other. This used to be reported:
+// a field borrow was rooted at the FieldDecl and thus instance-insensitive, so
+// `s1.field` and `s2.field` were indistinguishable. Field-sensitive access paths
+// root the borrow at the variable, which makes the two provably disjoint.
 //===----------------------------------------------------------------------===//
 
-int crossInstanceConservative() {
+int crossInstanceIsPrecise() {
   S s1, s2;
+  string_view sv = s1.field;
+  s2.grow(); // no-warning: mutating 's2' cannot reach a view into 's1'
+  return sv.size();
+}
+
+// Aliasing is still caught: a reference is another NAME for an object, not
+// another object, so its borrows are rooted at the referent.
+int aliasedInstanceStillReports() {
+  S s1;
+  S &r = s1;
   string_view sv = s1.field; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
-  s2.grow();                 // expected-note {{assumed to be invalidated by this operation}}
+  r.grow();                  // expected-note {{assumed to be invalidated by this operation}}
   return sv.size();
 }
 

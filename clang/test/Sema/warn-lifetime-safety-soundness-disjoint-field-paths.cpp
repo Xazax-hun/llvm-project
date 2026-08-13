@@ -137,3 +137,37 @@ void container_same_field_reports() {
   V.A.push_back(1);  // expected-note {{invalidated here}}
   sink = *P ? 1 : 0; // expected-note {{later used here}}
 }
+
+//===----------------------------------------------------------------------===//
+// Distinct VARIABLES are distinct objects, decidable without any field.
+//===----------------------------------------------------------------------===//
+
+struct Box {
+  string S;
+  void grow();
+};
+
+void distinct_locals_are_clean() {
+  Box A, B;
+  string_view V = A.S;
+  B.grow(); // no-warning: mutating 'B' cannot reach 'A'
+  sink = *V.data();
+}
+
+// A reference is another NAME for an object, not another object: its borrows
+// are rooted at the referent, so this is still reported.
+void reference_alias_reports() {
+  Box A;
+  Box &R = A;
+  string_view V = A.S; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  R.grow();            // expected-note {{assumed to be invalidated by this operation}}
+  sink = *V.data();
+}
+
+// Two PARAMETERS may be bound to the same object by the caller, so they are not
+// provably disjoint and the mutation must still be assumed to reach the borrow.
+void params_may_alias(Box &X [[clang::noescape]], Box &Y [[clang::noescape]]) {
+  string_view V = X.S; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  Y.grow();            // expected-note {{assumed to be invalidated by this operation}}
+  sink = *V.data();
+}

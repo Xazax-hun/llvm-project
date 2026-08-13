@@ -148,6 +148,22 @@ static const FieldDecl *lastNamedField(const AccessPath &AP) {
   return nullptr;
 }
 
+/// True if `A` and `B` provably denote storage that cannot overlap.
+///
+/// Two cases are decidable from the paths alone:
+///   - same root, diverging paths: `t.a` vs `t.b` are disjoint subobjects.
+///   - distinct local/global VARIABLES: `a` and `b` are distinct objects, so
+///     nothing below one can be storage below the other. This does not hold for
+///     the other root kinds -- two placeholders (`$this`, a parameter) may well
+///     be bound to the same object by the caller, and two temporaries or heap
+///     allocations are compared by expression, not by identity.
+static bool pathsCannotOverlap(const AccessPath &A, const AccessPath &B) {
+  if (A.divergesFrom(B))
+    return true;
+  const ValueDecl *VA = A.getAsValueDecl(), *VB = B.getAsValueDecl();
+  return VA && VB && VA->getCanonicalDecl() != VB->getCanonicalDecl();
+}
+
 /// True if loan `L` borrows a subobject below its root -- i.e. its path names
 /// at least one field -- and that field is a (possibly transitive / inherited)
 /// member of `RD`.
@@ -1088,12 +1104,11 @@ public:
         // See IsExactInvalidated: containment, not equality.
         if (AP.isPrefixOf(L->getAccessPath()))
           return true;
-        // Two paths under a common root that are neither a prefix of the other
-        // denote provably disjoint storage (`t.a` vs `t.b`), so mutating one
-        // cannot reach a borrow of the other. Field-sensitive paths are what
-        // make this decidable; without them the type-based fallback below would
-        // flag any same-typed sibling.
-        if (AP.divergesFrom(L->getAccessPath()))
+        // Storage the mutation provably cannot reach: disjoint subobjects of a
+        // common root (`t.a` vs `t.b`), or distinct variables (`a` vs `b`).
+        // Without this the type-based fallback below flags any same-typed
+        // sibling or same-typed neighbouring local.
+        if (pathsCannotOverlap(AP, L->getAccessPath()))
           continue;
         // Invalidating an object also invalidates borrows into its owner fields
         // (a non-const member call may reallocate one). Same-instance borrows
