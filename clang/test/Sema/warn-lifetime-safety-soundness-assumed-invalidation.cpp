@@ -274,3 +274,68 @@ void nested_wrapper_conditional_base(bool c) {
   (c ? a : b).in.grow(); // expected-note {{assumed to be invalidated by this operation}}
   (void)r;
 }
+
+//===----------------------------------------------------------------------===//
+// A pointer or reference to an ARRAY of owners reaches the elements, so it is
+// owner-mutating in exactly the way a reference to a single owner is: the callee
+// can reallocate `a[0]`. The array dimensions have to be peeled to see that --
+// an array type is not itself a gsl::Owner and has no CXXRecordDecl, so testing
+// the pointee directly finds no owner and the gate never opens.
+//===----------------------------------------------------------------------===//
+
+void mutate_arr(vector<int> (&a)[2]);
+void mutate_arr_ptr(vector<int> (*a)[2]);
+void read_arr(const vector<int> (&a)[2]);
+
+void owner_array_ref_warns() {
+  vector<int> a[2];
+  a[0].push_back(42);
+  int &r = a[0][0];  // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  mutate_arr(a);     // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+void owner_array_ptr_warns() {
+  vector<int> a[2];
+  a[0].push_back(42);
+  int &r = a[0][0];    // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  mutate_arr_ptr(&a);  // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// An array whose element is a record that *contains* an owner is the same
+// situation: the peeled element type is what the record walk needs to see.
+struct Box {
+  vector<int> v;
+};
+void mutate_boxes(Box (&b)[2]);
+
+void box_array_ref_warns() {
+  Box b[2];
+  b[0].v.push_back(42);
+  int &r = b[0].v[0];  // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  mutate_boxes(b);     // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// An array of CONST owners cannot be reallocated through the parameter. The
+// qualifier sits on the element type, so it is only visible after peeling.
+void const_owner_array_silent() {
+  vector<int> a[2];
+  a[0].push_back(42);
+  int &r = a[0][0];
+  read_arr(a); // no-warning
+  (void)r;
+}
+
+// An array of non-owners reaches no owner at all.
+void mutate_ints(int (&a)[2]);
+
+void nonowner_array_silent() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  int ints[2];
+  mutate_ints(ints); // no-warning
+  (void)r;
+}

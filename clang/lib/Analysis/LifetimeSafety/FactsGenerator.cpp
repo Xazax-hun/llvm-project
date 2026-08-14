@@ -199,7 +199,12 @@ static bool paramCanMutateThrough(QualType PT) {
 /// invalidation and argument-overlap checks.
 static bool paramMayMutateOwner(QualType PT) {
   if (PT->isPointerType() || PT->isReferenceType()) {
-    QualType Pointee = PT->getPointeeType();
+    // A pointer or reference to an ARRAY reaches the elements, so the element
+    // type decides the hazard: `std::string (&)[2]` lets the callee reallocate
+    // `arr[0]` exactly as `std::string &` does. Peel before every test below,
+    // including the const one -- an array of const elements carries the
+    // qualifier on the element type, not on the array.
+    QualType Pointee = arrayElementType(PT->getPointeeType());
     if (Pointee.isConstQualified())
       return false;
     if (isGslOwnerType(Pointee))
