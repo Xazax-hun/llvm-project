@@ -3003,6 +3003,44 @@ static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
   return RD->getIdentifier() && Erasing.contains(RD->getName());
 }
 
+/// True if \p RD (or a base) declares a class-specific deallocation function that
+/// is user code and does not carry the destruction-order promise.
+///
+/// A class-specific `operator delete` runs when an owner of the type destroys it
+/// -- `std::unique_ptr<T>`'s destructor calls it -- so it is shutdown code just as
+/// a destructor is. It is not reached by the destructor rules at all: it is not
+/// the destructor, and a trivially destructible type has no destructor to check,
+/// which is exactly the case where an owner of it still runs this function.
+static bool hasUncheckedDeallocationFunction(const CXXRecordDecl *RD) {
+  if (!RD || !RD->hasDefinition())
+    return false;
+  ASTContext &Ctx = RD->getASTContext();
+  auto Declares = [&](const CXXRecordDecl *R) {
+    for (OverloadedOperatorKind OO : {OO_Delete, OO_Array_Delete}) {
+      DeclarationName Name = Ctx.DeclarationNames.getCXXOperatorName(OO);
+      for (const NamedDecl *ND : R->lookup(Name)) {
+        const auto *FD = dyn_cast<FunctionDecl>(ND);
+        if (!FD || FD->isImplicit())
+          continue;
+        // The standard library's own deallocation functions do not reach user
+        // globals, and neither does anything else in a system header.
+        if (lifetimes::isInStlNamespace(FD) ||
+            Ctx.getSourceManager().isInSystemHeader(FD->getLocation()))
+          continue;
+        if (!lifetimes::carriesDestructionOrderPromise(FD))
+          return true;
+      }
+    }
+    return false;
+  };
+  if (Declares(RD))
+    return true;
+  // An inherited one is found by the same lookup `delete` performs.
+  return !RD->forallBases([&](const CXXRecordDecl *Base) {
+    return !Declares(Base);
+  });
+}
+
 /// True if destroying an object of type \p QT at shutdown cannot observe another
 /// object of static storage duration.
 ///
@@ -3022,9 +3060,16 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0) {
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  // A class-specific deallocation function is shutdown code that is not a
+  // destructor, so it has to be tested BEFORE the trivially-destructible
+  // shortcut -- a type with no destructor at all is precisely the case where
+  // that shortcut said "nothing runs" while an owner of the type still called
+  // this function.
+  if (hasUncheckedDeallocationFunction(RD))
+    return false;
   if (QT.isDestructedType() == QualType::DK_none)
     return true; // nothing runs at shutdown
-  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD)
     return true; // no destructor to run
   // An annotated type still has to be safe in its subobjects: the annotation is a
@@ -3086,6 +3131,29 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   if (lifetimes::carriesDestructionOrderPromise(FD))
     return true;
   if (lifetimes::isInStlNamespace(FD))
+    return true;
+  // Anything else declared in a system header is library code that does not name
+  // a user's globals: `free`, `memcpy`, and the rest of libc reach nothing that
+  // is destroyed at shutdown. `std::free` is a using-declaration of the global
+  // `::free`, so the namespace test above does not cover it -- and a replaced
+  // global `operator delete` has to call it.
+  //
+  // What a library function CAN do is call back into user code, through a functor
+  // template argument or a function-pointer parameter. That is not decided here:
+  // the user hook itself must carry the promise, which is checked where the type
+  // supplying it is judged.
+  if (FD->getASTContext().getSourceManager().isInSystemHeader(FD->getLocation()))
+    return true;
+  // The global allocation and deallocation functions the implementation provides
+  // are runtime code that cannot reach a user's globals. This matters because
+  // annotating a class-specific `operator delete` is how a type with one becomes
+  // usable at static storage duration, and the natural body of such a function
+  // forwards to `::operator delete`. Declared implicitly when <new> is not
+  // included, and by <new> itself otherwise. A user-REPLACED one is not exempt:
+  // that is ordinary user code and follows the ordinary rule.
+  if (FD->isReplaceableGlobalAllocationFunction() &&
+      (FD->isImplicit() || FD->getASTContext().getSourceManager().isInSystemHeader(
+                               FD->getLocation())))
     return true;
   // Note what is deliberately absent: a NON-DESTRUCTOR member of a
   // 'destruction_order_safe' CLASS is not safe on the class's say-so. The class
@@ -3340,10 +3408,14 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       bool Promised = lifetimes::carriesDestructionOrderPromise(FD);
       // '__attribute__((destructor))' registers a function to run during shutdown
       // without it being the destructor of anything, so the variable-level rule
-      // never reaches it. It is subject to exactly the same hazard, so hold it to
-      // the same requirements -- no annotation needed, since declaring it a
-      // shutdown handler IS the declaration that it runs then.
-      bool ShutdownHandler = FD->hasAttr<DestructorAttr>();
+      // never reaches it. A user-REPLACED global `operator delete` (or `new`) is
+      // the same situation from the other direction: it runs whenever anything is
+      // freed, including while static objects are being destroyed, and there is no
+      // type at fault to ban. Both are subject to exactly the same hazard, so hold
+      // them to the same requirements -- no annotation needed, since writing them
+      // at all IS the declaration that they run then.
+      bool ShutdownHandler = FD->hasAttr<DestructorAttr>() ||
+                             FD->isReplaceableGlobalAllocationFunction();
       if (!Promised && !ShutdownHandler)
         return true;
       // Verified independently, right here. Callees are not followed: they must

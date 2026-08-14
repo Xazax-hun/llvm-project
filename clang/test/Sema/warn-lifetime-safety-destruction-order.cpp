@@ -520,6 +520,75 @@ __attribute__((destructor(101))) static void late() {
 __attribute__((destructor(101))) static void late_ok() { sink = 0; } // no-warning
 
 //===----------------------------------------------------------------------===//
+// A deallocation function is shutdown code, and is not a destructor.
+//
+// A class-specific `operator delete` runs when an owner of the type destroys it
+// -- `std::unique_ptr<T>`'s destructor calls it -- so it is user code that runs at
+// shutdown. Nothing in the destructor rules reached it: it is not the destructor,
+// and a TRIVIALLY DESTRUCTIBLE type has no destructor to check, which is exactly
+// the case where an owner of it still calls this function. So `Foo` below was a
+// "safe" type and `std::unique_ptr<Foo>` a legal static, while arbitrary user code
+// ran during static destruction.
+//===----------------------------------------------------------------------===//
+
+using size_t = decltype(sizeof(0));
+
+// Trivially destructible, so no destructor runs -- but this does.
+struct FooDealloc {
+  int v;
+  static void operator delete(void *, size_t);
+};
+
+// Banned as a static, because destroying the unique_ptr calls the above.
+std::unique_ptr<FooDealloc> g_up_dealloc; // expected-warning {{whose destructor is not known to be safe}}
+// A member of that type is the same situation, reported by the subobject walk.
+struct [[clang::destruction_order_safe]] HoldsDealloc {
+  FooDealloc f; // expected-warning {{its member 'f' has type 'FooDealloc'}}
+  ~HoldsDealloc() {}
+};
+
+// The array form is the same.
+struct BarDealloc {
+  int v;
+  static void operator delete[](void *, size_t);
+};
+std::unique_ptr<BarDealloc[]> g_up_dealloc_arr; // expected-warning {{whose destructor is not known to be safe}}
+
+// Annotating the deallocation function is what makes the type usable again -- and
+// puts that function's body through the same verifier. (A `void *` parameter is
+// opaque, so it draws -Wlifetime-safety-unannotated-indirection under the full
+// soundness set -- unrelated to destruction order.)
+struct SafeDealloc {
+  int v;
+  // soundness-warning@+1 {{parameter that can hold a borrow is not annotated}}
+  [[clang::destruction_order_safe]] static void operator delete(void *, size_t) {}
+};
+std::unique_ptr<SafeDealloc> g_up_safe_dealloc; // no-warning
+
+struct LeakyDealloc {
+  int v;
+  // soundness-warning@+1 {{parameter that can hold a borrow is not annotated}}
+  [[clang::destruction_order_safe]] static void operator delete(void *, size_t) {
+    sink = (char)g_counter.n; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+
+// An inherited one is found by the same lookup `delete` performs.
+struct DerivesDealloc : FooDealloc {};
+std::unique_ptr<DerivesDealloc> g_up_derived_dealloc; // expected-warning {{whose destructor is not known to be safe}}
+
+// A user-REPLACED global deallocation function runs whenever anything is freed,
+// including while static objects are being destroyed, and there is no type at
+// fault to ban -- so like '__attribute__((destructor))' it is verified on sight,
+// with no annotation required. (The implementation's own, declared implicitly or
+// by <new>, is exempt: it cannot reach a user's globals, and an annotated
+// class-specific `operator delete` has to be able to forward to it.)
+// soundness-warning@+1 {{parameter that can hold a borrow is not annotated}}
+void operator delete(void *p) noexcept {
+  sink = (char)g_counter.n; // expected-warning {{'operator delete' runs during static destruction but references 'g_counter'}}
+}
+
+//===----------------------------------------------------------------------===//
 // A lambda declared outside the verified body.
 //===----------------------------------------------------------------------===//
 
