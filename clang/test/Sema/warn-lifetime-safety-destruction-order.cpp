@@ -12,6 +12,14 @@ template <class... Ts> struct variant {
   variant();
   ~variant();
 };
+// Minimal type-erasing callable: the target it dispatches to appears nowhere in
+// the type, which is what makes invoking it an indirect call.
+template <class Sig> struct function {
+  function();
+  template <class F> function(F);
+  ~function();
+  void operator()() const;
+};
 } // namespace std
 
 volatile char sink;
@@ -130,40 +138,39 @@ struct [[clang::destruction_order_safe]] CallsConsteval {
   ~CallsConsteval() { n = immediate(); } // no-warning
 };
 
-// A merely `constexpr` callee can be called at RUNTIME, so it is verified rather
-// than trusted -- its body is necessarily available, which makes requiring an
-// annotation on it busywork and exempting it outright a hole. A pure one passes.
+// `constexpr` is NOT an exemption. Called in a constant-evaluated context it can
+// do no harm, and such contexts are skipped wholesale (see below). Called at
+// RUNTIME it is an ordinary call and follows the ordinary rule: the callee must
+// carry the promise. Following constexpr bodies instead was tried and dropped --
+// it made the rule depend on what happened to be visible, and reported the same
+// helper once per caller.
 constexpr int doubled(int x) { return x * 2; }
 struct [[clang::destruction_order_safe]] CallsConstexpr {
   int n = 0;
-  ~CallsConstexpr() { n = doubled(3); } // no-warning
-};
-
-// ...and one that reaches a global does not. The global access has to sit on a
-// conditional path -- a constexpr function that *unconditionally* reads a global
-// never produces a constant expression and is ill-formed -- but that is exactly
-// the shape that is valid at compile time and dangerous at run time.
-// The warning lands on the offending reference inside `leaky`; the note points at
-// the call that reached it, so the chain from the destructor is visible.
-constexpr int leaky(bool b) {
-  return b ? g_counter.n : 0; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
-}
-struct [[clang::destruction_order_safe]] CallsLeakyConstexpr {
-  int n = 0;
-  ~CallsLeakyConstexpr() {
-    n = leaky(true); // expected-note {{reached through 'leaky', which is 'constexpr' but is called here at runtime}}
+  ~CallsConstexpr() {
+    n = doubled(3); // expected-warning {{calls 'doubled', which is not}}
   }
 };
 
-// Recursion in a verified constexpr callee terminates.
-constexpr int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
-struct [[clang::destruction_order_safe]] CallsRecursive {
+// Annotating it is what makes the call legal -- and puts its own body through the
+// same check.
+[[clang::destruction_order_safe]] constexpr int tripled(int x) { return x * 3; }
+struct [[clang::destruction_order_safe]] CallsAnnotatedConstexpr {
   int n = 0;
-  ~CallsRecursive() { n = fib(5); } // no-warning
+  ~CallsAnnotatedConstexpr() { n = tripled(3); } // no-warning
 };
 
+// ...and once annotated, a constexpr function that reaches a global is reported in
+// its own right. (The access has to sit on a conditional path: one that
+// *unconditionally* reads a global never produces a constant expression and is
+// ill-formed -- yet this shape is valid at compile time and dangerous at runtime.)
+[[clang::destruction_order_safe]] constexpr int leaky(bool b) {
+  return b ? g_counter.n : 0; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+}
+
 // A manifestly constant-evaluated subexpression is computed at compile time, so
-// nothing in it runs at shutdown.
+// nothing in it runs at shutdown -- and no annotation is needed on the callee.
+constexpr int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 struct [[clang::destruction_order_safe]] ConstantEvaluated {
   int n = 0;
   ~ConstantEvaluated() {
@@ -177,6 +184,32 @@ struct [[clang::destruction_order_safe]] Indirect {
   ~Indirect() {
     fp(); // expected-warning {{performs an indirect call, whose target cannot be checked}} \
           // soundness-warning {{call through a function pointer}}
+  }
+};
+
+// A member function pointer is the same situation.
+struct Callee2 {
+  void go();
+};
+struct [[clang::destruction_order_safe]] IndirectMember {
+  void (Callee2::*pmf)() = nullptr;
+  ~IndirectMember() {
+    Callee2 c;
+    (c.*pmf)(); // expected-warning {{performs an indirect call, whose target cannot be checked}} \
+                // soundness-warning {{call through a function pointer}}
+  }
+};
+
+// Invoking a TYPE-ERASING callable is an indirect call wearing a direct call's
+// clothes: it resolves to a real `operator()` in namespace std, which would
+// otherwise be trusted, while the target appears nowhere in the type. Reached
+// through a POINTER member here, since a `std::function` member or local is
+// already refused as a type whose destruction is unchecked.
+struct [[clang::destruction_order_safe]] InvokesErased {
+  // soundness-warning@+1 {{uses more than one level of indirection}}
+  std::function<void()> *pf = nullptr; // pointer: trivially destructible
+  ~InvokesErased() {
+    (*pf)(); // expected-warning {{performs an indirect call, whose target cannot be checked}}
   }
 };
 
@@ -327,7 +360,9 @@ struct HonestOverride : Ticker {
 
 struct [[clang::destruction_order_safe]] Held {
   string s;
-  char read() const { return *s.data(); }
+  // The class attribute is a promise about destruction, not a warrant for every
+  // method, so an accessor called from a verified body carries its own.
+  [[clang::destruction_order_safe]] char read() const { return *s.data(); }
 };
 extern Held g_held;
 
@@ -350,3 +385,97 @@ struct [[clang::destruction_order_safe]] Plain2 {
 Plain2 g_plain2;
 constexpr int g_const2 = 7;
 const char *g_lit2 = "literal"; // points at immortal storage
+
+//===----------------------------------------------------------------------===//
+// Destroying an object is never a `CallExpr`.
+//
+// There is no AST node for the implicit destruction of a local, a temporary, or
+// the target of `delete`, so a body that creates one runs that destructor with
+// nothing checking it. The type has to be tested directly, as the record-level
+// walk already does for bases and members.
+//===----------------------------------------------------------------------===//
+
+struct Peek {
+  ~Peek(); // unannotated: not known to be safe
+};
+
+struct [[clang::destruction_order_safe]] MakesLocal {
+  ~MakesLocal() {
+    Peek p; // expected-warning {{creates a local of type 'Peek', whose destructor is not known to be safe}}
+    (void)p;
+  }
+};
+
+struct [[clang::destruction_order_safe]] MakesTemporary {
+  ~MakesTemporary() {
+    Peek(); // expected-warning {{creates a temporary of type 'Peek', whose destructor is not known to be safe}}
+  }
+};
+
+struct [[clang::destruction_order_safe]] Deletes {
+  Peek *p;
+  ~Deletes() {
+    delete p; // expected-warning {{destroys an object of type 'Peek', whose destructor is not known to be safe}}
+  }
+};
+
+// A local of a safe type is fine.
+struct [[clang::destruction_order_safe]] MakesSafeLocal {
+  ~MakesSafeLocal() {
+    Counter c; // no-warning
+    (void)c;
+    string s; // no-warning: standard library
+    (void)s;
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Implicit code runs at shutdown too.
+//===----------------------------------------------------------------------===//
+
+// A default argument is evaluated at the CALL, so it can name a global even
+// though nothing in the written body does.
+[[clang::destruction_order_safe]] void consume(char c = (char)g_counter.n); // expected-warning {{references 'g_counter'}}
+struct [[clang::destruction_order_safe]] UsesDefaultArg {
+  ~UsesDefaultArg() { consume(); }
+};
+
+// An NSDMI runs when the member is constructed, and names whatever it likes --
+// so an implicit constructor is not inert.
+struct Snoop {
+  char c = (char)g_counter.n; // expected-warning {{references 'g_counter'}}
+};
+struct [[clang::destruction_order_safe]] UsesNSDMI {
+  ~UsesNSDMI() {
+    Snoop s;
+    sink = s.c;
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Shutdown code that is not a destructor at all.
+//===----------------------------------------------------------------------===//
+
+// '__attribute__((destructor))' runs during shutdown without being the destructor
+// of anything, so the variable-level rule never reaches it. Declaring it a
+// shutdown handler IS the declaration that it runs then, so no annotation is
+// needed to subject it to the rules -- and the diagnostic says so, rather than
+// claiming the function carries a promise it does not.
+__attribute__((destructor(101))) static void late() {
+  sink = (char)g_counter.n; // expected-warning {{'late' runs during static destruction but references 'g_counter'}}
+}
+
+__attribute__((destructor(101))) static void late_ok() { sink = 0; } // no-warning
+
+//===----------------------------------------------------------------------===//
+// A lambda declared outside the verified body.
+//===----------------------------------------------------------------------===//
+
+// A lambda written inside the body is covered by the traversal, but one declared
+// at namespace scope is a separate function and follows the ordinary callee rule.
+constexpr auto peek_global = [](bool b) { return b ? (char)g_counter.n : 'x'; };
+struct [[clang::destruction_order_safe]] CallsOuterLambda {
+  ~CallsOuterLambda() {
+    sink = peek_global(true); // expected-warning {{calls 'operator()', which is not}}
+  }
+};

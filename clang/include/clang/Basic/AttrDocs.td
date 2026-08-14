@@ -4628,16 +4628,30 @@ function -- may only:
 * refrain from referencing any object of static storage duration whose type has a
   non-trivial destructor.
 
-A ``constexpr`` callee is neither trusted nor required to be annotated. It can be
-called at run time, where it may touch a global like any other function, so its
-body is verified instead -- which is always possible, since ``constexpr`` implies
-the definition is available. A manifestly constant-evaluated subexpression is
-skipped entirely: it is computed at compile time and nothing in it runs at
-shutdown.
+``constexpr`` is not an exemption. Called in a manifestly constant-evaluated
+context it can do no harm, and such contexts are skipped entirely -- they are
+computed at compile time and nothing in them runs at shutdown. Called at run time
+it is an ordinary call, so the callee must carry the promise like any other.
+
+Callees are not followed: each annotated function is verified in its own right.
+That keeps the check independent of whether a definition happens to be visible in
+this translation unit, so annotating is what propagates the requirement.
+
+The promise covers only the destructor of an annotated type, not its other
+members. A member function that can run during shutdown -- because a verified body
+calls it -- carries the attribute itself.
 
 The promise extends to subobjects. Bases and members run their own destructors as
 part of destroying the object, and those calls are implicit, so an annotated type
-must be built only from types that are themselves safe.
+must be built only from types that are themselves safe. For the same reason, a
+verified body may not create a local or temporary, nor ``delete`` an object, whose
+type is not safe: destroying it runs its destructor.
+
+An override of an annotated virtual function must carry the attribute too, since a
+call through the base is checked against the base's declaration.
+
+``__attribute__((destructor))`` functions are verified without any annotation:
+declaring one is already a statement that it runs during shutdown.
 
 Referencing a trivially destructible global is allowed: its storage outlives all
 destructors, so no ordering hazard exists.
@@ -4651,7 +4665,9 @@ applies through the variadic argument list of ``std::variant`` or ``std::tuple``
 Types that ERASE what they own -- ``std::function``, ``std::any``,
 ``std::move_only_function``, ``std::packaged_task`` -- are never safe. Their
 destructor runs a destructor that does not appear in the type, so there is nothing
-to check.
+to check. For the same reason, *invoking* one is treated as an indirect call: ``f()``
+on a ``std::function`` resolves to a real ``operator()`` in ``std``, but the target
+it dispatches to appears nowhere in the type.
 
 .. code-block:: c++
 

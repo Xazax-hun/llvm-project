@@ -3083,18 +3083,17 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
     return true;
   if (FD->hasAttr<DestructionOrderSafeAttr>())
     return true;
-  // An implicitly defined special member only touches subobjects of its own
-  // class; it has no way to name a global.
-  if (FD->isImplicit())
-    return true;
   if (lifetimes::isInStlNamespace(FD))
     return true;
-  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
-    const CXXRecordDecl *P = MD->getParent();
-    if (P->hasAttr<DestructionOrderSafeAttr>() ||
-        lifetimes::isInStlNamespace(P))
+  // Note what is deliberately absent: a member of a 'destruction_order_safe'
+  // CLASS is not safe on the class's say-so. The class attribute is a promise
+  // about destruction -- that the type may hold static storage duration and its
+  // destructor is verified -- not a blanket warrant for every method. Trusting it
+  // that way made the attribute an escape hatch: annotate the class, then put the
+  // global access in any non-destructor member and nothing checked it.
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
+    if (lifetimes::isInStlNamespace(MD->getParent()))
       return true;
-  }
   return false;
 }
 
@@ -3106,39 +3105,52 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
 /// A lambda body is held to the same rules: it runs under the constraints of
 /// whatever invokes it, and the visitor descends into it naturally.
 namespace {
+/// Verifies one function body against the destruction-order rules.
+///
+/// Callees are NOT followed. The requirement is transitive by construction: a
+/// verified body may only call functions that are themselves
+/// 'destruction_order_safe', and each of those is verified in its own right when
+/// the walk reaches its declaration. Following callees instead would make a
+/// function checked or not depending on whether its definition happened to land in
+/// this TU -- the same order-dependence that made the incomplete-pointee case a
+/// bypass.
+///
+/// `constexpr` is not an exception. Called in a constant-evaluated context it can
+/// do no harm, and that context is skipped wholesale below; called at runtime it is
+/// an ordinary call and follows the ordinary rule.
 class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   Sema &S;
+  /// The function whose body this is; named as the subject of any diagnostic.
   const FunctionDecl *Subject;
-  /// Constexpr callees already being verified, to terminate on recursion.
-  llvm::SmallPtrSet<const FunctionDecl *, 8> &Visiting;
-  /// When set, a violation is additionally attributed to this callee, reached
-  /// from the call at \c ViaLoc.
-  const FunctionDecl *Via;
-  SourceLocation ViaLoc;
+  /// How the subject came to be checked: because it carries the promise (0), or
+  /// because it is a '__attribute__((destructor))' handler and so runs at shutdown
+  /// without claiming anything (1). Only the wording differs, but saying "is
+  /// 'destruction_order_safe'" about a function that is not would be a lie.
+  unsigned SubjectKind;
 
 public:
-  DestructionOrderSafeBodyChecker(
-      Sema &S, const FunctionDecl *Subject,
-      llvm::SmallPtrSet<const FunctionDecl *, 8> &Visiting,
-      const FunctionDecl *Via = nullptr, SourceLocation ViaLoc = {})
-      : S(S), Subject(Subject), Visiting(Visiting), Via(Via), ViaLoc(ViaLoc) {
-    ShouldVisitImplicitCode = false;
+  DestructionOrderSafeBodyChecker(Sema &S, const FunctionDecl *Subject,
+                                  unsigned SubjectKind)
+      : S(S), Subject(Subject), SubjectKind(SubjectKind) {
+    // Implicit code executes at shutdown too: a default argument is evaluated at
+    // the call site, so it can name a global even though nothing in the written
+    // body does.
+    ShouldVisitImplicitCode = true;
   }
 
   /// A manifestly constant-evaluated subexpression is computed at compile time,
-  /// so nothing inside it executes at shutdown. Do not look in at all.
+  /// so nothing inside it executes at shutdown. Do not look in at all. This is
+  /// what makes a `constexpr` callee harmless where it is genuinely evaluated at
+  /// compile time, without needing to reason about the callee itself.
   bool TraverseStmt(Stmt *St) override {
     if (isa_and_nonnull<ConstantExpr>(St))
       return true;
     return DynamicRecursiveASTVisitor::TraverseStmt(St);
   }
 
-  /// Points at the call that reached the offending body, so the chain from the
-  /// verified destructor to the violation is visible.
-  void noteVia() {
-    if (Via)
-      S.Diag(ViaLoc, diag::note_lifetime_safety_destruction_order_via) << Via;
-  }
+  /// `static_assert`'s condition is constant-evaluated, but it is not wrapped in a
+  /// ConstantExpr, so the check above does not see it.
+  bool TraverseStaticAssertDecl(StaticAssertDecl *) override { return true; }
 
   bool VisitDeclRefExpr(DeclRefExpr *DRE) override {
     const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
@@ -3151,8 +3163,7 @@ public:
       return true;
     S.Diag(DRE->getExprLoc(),
            diag::warn_lifetime_safety_destruction_order_global_ref)
-        << Subject << VD;
-    noteVia();
+        << Subject << SubjectKind << VD;
     return true;
   }
 
@@ -3161,48 +3172,88 @@ public:
     if (!Callee) {
       S.Diag(CE->getExprLoc(),
              diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
-          << Subject;
+          << Subject << SubjectKind;
       return true;
     }
-    if (isDestructionOrderSafeFunction(Callee))
-      return true;
-    // A lambda's call operator is implicitly constexpr, but its body is written
-    // lexically inside the enclosing function and the traversal already covers
-    // it. Recursing here as well would report the same violation twice.
+    // Invoking a TYPE-ERASING callable is an indirect call wearing a direct call's
+    // clothes: `f()` on a std::function resolves to std::function::operator(),
+    // which is a real callee in namespace std and so would be trusted -- while the
+    // target it dispatches to appears nowhere in the type. That is the same reason
+    // such a type can never be destruction-order-safe as a member, applied to
+    // invoking it rather than destroying it.
     if (const auto *MD = dyn_cast<CXXMethodDecl>(Callee))
-      if (MD->getParent()->isLambda())
-        return true;
-    // A `constexpr` callee reached at runtime is verified rather than trusted:
-    // its body is necessarily available (constexpr implies inline), so requiring
-    // an annotation on it would be busywork, and exempting it outright would
-    // miss a constexpr function that does touch a global.
-    if (Callee->isConstexpr()) {
-      const FunctionDecl *Def = Callee->getDefinition();
-      if (Def && Visiting.insert(Def).second) {
-        DestructionOrderSafeBodyChecker(S, Subject, Visiting, Def,
-                                        CE->getExprLoc())
-            .TraverseStmt(Def->getBody());
-        Visiting.erase(Def);
+      if (MD->getOverloadedOperator() == OO_Call &&
+          isTypeErasingStdType(MD->getParent())) {
+        S.Diag(CE->getExprLoc(),
+               diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
+            << Subject << SubjectKind;
         return true;
       }
-      if (Def)
-        return true; // already on the stack: recursion, nothing new to say
-    }
+    if (isDestructionOrderSafeFunction(Callee))
+      return true;
+    // A lambda's call operator declared inside the function being verified is
+    // already covered by this traversal -- its body is written here. One declared
+    // elsewhere is not, and follows the ordinary rule.
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(Callee))
+      if (MD->getParent()->isLambda() &&
+          MD->getParent()->getDeclContext() == Subject)
+        return true;
     S.Diag(CE->getExprLoc(),
            diag::warn_lifetime_safety_destruction_order_unsafe_call)
-        << Subject << Callee;
-    noteVia();
+        << Subject << SubjectKind << Callee;
     return true;
   }
 
   bool VisitCXXConstructExpr(CXXConstructExpr *CCE) override {
-    if (const CXXConstructorDecl *Ctor = CCE->getConstructor())
-      if (!isDestructionOrderSafeFunction(Ctor)) {
-        S.Diag(CCE->getExprLoc(),
-               diag::warn_lifetime_safety_destruction_order_unsafe_call)
-            << Subject << Ctor;
-        noteVia();
-      }
+    const CXXConstructorDecl *Ctor = CCE->getConstructor();
+    if (!Ctor)
+      return true;
+    // An IMPLICIT constructor has no body to inspect, but it is not inert: it runs
+    // the class's default member initializers, and an NSDMI names whatever it
+    // likes. (The comment that used to justify trusting implicit special members
+    // -- "only touches subobjects of its own class" -- overlooked exactly this.)
+    if (Ctor->isImplicit()) {
+      for (const FieldDecl *FD : Ctor->getParent()->fields())
+        if (const Expr *Init = FD->getInClassInitializer())
+          TraverseStmt(const_cast<Expr *>(Init));
+      return true;
+    }
+    if (!isDestructionOrderSafeFunction(Ctor)) {
+      S.Diag(CCE->getExprLoc(),
+             diag::warn_lifetime_safety_destruction_order_unsafe_call)
+          << Subject << SubjectKind << Ctor;
+    }
+    return true;
+  }
+
+  /// Destroying an object runs its destructor, and that is never a `CallExpr` --
+  /// there is no node in the AST for the implicit destruction of a local, a
+  /// temporary, or the target of `delete`. So the type has to be checked directly,
+  /// mirroring what the record-level walk already does for bases and members.
+  void checkDestroyedType(QualType QT, unsigned Kind, SourceLocation Loc) {
+    if (QT.isNull() || isDestructionOrderSafeType(QT))
+      return;
+    S.Diag(Loc, diag::warn_lifetime_safety_destruction_order_unsafe_object)
+        << Subject << SubjectKind << Kind << QT;
+  }
+
+  bool VisitDeclStmt(DeclStmt *DS) override {
+    for (const Decl *D : DS->decls())
+      if (const auto *VD = dyn_cast<VarDecl>(D))
+        // A static local is checked by the Walker as its own declaration; here we
+        // care about the automatic ones, destroyed as this body unwinds.
+        if (VD->hasLocalStorage())
+          checkDestroyedType(VD->getType(), /*local=*/0, VD->getLocation());
+    return true;
+  }
+
+  bool VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *BTE) override {
+    checkDestroyedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
+    return true;
+  }
+
+  bool VisitCXXDeleteExpr(CXXDeleteExpr *DE) override {
+    checkDestroyedType(DE->getDestroyedType(), /*destroys=*/2, DE->getExprLoc());
     return true;
   }
 };
@@ -3287,10 +3338,20 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       const auto *DD = dyn_cast<CXXDestructorDecl>(FD);
       bool SafeTypeDtor =
           DD && DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
-      if (!Annotated && !SafeTypeDtor)
+      // '__attribute__((destructor))' registers a function to run during shutdown
+      // without it being the destructor of anything, so the variable-level rule
+      // never reaches it. It is subject to exactly the same hazard, so hold it to
+      // the same requirements -- no annotation needed, since declaring it a
+      // shutdown handler IS the declaration that it runs then.
+      bool ShutdownHandler = FD->hasAttr<DestructorAttr>();
+      if (!Annotated && !SafeTypeDtor && !ShutdownHandler)
         return true;
-      llvm::SmallPtrSet<const FunctionDecl *, 8> Visiting;
-      DestructionOrderSafeBodyChecker(S, FD, Visiting)
+      // Verified independently, right here. Callees are not followed: they must
+      // carry the promise themselves, and the walk reaches each of them in turn.
+      DestructionOrderSafeBodyChecker(S, FD,
+                                      /*SubjectKind=*/Annotated || SafeTypeDtor
+                                          ? 0
+                                          : 1)
           .TraverseStmt(FD->getBody());
       return true;
     }
