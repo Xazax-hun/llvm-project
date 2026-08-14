@@ -313,3 +313,40 @@ struct KeepsPromise : Ticker {
 struct HonestOverride : Ticker {
   [[clang::destruction_order_safe]] void tick() override {}
 };
+
+//===----------------------------------------------------------------------===//
+// A borrow CAPTURED by a static-duration initializer.
+//
+// The verifier asks what names a destructor body mentions, so storing a reference
+// to another static object launders the victim's identity: `~Reader` looks like it
+// only touches `this`. The capture itself is the reportable event, and it happens
+// in the initializer -- which is a constant expression here, since binding a
+// reference to a global is constant-evaluable, so it was skipped as "cannot create
+// a dangling borrow". Binding a reference is exactly how one is created.
+//===----------------------------------------------------------------------===//
+
+struct [[clang::destruction_order_safe]] Held {
+  string s;
+  char read() const { return *s.data(); }
+};
+extern Held g_held;
+
+struct [[gsl::Pointer]] [[clang::destruction_order_safe]] Watcher {
+  Held &m;
+  ~Watcher() { sink = m.read(); }
+};
+// Reported at the variable whose initializer captured the borrow. The diagnostic
+// is -Wlifetime-safety-view-on-mutable-global, which is in the full soundness set
+// rather than the narrow destruction-order group.
+Watcher g_watcher{g_held}; // soundness-warning {{borrows from a mutable global or static object}}
+Held g_held{};
+
+// Negative: a static-duration variable capturing nothing stays clean, and a
+// constant initializer that cannot hold a borrow is not even analyzed.
+struct [[clang::destruction_order_safe]] Plain2 {
+  int n = 0;
+  ~Plain2() {}
+};
+Plain2 g_plain2;
+constexpr int g_const2 = 7;
+const char *g_lit2 = "literal"; // points at immortal storage

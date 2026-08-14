@@ -2076,6 +2076,21 @@ void FactsGenerator::handleExitBlock() {
       }
     }
 
+  // When the analyzed "body" is the INITIALIZER of a variable with static storage
+  // duration, whatever borrow it computed comes to rest in that variable -- which
+  // outlives the initializer by definition. Nothing else marks this: the borrow
+  // lives on the initializer expression's origin, not on any declaration's, so the
+  // loop above does not see it, and there is no use to anchor it either.
+  //
+  // Without this a borrow CAPTURED by a constant initializer is invisible, and
+  // that is precisely the static destruction-order hazard: `Reader r{v};` stores a
+  // reference to another static object, and `~Reader` reads it after `v` is gone.
+  if (const auto *VD = dyn_cast_if_present<VarDecl>(AC.getDecl()))
+    if (VD->hasGlobalStorage() && VD->getInit())
+      if (OriginNode *Init = getOriginNode(*VD->getInit()))
+        EscapesInCurrentBlock.push_back(
+            FactMgr.createFact<GlobalEscapeFact>(Init->getOriginID(), VD));
+
   // Soundness: keep the implicit object (`this`) origin live at function exit.
   // A borrow captured via [[clang::lifetime_capture_by(this)]] is modeled as a
   // flow into the whole-object `this` origin (we do not know which member holds

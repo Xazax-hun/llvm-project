@@ -571,8 +571,11 @@ S test(std::vector<int> a) {
                 // cfg-warning {{stack memory associated with parameter 'a' is returned}} cfg-note {{returned here}}
 }
 
-// FIXME: Detect this using the CFG-based lifetime analysis (global initialisation).
-auto s = S(std::vector<int>()); // expected-warning {{temporary whose address is used as value of local variable}}
+// Now detected by the CFG-based analysis too: the initializer's borrow comes to
+// rest in a variable of static storage duration, which outlives it.
+auto s = S(std::vector<int>()); // expected-warning {{temporary whose address is used as value of local variable}} \
+                                // cfg-warning {{stack memory associated with local temporary object escapes to the global variable 's' which will dangle}} \
+                                // cfg-note {{this global dangles}}
 
 // Verify no regression on the follow case.
 std::string_view test2(int i, std::optional<std::string_view> a) {

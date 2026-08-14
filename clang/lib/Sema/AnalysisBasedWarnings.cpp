@@ -2969,6 +2969,33 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
 /// Standard library types that ERASE the type of what they own: their destructor
 /// runs a destructor that does not appear anywhere in the type, so there is
 /// nothing to check. Such a type can never be assumed safe.
+/// True if a value of type \p QT could hold a borrow anywhere inside it -- a
+/// pointer, a reference, a view, or a record that transitively contains one.
+///
+/// Used only to decide whether analyzing an initializer is worth a CFG. It errs
+/// towards "yes": a missed borrow is a missed diagnostic, while a needless CFG is
+/// only compile time.
+static bool typeMayHoldBorrow(QualType QT, unsigned Depth = 0) {
+  if (Depth > 8)
+    return true; // unknown: assume it might
+  QT = QT.getNonReferenceType();
+  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
+    QT = AT->getElementType();
+  if (QT->isPointerType() || QT->isReferenceType() ||
+      lifetimes::isGslPointerType(QT))
+    return true;
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return RD != nullptr; // incomplete record: cannot rule it out
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (typeMayHoldBorrow(B.getType(), Depth + 1))
+      return true;
+  for (const FieldDecl *FD : RD->fields())
+    if (typeMayHoldBorrow(FD->getType(), Depth + 1))
+      return true;
+  return false;
+}
+
 static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
   static const llvm::StringSet<> Erasing = {
       "function", "move_only_function", "copyable_function", "any",
@@ -3302,9 +3329,14 @@ static void LifetimeSafetyFileVarInitAnalysis(
       if (!VD || !VD->isFileVarDecl() || !VD->hasInit() ||
           VD->getDeclContext()->isDependentContext())
         continue;
-      // A constant initializer performs no stores at runtime and cannot create
-      // a dangling borrow, so skip it rather than pay for a CFG.
-      if (VD->hasConstantInitialization())
+      // A constant initializer performs no stores at runtime, so it usually needs
+      // no CFG -- but it can still CAPTURE a borrow. Binding a reference or
+      // pointer to another object of static storage duration is a constant
+      // expression, and it is exactly the destruction-order hazard: the value is
+      // computed at compile time, yet the captured reference outlives whatever it
+      // refers to. So skip only when the variable cannot hold a borrow at all.
+      if (VD->hasConstantInitialization() &&
+          !typeMayHoldBorrow(VD->getType()))
         continue;
       if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
         continue;
