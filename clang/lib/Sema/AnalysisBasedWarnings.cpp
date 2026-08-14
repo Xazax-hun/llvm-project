@@ -3081,16 +3081,19 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   // DestructionOrderSafeBodyChecker::VisitCallExpr.
   if (FD->isConsteval())
     return true;
-  if (FD->hasAttr<DestructionOrderSafeAttr>())
+  // Carries the promise itself, or is the destructor of a class that does -- in
+  // either case its body goes through the verifier below.
+  if (lifetimes::carriesDestructionOrderPromise(FD))
     return true;
   if (lifetimes::isInStlNamespace(FD))
     return true;
-  // Note what is deliberately absent: a member of a 'destruction_order_safe'
-  // CLASS is not safe on the class's say-so. The class attribute is a promise
-  // about destruction -- that the type may hold static storage duration and its
-  // destructor is verified -- not a blanket warrant for every method. Trusting it
-  // that way made the attribute an escape hatch: annotate the class, then put the
-  // global access in any non-destructor member and nothing checked it.
+  // Note what is deliberately absent: a NON-DESTRUCTOR member of a
+  // 'destruction_order_safe' CLASS is not safe on the class's say-so. The class
+  // attribute is a promise about destruction -- that the type may hold static
+  // storage duration and its destructor is verified -- not a blanket warrant for
+  // every method. Trusting it that way made the attribute an escape hatch:
+  // annotate the class, then put the global access in any non-destructor member
+  // and nothing checked it.
   if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
     if (lifetimes::isInStlNamespace(MD->getParent()))
       return true;
@@ -3334,24 +3337,18 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
         return true;
       // Verify a body that carries the promise, either directly or by being the
       // destructor of a type that carries it.
-      bool Annotated = FD->hasAttr<DestructionOrderSafeAttr>();
-      const auto *DD = dyn_cast<CXXDestructorDecl>(FD);
-      bool SafeTypeDtor =
-          DD && DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
+      bool Promised = lifetimes::carriesDestructionOrderPromise(FD);
       // '__attribute__((destructor))' registers a function to run during shutdown
       // without it being the destructor of anything, so the variable-level rule
       // never reaches it. It is subject to exactly the same hazard, so hold it to
       // the same requirements -- no annotation needed, since declaring it a
       // shutdown handler IS the declaration that it runs then.
       bool ShutdownHandler = FD->hasAttr<DestructorAttr>();
-      if (!Annotated && !SafeTypeDtor && !ShutdownHandler)
+      if (!Promised && !ShutdownHandler)
         return true;
       // Verified independently, right here. Callees are not followed: they must
       // carry the promise themselves, and the walk reaches each of them in turn.
-      DestructionOrderSafeBodyChecker(S, FD,
-                                      /*SubjectKind=*/Annotated || SafeTypeDtor
-                                          ? 0
-                                          : 1)
+      DestructionOrderSafeBodyChecker(S, FD, /*SubjectKind=*/Promised ? 0 : 1)
           .TraverseStmt(FD->getBody());
       return true;
     }

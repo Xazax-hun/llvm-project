@@ -19191,9 +19191,13 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
     // then reports the untruth.
     // Same reasoning for '[[clang::destruction_order_safe]]': the callee check
     // resolves against the statically named method, so an override that drops the
-    // promise is never verified and runs unchecked at shutdown.
-    if (Old->hasAttr<DestructionOrderSafeAttr>() &&
-        !New->hasAttr<DestructionOrderSafeAttr>()) {
+    // promise is never verified and runs unchecked at shutdown. This matters most
+    // for a DESTRUCTOR, where the promise is usually written on the class rather
+    // than on the destructor itself -- and where dropping it also defeats the
+    // `delete` check, which can only judge the static type while dispatch picks
+    // the dynamic one.
+    if (lifetimes::carriesDestructionOrderPromise(Old) &&
+        !lifetimes::carriesDestructionOrderPromise(New)) {
       Diag(New->getLocation(),
            diag::warn_lifetime_safety_override_of_destruction_order_safe);
       Diag(Old->getLocation(), diag::note_overridden_virtual_function);

@@ -106,6 +106,17 @@ bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD) {
   return isNormalAssignmentOperator(FD);
 }
 
+bool carriesDestructionOrderPromise(const FunctionDecl *FD) {
+  if (!FD)
+    return false;
+  if (FD->hasAttr<DestructionOrderSafeAttr>())
+    return true;
+  // On a class, the attribute is a promise about that class's destructor.
+  if (const auto *DD = dyn_cast<CXXDestructorDecl>(FD))
+    return DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
+  return false;
+}
+
 bool isInStlNamespace(const Decl *D) {
   for (const DeclContext *DC = D->getDeclContext(); DC; DC = DC->getParent()) {
     if (DC->isStdNamespace())

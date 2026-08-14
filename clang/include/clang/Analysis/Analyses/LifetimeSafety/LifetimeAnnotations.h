@@ -75,6 +75,19 @@ getImplicitObjectParamLifetimeBoundAttr(const FunctionDecl *FD);
 /// method or because it's a normal assignment operator.
 bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD);
 
+/// Returns true if \p FD promises '[[clang::destruction_order_safe]]' -- that it
+/// does not observe another object of static storage duration, and so may run at
+/// shutdown in any order.
+///
+/// The attribute is written either on the function or on a CLASS, where it is a
+/// promise about that class's destructor. Both spellings have to answer this
+/// question the same way: the class-level form is what the documentation shows,
+/// and it is what makes a type legal to hold static storage duration, so if it
+/// did not also carry the promise onto the destructor then a derived class could
+/// override that destructor without promising anything and run unverified at
+/// shutdown.
+bool carriesDestructionOrderPromise(const FunctionDecl *FD);
+
 // Returns true if the implicit object argument (this) of a method call should
 // be tracked for GSL lifetime analysis. This applies to STL methods that return
 // pointers or references that depend on the lifetime of the object, such as

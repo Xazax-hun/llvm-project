@@ -324,7 +324,10 @@ int g_force_ok = (singleton<int>(), 0);
 // sibling attribute already enforces this.
 //===----------------------------------------------------------------------===//
 
-struct [[clang::destruction_order_safe]] Ticker {
+// The promise sits on the METHOD here, so this section is only about a
+// non-destructor virtual; the destructor case is below, where the class-level
+// spelling matters.
+struct Ticker {
   // expected-note@+1 {{overridden virtual function is here}}
   [[clang::destruction_order_safe]] virtual void tick() {}
   virtual ~Ticker() {}
@@ -346,6 +349,55 @@ struct KeepsPromise : Ticker {
 struct HonestOverride : Ticker {
   [[clang::destruction_order_safe]] void tick() override {}
 };
+
+// The promise is usually written on the CLASS, where it is a promise about that
+// class's destructor -- so the two spellings have to answer "does this carry the
+// promise?" the same way. Reading only the attribute on the destructor
+// declaration meant the class-level form (the one the documentation shows) made
+// the type legal to hold static storage duration, and legal to `delete`, while
+// never requiring a derived destructor to promise anything. `~Derived` then ran
+// unverified at shutdown -- and the `delete` check cannot cover it, since it can
+// only judge the static type while dispatch picks the dynamic one.
+struct [[clang::destruction_order_safe]] ClassPromise {
+  // expected-note@+1 2 {{overridden virtual function is here}}
+  virtual ~ClassPromise() = default;
+};
+
+struct DtorDropsClassPromise : ClassPromise {
+  // expected-warning@+1 {{does not carry that promise}}
+  ~DtorDropsClassPromise() override { sink = (char)g_counter.n; }
+};
+
+// An IMPLICIT destructor is an override too, and is reported at the class.
+struct HasUnsafeMember2 {
+  Logger m;
+};
+// expected-warning@+2 {{does not carry that promise}}
+// expected-note@+1 {{while declaring the implicit destructor for 'ImplicitDtorDropsPromise'}}
+struct ImplicitDtorDropsPromise : ClassPromise {
+  HasUnsafeMember2 m; // its destructor runs unverified at shutdown
+};
+
+// Either spelling satisfies the rule, and routes the override's body through the
+// verifier -- which then reports the untruth.
+struct [[clang::destruction_order_safe]] KeepsViaClass : ClassPromise {
+  ~KeepsViaClass() override {
+    sink = (char)g_counter.n; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+
+struct KeepsViaDtor : ClassPromise {
+  [[clang::destruction_order_safe]] ~KeepsViaDtor() override {
+    sink = (char)g_counter.n; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+
+// A truthful derived class, and one whose destructor is implicit, are clean.
+struct [[clang::destruction_order_safe]] HonestDerived : ClassPromise {
+  int n = 0;
+  ~HonestDerived() override { n = 0; }
+};
+struct [[clang::destruction_order_safe]] HonestImplicitDerived : ClassPromise {};
 
 //===----------------------------------------------------------------------===//
 // A borrow CAPTURED by a static-duration initializer.
