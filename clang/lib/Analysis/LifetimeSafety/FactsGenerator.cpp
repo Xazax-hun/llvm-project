@@ -204,6 +204,18 @@ static bool paramMayMutateOwner(QualType PT) {
       return false;
     if (isGslOwnerType(Pointee))
       return true;
+    // An OPAQUE pointee cannot be shown to be owner-free, so it must not be
+    // assumed to be. `void *` is the C-interop "userdata" idiom: the callee casts
+    // it back to the real type and can mutate an owner through it, while the
+    // signature reveals nothing. An INCOMPLETE record is the same situation --
+    // the forward-declared opaque-handle idiom -- and it is worse for being
+    // order-dependent: the type may be completed later in the TU, so whether the
+    // hazard is visible would otherwise depend on where the analysis runs.
+    if (Pointee->isVoidType())
+      return true;
+    if (const CXXRecordDecl *RD = Pointee->getAsCXXRecordDecl();
+        RD && !RD->hasDefinition())
+      return true;
     llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
     return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited);
   }
