@@ -2350,6 +2350,12 @@ def warn_lifetime_safety_override_of_immortal : Warning<
   "must also be 'lifetime_immortal' (binding the return to the object with "
   "'[[clang::lifetimebound]]' is a weaker guarantee and is not sufficient)">,
   InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_of_destruction_order_safe : Warning<
+  "this override of a '[[clang::destruction_order_safe]]' method does not carry "
+  "that promise; a call through the base class is checked against the base's "
+  "declaration, so this override's body is never verified and may reach an "
+  "object already destroyed at shutdown">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
 def warn_lifetime_safety_override_of_non_invalidating : Warning<
   "this override of a '[[clang::lifetime_non_invalidating]]' method does not "
   "carry that promise; a call through the base class is assumed not to "

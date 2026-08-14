@@ -245,12 +245,71 @@ std::unique_ptr<int> g_up_safe;       // no-warning
 std::optional<Logger> g_opt_unsafe;   // expected-warning {{whose destructor is not known to be safe}}
 std::optional<string> g_opt_safe;     // no-warning
 
-// An annotated CLASS TEMPLATE is not safe for every argument: the instantiation's
-// member destructor runs too, and an implicit instantiation is not otherwise
-// visited.
+// An annotated CLASS TEMPLATE is not safe for every argument. Two diagnostics:
+// the instantiated member is reported directly (instantiations are visited, which
+// is what makes `static T t;` in a template pattern checkable at all), and the
+// global of that type is banned.
 template <class T> struct [[clang::destruction_order_safe]] Box {
-  T t;
+  T t; // expected-warning {{its member 't' has type 'Logger', whose destructor is not known to be safe}}
   ~Box() {}
 };
 Box<Logger> g_box_unsafe; // expected-warning {{has type 'Box<Logger>', whose destructor is not known to be safe}}
 Box<int> g_box_safe;      // no-warning
+
+//===----------------------------------------------------------------------===//
+// Template instantiations are visited.
+//
+// A dependent pattern says nothing about the hazard: `static T t;` is harmless
+// until T is known. Checking only the pattern let an arbitrary unsafe type
+// acquire static storage duration with no annotation anywhere -- the templated
+// Meyers singleton, which is a very common idiom.
+//===----------------------------------------------------------------------===//
+
+template <class T> T &singleton() {
+  static T t; // expected-warning {{variable of static storage duration has type 'Logger'}}
+  return t;
+}
+int g_force = (singleton<Logger>(), 0);
+
+// The same through a member function of a class template.
+template <class T> struct Holder2 {
+  static T &get() {
+    static T t; // expected-warning {{variable of static storage duration has type 'Logger'}}
+    return t;
+  }
+};
+int g_force2 = (Holder2<Logger>::get(), 0);
+
+// Instantiating with a safe type stays clean.
+int g_force_ok = (singleton<int>(), 0);
+
+//===----------------------------------------------------------------------===//
+// The promise must be repeated on overrides.
+//
+// The callee check resolves against the statically named method, so an override
+// that drops the promise is never verified and runs unchecked at shutdown. Every
+// sibling attribute already enforces this.
+//===----------------------------------------------------------------------===//
+
+struct [[clang::destruction_order_safe]] Ticker {
+  // expected-note@+1 {{overridden virtual function is here}}
+  [[clang::destruction_order_safe]] virtual void tick() {}
+  virtual ~Ticker() {}
+};
+
+struct DropsPromise : Ticker {
+  // expected-warning@+1 {{does not carry that promise}}
+  void tick() override { sink = (char)g_counter.n; }
+};
+
+// Repeating it routes the override's own body through the verifier.
+struct KeepsPromise : Ticker {
+  [[clang::destruction_order_safe]] void tick() override {
+    sink = (char)g_counter.n; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+
+// A truthful override that repeats the promise is clean.
+struct HonestOverride : Ticker {
+  [[clang::destruction_order_safe]] void tick() override {}
+};

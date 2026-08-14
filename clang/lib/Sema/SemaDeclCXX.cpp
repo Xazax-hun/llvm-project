@@ -19134,10 +19134,17 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
   // referent undetected. (The opposite direction, dropping 'noescape', is
   // covered by -Wmissing-noescape above.) These diagnostics are off by default
   // and only fire under the lifetime-safety validation/soundness groups, so
-  // gate the work on the group being enabled.
+  // gate the work on the groups being enabled. Each contract below lives in its
+  // own group, so test each -- gating everything on one of them silently
+  // disables the others when only that one is off.
   if (!Diags.isIgnored(
           diag::warn_lifetime_safety_override_param_adds_lifetimebound,
-          New->getLocation())) {
+          New->getLocation()) ||
+      !Diags.isIgnored(
+          diag::warn_lifetime_safety_override_of_destruction_order_safe,
+          New->getLocation()) ||
+      !Diags.isIgnored(diag::warn_lifetime_safety_override_of_non_invalidating,
+                       New->getLocation())) {
     for (unsigned I = 0, E = Old->getNumParams();
          I != E && I < New->getNumParams(); ++I)
       if (New->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
@@ -19182,6 +19189,15 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
     // dangling with nothing reported anywhere. Requiring the override to repeat
     // the promise also routes its body through the existing verifier, which
     // then reports the untruth.
+    // Same reasoning for '[[clang::destruction_order_safe]]': the callee check
+    // resolves against the statically named method, so an override that drops the
+    // promise is never verified and runs unchecked at shutdown.
+    if (Old->hasAttr<DestructionOrderSafeAttr>() &&
+        !New->hasAttr<DestructionOrderSafeAttr>()) {
+      Diag(New->getLocation(),
+           diag::warn_lifetime_safety_override_of_destruction_order_safe);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
     if (Old->hasAttr<LifetimeNonInvalidatingAttr>() &&
         !New->hasAttr<LifetimeNonInvalidatingAttr>()) {
       Diag(New->getLocation(),

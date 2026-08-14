@@ -3199,7 +3199,15 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
 
   struct Walker : DynamicRecursiveASTVisitor {
     Sema &S;
-    explicit Walker(Sema &S) : S(S) { ShouldVisitImplicitCode = false; }
+    explicit Walker(Sema &S) : S(S) {
+      ShouldVisitImplicitCode = false;
+      // The ban and the verification must both see INSTANTIATED bodies. In a
+      // dependent pattern `static T t;` says nothing -- the hazard only appears
+      // once T is known -- so checking the pattern alone lets an arbitrary unsafe
+      // type acquire static storage duration with no annotation anywhere (the
+      // templated Meyers singleton).
+      ShouldVisitTemplateInstantiations = true;
+    }
 
     bool VisitVarDecl(VarDecl *VD) override {
       // Only objects that are actually destroyed at shutdown.
