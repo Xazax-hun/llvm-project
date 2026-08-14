@@ -20,6 +20,12 @@ template <class Sig> struct function {
   ~function();
   void operator()() const;
 };
+// Minimal owning pointer with a DELETER argument: the library calls that argument
+// rather than destroying it, which is what makes it a hook. (The stub unique_ptr
+// in the shared header takes no deleter.)
+template <class T, class D> struct owner_with_deleter {
+  ~owner_with_deleter();
+};
 } // namespace std
 
 volatile char sink;
@@ -288,6 +294,82 @@ template <class T> struct [[clang::destruction_order_safe]] Box {
 };
 Box<Logger> g_box_unsafe; // expected-warning {{has type 'Box<Logger>', whose destructor is not known to be safe}}
 Box<int> g_box_safe;      // no-warning
+
+//===----------------------------------------------------------------------===//
+// A standard library specialization CALLS its hook arguments.
+//
+// Following the template arguments covers what a container DESTROYS -- its
+// elements. But a container also calls its allocator, and a `unique_ptr` its
+// deleter, while it is being destroyed at shutdown. Such an argument is normally
+// trivially destructible, so the element recursion accepted it and arbitrary user
+// code ran unverified: `vector<int, MyAlloc<int>>` was a "safe" static while
+// `MyAlloc::deallocate` read an already-destroyed global.
+//
+// The names the library invokes on a hook are fixed by the standard, so they can
+// be enumerated. Identification uses only the names no ordinary type carries --
+// an ELEMENT has just its destructor called, so a type with a `find` or `length`
+// member must not be dragged in by having one.
+//===----------------------------------------------------------------------===//
+
+struct BadAlloc {
+  using value_type = int;
+  int *allocate(unsigned long);
+  void deallocate(int *, unsigned long);
+};
+vector<int, BadAlloc> g_vec_badalloc; // expected-warning {{whose destructor is not known to be safe}}
+
+// Annotating the hooks is what makes it usable, and routes their bodies through
+// the verifier.
+struct OkAlloc {
+  using value_type = int;
+  [[clang::destruction_order_safe]] int *allocate(unsigned long);
+  [[clang::destruction_order_safe]] void deallocate(int *, unsigned long);
+};
+vector<int, OkAlloc> g_vec_okalloc; // no-warning
+
+struct LeakyAlloc {
+  using value_type = int;
+  [[clang::destruction_order_safe]] int *allocate(unsigned long);
+  // soundness-warning@+1 {{parameter that can hold a borrow is not annotated}}
+  [[clang::destruction_order_safe]] void deallocate(int *, unsigned long) {
+    sink = (char)g_counter.n; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+vector<int, LeakyAlloc> g_vec_leakyalloc;
+
+// A deleter, comparator or hash is called through operator().
+struct BadDeleter {
+  void operator()(int *) const;
+};
+std::owner_with_deleter<int, BadDeleter> g_od_bad; // expected-warning {{whose destructor is not known to be safe}}
+
+struct OkDeleter {
+  [[clang::destruction_order_safe]] void operator()(int *) const;
+};
+std::owner_with_deleter<int, OkDeleter> g_od_ok; // no-warning
+
+// An ELEMENT type is not a hook, even when its members share hook names: the
+// library calls only its destructor, which the ordinary rules already cover.
+struct Doc {
+  int id;
+  int find(int) const;
+  int length() const;
+  int compare(const Doc &) const;
+  void assign(int);
+  void copy();
+  void move();
+  int max_size() const;
+};
+vector<Doc> g_docs; // no-warning
+
+// A dependent call inside an uninstantiated template pattern has no resolved
+// callee yet, which is not the same as having no callee -- the instantiation is
+// visited separately and resolves it. Reporting it here would flag every
+// allocator template whose body forwards to a dependent expression, which is what
+// annotating an allocator's hooks requires being able to do.
+template <class T> struct Forwards {
+  [[clang::destruction_order_safe]] void go(T *p) { ::operator delete(p); } // no-warning
+};
 
 //===----------------------------------------------------------------------===//
 // Template instantiations are visited.

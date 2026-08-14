@@ -3041,6 +3041,95 @@ static bool hasUncheckedDeallocationFunction(const CXXRecordDecl *RD) {
   });
 }
 
+/// True if the standard library may invoke \p FD on a user-supplied template
+/// argument -- an allocator, a deleter, a comparator, a hash, or a character-traits
+/// class.
+///
+/// The set is fixed by the standard: these are the names the library is specified
+/// to call, so enumerating them is exhaustive rather than a guess.
+static bool isHookName(const FunctionDecl *FD) {
+  // A deleter, comparator, or hash is called through operator().
+  if (FD->getOverloadedOperator() == OO_Call)
+    return true;
+  const IdentifierInfo *II = FD->getIdentifier();
+  if (!II)
+    return false;
+  static const llvm::StringSet<> Hooks = {
+      // [allocator.requirements]
+      "allocate", "deallocate", "allocate_at_least", "construct", "destroy",
+      "max_size", "select_on_container_copy_construction",
+      // [char.traits.require]
+      "assign", "eq", "lt", "compare", "length", "find", "move", "copy",
+      "to_char_type", "to_int_type", "eq_int_type", "eof", "not_eof"};
+  return Hooks.contains(II->getName());
+}
+
+/// True if \p FD is distinctive enough to identify its class AS a library hook.
+///
+/// Some hook names -- `find`, `length`, `compare`, `assign` -- are perfectly
+/// ordinary member functions that an ELEMENT type may have, and an element has
+/// only its destructor called. So identification uses the names no ordinary type
+/// carries, and every conforming hook has at least one: an allocator must supply
+/// `allocate`/`deallocate`, a traits class the `int_type` conversions, and a
+/// deleter, comparator or hash is called through operator().
+static bool isDistinctiveHookName(const FunctionDecl *FD) {
+  if (FD->getOverloadedOperator() == OO_Call)
+    return true;
+  const IdentifierInfo *II = FD->getIdentifier();
+  if (!II)
+    return false;
+  static const llvm::StringSet<> Distinctive = {
+      "allocate",     "deallocate",  "allocate_at_least",
+      "construct",    "destroy",     "select_on_container_copy_construction",
+      "to_char_type", "to_int_type", "eq_int_type",
+      "not_eof"};
+  return Distinctive.contains(II->getName());
+}
+
+/// True if \p QT is a user-supplied standard library hook with at least one hook
+/// function that does not carry the destruction-order promise.
+///
+/// A standard container destroys its elements, which the template-argument
+/// recursion covers -- but it also CALLS its allocator, deleter, comparator, hash
+/// or traits argument, and those calls happen while the container is being
+/// destroyed at shutdown. Such an argument is normally trivially destructible, so
+/// the element recursion accepted it and arbitrary user code ran unverified.
+static bool hasUncheckedLibraryHook(QualType QT) {
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  // The library's own allocators, deleters and traits (std::allocator,
+  // std::default_delete, std::char_traits, std::less, std::hash) reach nothing
+  // the user destroys.
+  if (lifetimes::isInStlNamespace(RD) ||
+      RD->getASTContext().getSourceManager().isInSystemHeader(RD->getLocation()))
+    return false;
+
+  // Deriving from the library's own hook type is the idiomatic way to write one
+  // (`struct MyTraits : std::char_traits<char>`), and inherits the distinctive
+  // names rather than declaring them.
+  bool DerivesStdHook = !RD->forallBases([](const CXXRecordDecl *Base) {
+    return !lifetimes::isInStlNamespace(Base);
+  });
+
+  bool IsHook = DerivesStdHook;
+  bool Unchecked = false;
+  auto Scan = [&](const CXXRecordDecl *R) {
+    for (const CXXMethodDecl *MD : R->methods()) {
+      if (MD->isImplicit() || !isHookName(MD))
+        continue;
+      if (isDistinctiveHookName(MD))
+        IsHook = true;
+      if (!lifetimes::carriesDestructionOrderPromise(MD))
+        Unchecked = true;
+    }
+    return true;
+  };
+  Scan(RD);
+  RD->forallBases([&](const CXXRecordDecl *Base) { return Scan(Base); });
+  return IsHook && Unchecked;
+}
+
 /// True if destroying an object of type \p QT at shutdown cannot observe another
 /// object of static storage duration.
 ///
@@ -3084,13 +3173,17 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0) {
     // Follow what the specialization may destroy. Variadic templates such as
     // std::variant and std::tuple present their arguments as a single Pack, so
     // that has to be looked inside -- otherwise `variant<int, Logger>` passes.
+    // An argument the library CALLS rather than destroys is checked separately:
+    // it is normally trivially destructible, so the destruction recursion below
+    // accepts it while its hooks run unverified at shutdown.
     if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
       std::function<bool(const TemplateArgument &)> ArgIsSafe =
           [&](const TemplateArgument &A) -> bool {
         if (A.getKind() == TemplateArgument::Pack)
           return llvm::all_of(A.pack_elements(), ArgIsSafe);
         if (A.getKind() == TemplateArgument::Type)
-          return isDestructionOrderSafeType(A.getAsType(), Depth + 1);
+          return !hasUncheckedLibraryHook(A.getAsType()) &&
+                 isDestructionOrderSafeType(A.getAsType(), Depth + 1);
         return true;
       };
       if (!llvm::all_of(CTSD->getTemplateArgs().asArray(), ArgIsSafe))
@@ -3241,6 +3334,15 @@ public:
   bool VisitCallExpr(CallExpr *CE) override {
     const FunctionDecl *Callee = CE->getDirectCallee();
     if (!Callee) {
+      // In an uninstantiated template pattern a dependent call has no resolved
+      // callee yet, which is not the same thing as having no callee: the
+      // instantiation is visited separately, and there it resolves. Reporting it
+      // here would flag every allocator template that forwards to
+      // `::operator delete` -- and annotating an allocator's hooks is how a
+      // container using it becomes usable at static storage duration.
+      if (CE->isTypeDependent() || CE->isValueDependent() ||
+          CE->getCallee()->isTypeDependent())
+        return true;
       S.Diag(CE->getExprLoc(),
              diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
           << Subject << SubjectKind;
