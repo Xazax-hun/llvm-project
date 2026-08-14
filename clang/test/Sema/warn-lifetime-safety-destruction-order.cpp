@@ -5,6 +5,15 @@
 using std::string;
 using std::vector;
 
+namespace std {
+// Minimal variadic stand-in: its alternatives arrive as a single template Pack,
+// which is the path that has to be looked inside.
+template <class... Ts> struct variant {
+  variant();
+  ~variant();
+};
+} // namespace std
+
 volatile char sink;
 
 // Objects of static storage duration are destroyed in reverse order of
@@ -59,8 +68,8 @@ struct Pod {
 };
 Pod g_pod{1, 2}; // trivial destructor
 
-// Standard library types are treated as safe: a container's destructor releases
-// only what it owns, so it cannot reach an unrelated static object.
+// A standard library type is safe only to the extent that what it DESTROYS is: a
+// container destroys its elements, so the promise follows the template arguments.
 string g_name;
 vector<int> g_nums;
 
@@ -114,12 +123,52 @@ struct [[clang::destruction_order_safe]] CallerOk {
   ~CallerOk() { checked(); } // no-warning
 };
 
-// A constexpr callee is exempt: it is meant to be evaluable without reference to
-// program state.
+// A `consteval` callee is exempt: an immediate function never runs at shutdown.
+consteval int immediate() { return 7; }
+struct [[clang::destruction_order_safe]] CallsConsteval {
+  int n = 0;
+  ~CallsConsteval() { n = immediate(); } // no-warning
+};
+
+// A merely `constexpr` callee can be called at RUNTIME, so it is verified rather
+// than trusted -- its body is necessarily available, which makes requiring an
+// annotation on it busywork and exempting it outright a hole. A pure one passes.
 constexpr int doubled(int x) { return x * 2; }
 struct [[clang::destruction_order_safe]] CallsConstexpr {
   int n = 0;
   ~CallsConstexpr() { n = doubled(3); } // no-warning
+};
+
+// ...and one that reaches a global does not. The global access has to sit on a
+// conditional path -- a constexpr function that *unconditionally* reads a global
+// never produces a constant expression and is ill-formed -- but that is exactly
+// the shape that is valid at compile time and dangerous at run time.
+// The warning lands on the offending reference inside `leaky`; the note points at
+// the call that reached it, so the chain from the destructor is visible.
+constexpr int leaky(bool b) {
+  return b ? g_counter.n : 0; // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+}
+struct [[clang::destruction_order_safe]] CallsLeakyConstexpr {
+  int n = 0;
+  ~CallsLeakyConstexpr() {
+    n = leaky(true); // expected-note {{reached through 'leaky', which is 'constexpr' but is called here at runtime}}
+  }
+};
+
+// Recursion in a verified constexpr callee terminates.
+constexpr int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+struct [[clang::destruction_order_safe]] CallsRecursive {
+  int n = 0;
+  ~CallsRecursive() { n = fib(5); } // no-warning
+};
+
+// A manifestly constant-evaluated subexpression is computed at compile time, so
+// nothing in it runs at shutdown.
+struct [[clang::destruction_order_safe]] ConstantEvaluated {
+  int n = 0;
+  ~ConstantEvaluated() {
+    static_assert(fib(6) == 8); // no-warning
+  }
 };
 
 // An indirect call cannot be checked at all.
@@ -170,3 +219,38 @@ struct [[clang::destruction_order_safe]] Annotated {
   ~Annotated() {}
 };
 Annotated g_annotated; // no-warning
+
+//===----------------------------------------------------------------------===//
+// Standard library types are not blanket-safe.
+//
+// What a standard container destroys is its element, so the promise has to follow
+// the template arguments -- including through a variadic Pack, which is how
+// std::variant and std::tuple present them. And a type-ERASING type destroys
+// something its type does not name at all, so nothing about it can be checked.
+//===----------------------------------------------------------------------===//
+
+vector<Logger> g_vec_unsafe; // expected-warning {{has type 'vector<Logger>', whose destructor is not known to be safe}}
+vector<int> g_vec_safe;      // no-warning
+
+// Nested through a Pack: variant's alternatives are a variadic argument list.
+std::variant<int, Logger> g_var_unsafe; // expected-warning {{whose destructor is not known to be safe}}
+std::variant<int, string> g_var_safe;   // no-warning
+
+// A type-erasing type owns something the type does not name.
+std::any g_any; // expected-warning {{has type 'std::any', whose destructor is not known to be safe}}
+
+// Same for the owning smart pointer and the engaged-or-not container.
+std::unique_ptr<Logger> g_up_unsafe;  // expected-warning {{whose destructor is not known to be safe}}
+std::unique_ptr<int> g_up_safe;       // no-warning
+std::optional<Logger> g_opt_unsafe;   // expected-warning {{whose destructor is not known to be safe}}
+std::optional<string> g_opt_safe;     // no-warning
+
+// An annotated CLASS TEMPLATE is not safe for every argument: the instantiation's
+// member destructor runs too, and an implicit instantiation is not otherwise
+// visited.
+template <class T> struct [[clang::destruction_order_safe]] Box {
+  T t;
+  ~Box() {}
+};
+Box<Logger> g_box_unsafe; // expected-warning {{has type 'Box<Logger>', whose destructor is not known to be safe}}
+Box<int> g_box_safe;      // no-warning

@@ -2382,8 +2382,8 @@ def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
   "%3, whose destructor is not known to be safe; that destructor runs at shutdown "
   "as part of destroying %0, so it must be safe too">,
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
-def note_lifetime_safety_destruction_order_dtor : Note<
-  "destructor of 'destruction_order_safe' type %0 is verified">;
+def note_lifetime_safety_destruction_order_via : Note<
+  "reached through %0, which is 'constexpr' but is called here at runtime">;
 def note_cat_conform_to_noescape_prot : Note<
   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
 

@@ -4624,16 +4624,34 @@ verified. The destructor of an annotated type -- and the body of any annotated
 function -- may only:
 
 * call functions that are themselves ``destruction_order_safe``, or are
-  ``constexpr``/``consteval``, and
+  ``consteval``, and
 * refrain from referencing any object of static storage duration whose type has a
   non-trivial destructor.
+
+A ``constexpr`` callee is neither trusted nor required to be annotated. It can be
+called at run time, where it may touch a global like any other function, so its
+body is verified instead -- which is always possible, since ``constexpr`` implies
+the definition is available. A manifestly constant-evaluated subexpression is
+skipped entirely: it is computed at compile time and nothing in it runs at
+shutdown.
+
+The promise extends to subobjects. Bases and members run their own destructors as
+part of destroying the object, and those calls are implicit, so an annotated type
+must be built only from types that are themselves safe.
 
 Referencing a trivially destructible global is allowed: its storage outlives all
 destructors, so no ordering hazard exists.
 
-Standard library types and functions are treated as destruction-order-safe. A
-standard container's destructor releases only what it owns, so it cannot observe
-an unrelated static object.
+Standard library functions are treated as safe. A standard library *type* is safe
+only to the extent that what it destroys is: a container destroys its elements and
+``unique_ptr`` its pointee, so the promise follows the template arguments.
+``std::vector<int>`` is safe while ``std::vector<Logger>`` is not, and the same
+applies through the variadic argument list of ``std::variant`` or ``std::tuple``.
+
+Types that ERASE what they own -- ``std::function``, ``std::any``,
+``std::move_only_function``, ``std::packaged_task`` -- are never safe. Their
+destructor runs a destructor that does not appear in the type, so there is nothing
+to check.
 
 .. code-block:: c++
 

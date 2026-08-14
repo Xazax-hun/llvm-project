@@ -2966,16 +2966,32 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
 // Static destruction order safety
 //===----------------------------------------------------------------------===//
 
+/// Standard library types that ERASE the type of what they own: their destructor
+/// runs a destructor that does not appear anywhere in the type, so there is
+/// nothing to check. Such a type can never be assumed safe.
+static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
+  static const llvm::StringSet<> Erasing = {
+      "function", "move_only_function", "copyable_function", "any",
+      "packaged_task"};
+  return RD->getIdentifier() && Erasing.contains(RD->getName());
+}
+
 /// True if destroying an object of type \p QT at shutdown cannot observe another
 /// object of static storage duration.
 ///
 /// Trivially destructible types are safe because nothing runs for them: their
 /// storage simply persists to process exit. Otherwise the type must promise it,
 /// via '[[clang::destruction_order_safe]]', and that promise is verified against
-/// its destructor. Standard library types are treated as safe -- a container's
-/// destructor releases only what it owns, so it cannot reach an unrelated static
-/// object.
-static bool isDestructionOrderSafeType(QualType QT) {
+/// its destructor.
+///
+/// Standard library types are safe only to the extent that what they destroy is.
+/// A container destroys its elements and `unique_ptr` its pointee, so the promise
+/// has to follow the template arguments -- `std::vector<int>` is safe while
+/// `std::vector<Logger>` is not. And a type-erasing type destroys something its
+/// type does not name at all, which cannot be checked.
+static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0) {
+  if (Depth > 8)
+    return false; // give up rather than recurse without bound
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
@@ -2984,22 +3000,45 @@ static bool isDestructionOrderSafeType(QualType QT) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD)
     return true; // no destructor to run
-  if (RD->hasAttr<DestructionOrderSafeAttr>())
+  // An annotated type still has to be safe in its subobjects: the annotation is a
+  // promise about the destructor BODY, while bases and members run their own
+  // destructors as part of it. The record-level check below reports those
+  // individually for a written-out class, but it does not see an implicit
+  // template instantiation -- so `Box<Logger> g;` needs this to be caught here.
+  bool Annotated = RD->hasAttr<DestructionOrderSafeAttr>();
+  if (lifetimes::isInStlNamespace(RD)) {
+    if (isTypeErasingStdType(RD))
+      return false;
+    // Follow what the specialization may destroy. Variadic templates such as
+    // std::variant and std::tuple present their arguments as a single Pack, so
+    // that has to be looked inside -- otherwise `variant<int, Logger>` passes.
+    if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+      std::function<bool(const TemplateArgument &)> ArgIsSafe =
+          [&](const TemplateArgument &A) -> bool {
+        if (A.getKind() == TemplateArgument::Pack)
+          return llvm::all_of(A.pack_elements(), ArgIsSafe);
+        if (A.getKind() == TemplateArgument::Type)
+          return isDestructionOrderSafeType(A.getAsType(), Depth + 1);
+        return true;
+      };
+      if (!llvm::all_of(CTSD->getTemplateArgs().asArray(), ArgIsSafe))
+        return false;
+    }
     return true;
-  if (lifetimes::isInStlNamespace(RD))
-    return true;
+  }
   // A class is safe when everything destroyed as part of it is: bases and
   // members run their own destructors at shutdown too.
-  if (const CXXDestructorDecl *DD = RD->getDestructor())
-    if (!DD->isImplicit())
-      return false; // a user-written destructor must promise explicitly
+  if (!Annotated)
+    if (const CXXDestructorDecl *DD = RD->getDestructor())
+      if (!DD->isImplicit())
+        return false; // a user-written destructor must promise explicitly
   if (!RD->hasDefinition())
     return false;
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (!isDestructionOrderSafeType(B.getType()))
+    if (!isDestructionOrderSafeType(B.getType(), Depth + 1))
       return false;
   for (const FieldDecl *FD : RD->fields())
-    if (!isDestructionOrderSafeType(FD->getType()))
+    if (!isDestructionOrderSafeType(FD->getType(), Depth + 1))
       return false;
   return true;
 }
@@ -3008,9 +3047,12 @@ static bool isDestructionOrderSafeType(QualType QT) {
 static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   if (!FD)
     return false;
-  // A constexpr/consteval function is exempt: it is meant to be evaluable
-  // without reference to program state.
-  if (FD->isConstexpr())
+  // A consteval function is exempt: it is an immediate function, so it never
+  // runs at shutdown at all. A merely `constexpr` one is NOT exempt here -- it
+  // can be called at runtime, where it may touch globals like any other
+  // function. Such calls are verified by recursing into the body instead; see
+  // DestructionOrderSafeBodyChecker::VisitCallExpr.
+  if (FD->isConsteval())
     return true;
   if (FD->hasAttr<DestructionOrderSafeAttr>())
     return true;
@@ -3040,11 +3082,35 @@ namespace {
 class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   Sema &S;
   const FunctionDecl *Subject;
+  /// Constexpr callees already being verified, to terminate on recursion.
+  llvm::SmallPtrSet<const FunctionDecl *, 8> &Visiting;
+  /// When set, a violation is additionally attributed to this callee, reached
+  /// from the call at \c ViaLoc.
+  const FunctionDecl *Via;
+  SourceLocation ViaLoc;
 
 public:
-  DestructionOrderSafeBodyChecker(Sema &S, const FunctionDecl *Subject)
-      : S(S), Subject(Subject) {
+  DestructionOrderSafeBodyChecker(
+      Sema &S, const FunctionDecl *Subject,
+      llvm::SmallPtrSet<const FunctionDecl *, 8> &Visiting,
+      const FunctionDecl *Via = nullptr, SourceLocation ViaLoc = {})
+      : S(S), Subject(Subject), Visiting(Visiting), Via(Via), ViaLoc(ViaLoc) {
     ShouldVisitImplicitCode = false;
+  }
+
+  /// A manifestly constant-evaluated subexpression is computed at compile time,
+  /// so nothing inside it executes at shutdown. Do not look in at all.
+  bool TraverseStmt(Stmt *St) override {
+    if (isa_and_nonnull<ConstantExpr>(St))
+      return true;
+    return DynamicRecursiveASTVisitor::TraverseStmt(St);
+  }
+
+  /// Points at the call that reached the offending body, so the chain from the
+  /// verified destructor to the violation is visible.
+  void noteVia() {
+    if (Via)
+      S.Diag(ViaLoc, diag::note_lifetime_safety_destruction_order_via) << Via;
   }
 
   bool VisitDeclRefExpr(DeclRefExpr *DRE) override {
@@ -3059,6 +3125,7 @@ public:
     S.Diag(DRE->getExprLoc(),
            diag::warn_lifetime_safety_destruction_order_global_ref)
         << Subject << VD;
+    noteVia();
     return true;
   }
 
@@ -3070,19 +3137,45 @@ public:
           << Subject;
       return true;
     }
-    if (!isDestructionOrderSafeFunction(Callee))
-      S.Diag(CE->getExprLoc(),
-             diag::warn_lifetime_safety_destruction_order_unsafe_call)
-          << Subject << Callee;
+    if (isDestructionOrderSafeFunction(Callee))
+      return true;
+    // A lambda's call operator is implicitly constexpr, but its body is written
+    // lexically inside the enclosing function and the traversal already covers
+    // it. Recursing here as well would report the same violation twice.
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(Callee))
+      if (MD->getParent()->isLambda())
+        return true;
+    // A `constexpr` callee reached at runtime is verified rather than trusted:
+    // its body is necessarily available (constexpr implies inline), so requiring
+    // an annotation on it would be busywork, and exempting it outright would
+    // miss a constexpr function that does touch a global.
+    if (Callee->isConstexpr()) {
+      const FunctionDecl *Def = Callee->getDefinition();
+      if (Def && Visiting.insert(Def).second) {
+        DestructionOrderSafeBodyChecker(S, Subject, Visiting, Def,
+                                        CE->getExprLoc())
+            .TraverseStmt(Def->getBody());
+        Visiting.erase(Def);
+        return true;
+      }
+      if (Def)
+        return true; // already on the stack: recursion, nothing new to say
+    }
+    S.Diag(CE->getExprLoc(),
+           diag::warn_lifetime_safety_destruction_order_unsafe_call)
+        << Subject << Callee;
+    noteVia();
     return true;
   }
 
   bool VisitCXXConstructExpr(CXXConstructExpr *CCE) override {
     if (const CXXConstructorDecl *Ctor = CCE->getConstructor())
-      if (!isDestructionOrderSafeFunction(Ctor))
+      if (!isDestructionOrderSafeFunction(Ctor)) {
         S.Diag(CCE->getExprLoc(),
                diag::warn_lifetime_safety_destruction_order_unsafe_call)
             << Subject << Ctor;
+        noteVia();
+      }
     return true;
   }
 };
@@ -3161,7 +3254,9 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
           DD && DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
       if (!Annotated && !SafeTypeDtor)
         return true;
-      DestructionOrderSafeBodyChecker(S, FD).TraverseStmt(FD->getBody());
+      llvm::SmallPtrSet<const FunctionDecl *, 8> Visiting;
+      DestructionOrderSafeBodyChecker(S, FD, Visiting)
+          .TraverseStmt(FD->getBody());
       return true;
     }
   };
