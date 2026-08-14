@@ -250,7 +250,12 @@ private:
   // Treats an expression as a use of the referenced object. It will be
   // checked for use-after-free unless it is later marked as being written to
   // (e.g. on the left-hand side of an assignment in the case of a DeclRefExpr).
-  void handleUse(const Expr *E);
+  /// Records a use of `E`'s origin. `BoundToReference` says the value is handed to
+  /// a callee through a reference or pointer parameter, so the callee keeps
+  /// aliasing the designated object: the outer origin -- the one holding the borrow
+  /// of the object itself -- is what it receives, and must not be peeled to the
+  /// r-value origin the way reading a variable's value is.
+  void handleUse(const Expr *E, bool BoundToReference = false);
 
   /// Soundness: flag a *use* of a global variable whose type is a "container of
   /// indirection" -- an owner/pointer whose elements or pointees are themselves

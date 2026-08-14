@@ -285,3 +285,44 @@ void view_receiver_is_flagged() {
   std::string_view v = g_str; // (silent at construction; the borrow is reported at the use)
   (void)v.size();             // expected-warning {{borrows from a mutable global or static object}}
 }
+
+//===----------------------------------------------------------------------===//
+// Passing the global to a REFERENCE or POINTER parameter.
+//
+// This is a borrow just as much as binding a local reference is -- the callee is
+// left aliasing the global, and a borrow it takes from the parameter can be
+// invalidated by a mutation of the global by name, which the callee's own
+// analysis cannot connect (the borrow roots at a parameter placeholder, the
+// mutation at the global).
+//
+// Both existing guards asked the DECLARATION's type, and a local reference
+// declares itself as one (`std::string &r = g_str;` -- flagged above). At a call
+// there is no such declaration: the argument is bare `g_str`, textually identical
+// to reading it for a copy, and the reference lives only in the callee's
+// signature. So the borrow was dropped for a non-const parameter and discarded as
+// a copy for a const one, while `&g_str` -- a pointer expression, which neither
+// guard looks at -- was flagged all along.
+//===----------------------------------------------------------------------===//
+
+void takes_ref(std::string &s [[clang::noescape]]);
+void takes_cref(const std::string &s [[clang::noescape]]);
+void takes_ptr(std::string *s [[clang::noescape]]);
+void takes_value(std::string s);
+
+void global_to_reference_param() {
+  takes_ref(g_str);   // expected-warning {{borrows from a mutable global or static object}}
+  takes_cref(g_str);  // expected-warning {{borrows from a mutable global or static object}}
+  takes_ptr(&g_str);  // expected-warning {{borrows from a mutable global or static object}}
+}
+
+// A COPY is not a borrow, and every copy reaches this path through a reference
+// parameter too -- the copy constructor's. So the callee's kind is what separates
+// them; nothing about the types can.
+std::string g_str2;
+void copies_are_not_borrows() {
+  std::string local = g_str; // no-warning: copy construction
+  local = g_str;             // no-warning: copy assignment
+  local = static_cast<std::string &&>(g_str2); // no-warning: move assignment
+  takes_value(g_str);        // no-warning: the by-value parameter is copy-constructed
+  (void)local;
+}

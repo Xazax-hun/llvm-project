@@ -1505,11 +1505,17 @@ public:
     // copy-constructor binding that would otherwise look like a reference borrow.
     // Skip a use that designates a by-value owner object; a view / reference /
     // pointer *derived* from the owner is flagged at its own use or escape.
-    if (const auto *DRE = dyn_cast<DeclRefExpr>(Use->IgnoreParenCasts()))
-      if (const ValueDecl *D = DRE->getDecl();
-          D && !D->getType()->isReferenceType() &&
-          !D->getType()->isPointerType() && isGslOwnerType(D->getType()))
-        return;
+    //
+    // Unless the use really is a reference binding into an arbitrary callee
+    // (`f(g)`), which leaves that callee aliasing the global: only the
+    // declaration's type is visible here, and it is the same for the copy and for
+    // the borrow, so the generator marks which one this is.
+    if (!UF->isReferenceBinding())
+      if (const auto *DRE = dyn_cast<DeclRefExpr>(Use->IgnoreParenCasts()))
+        if (const ValueDecl *D = DRE->getDecl();
+            D && !D->getType()->isReferenceType() &&
+            !D->getType()->isPointerType() && isGslOwnerType(D->getType()))
+          return;
     // The one permitted interaction with a mutable global is a method call on
     // the global itself (`g.method()` / `g.owner.append()`). The receiver is a
     // transient access, not a borrow the caller keeps, so do not flag it -- any
@@ -1518,9 +1524,18 @@ public:
     // local view `sv` bound to `g`, used as `sv.front()`) is still flagged.
     if (isMutableGlobalMethodReceiver(Use))
       return;
-    if (const OriginNode *OL = UF->getUsedOrigins())
+    if (const OriginNode *OL = UF->getUsedOrigins()) {
+      // A reference binding of the owner ITSELF (`f(g)`) uses an origin typed as
+      // the owner value, not as a pointer or reference -- the reference exists in
+      // the callee's signature, not in this expression. Say what the callee
+      // receives, so the borrow is recognized.
+      QualType Hint;
+      if (UF->isReferenceBinding() && !Use->getType()->isPointerType() &&
+          !Use->getType()->isReferenceType())
+        Hint = AST.getLValueReferenceType(Use->getType());
       flagBorrowFromMutableGlobal(OL->getOriginID(), UF, Use->getExprLoc(),
-                                  Use->getSourceRange());
+                                  Use->getSourceRange(), Hint);
+    }
   }
 
   /// True if `Use` is the implicit object argument (receiver) of a member call

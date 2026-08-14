@@ -314,6 +314,13 @@ class UseFact : public Fact {
   // location to anchor the diagnostic at. Invalid for ordinary uses, which use
   // `UseExpr`'s location instead.
   SourceLocation ImplicitLoc;
+  // True if this use hands the designated object to a callee through a reference
+  // or pointer parameter, so the callee keeps aliasing it. Distinguishes such a
+  // borrow from a COPY of the same object: `f(g)` and `return g;` both bind `g` to
+  // a reference parameter, but the second one's callee is a copy constructor and
+  // produces an independent object. Only the declaration's type is visible where
+  // that difference is consumed, and it is the same in both.
+  bool IsReferenceBinding = false;
 
 public:
   static bool classof(const Fact *F) { return F->getKind() == Kind::Use; }
@@ -334,6 +341,8 @@ public:
   SourceLocation getImplicitLoc() const { return ImplicitLoc; }
   void markAsWritten() { IsWritten = true; }
   bool isWritten() const { return IsWritten; }
+  void markAsReferenceBinding() { IsReferenceBinding = true; }
+  bool isReferenceBinding() const { return IsReferenceBinding; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

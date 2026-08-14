@@ -2849,8 +2849,40 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     return;
   }
   // All arguments to a function are a use of the corresponding expressions.
-  for (const Expr *Arg : Args)
-    handleUse(Arg);
+  //
+  // An argument bound to a reference or pointer parameter leaves the callee
+  // aliasing the object, so the borrow of the object ITSELF is what is used --
+  // not the value read out of it. A copy or move constructor (or assignment) is
+  // excluded: it also binds a reference, but produces an independent object, and
+  // `return g;` reaches this path through exactly that binding.
+  // An argument bound to a reference or pointer parameter leaves the callee
+  // aliasing the object, so the borrow of the object ITSELF is what is used --
+  // not the value read out of it.
+  //
+  // A copy or move constructor or assignment is excluded: it binds a reference
+  // too, and at the call the two are indistinguishable by type (`const Str &`
+  // either way), so the callee's KIND is the only local discriminator. `Str c =
+  // g;`, `return g;`, `a = g;` and passing `g` to a by-value parameter all reach
+  // this path through exactly that binding, and none of them retains a borrow.
+  // Generalizing from the special members to "a reference parameter of the
+  // callee's own class" would also exempt a user-written `assign(const Str &)`,
+  // whose body can hold the very borrow this is meant to catch.
+  bool CalleeCopies = false;
+  bool ArgsIncludeObject = false;
+  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD)) {
+    CalleeCopies = Ctor->isCopyOrMoveConstructor();
+  } else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
+    CalleeCopies =
+        MD->isCopyAssignmentOperator() || MD->isMoveAssignmentOperator();
+    ArgsIncludeObject = MD->isInstance();
+  }
+  for (unsigned I = 0, E = Args.size(); I != E; ++I) {
+    const ParmVarDecl *PVD =
+        CalleeCopies ? nullptr : paramForArg(FD, ArgsIncludeObject, I);
+    bool BoundToReference = PVD && (PVD->getType()->isReferenceType() ||
+                                    PVD->getType()->isPointerType());
+    handleUse(Args[I], BoundToReference);
+  }
   // Soundness: a call returning a user-defined type of unknown ownership
   // (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
   // [[gsl::Pointer]]) produces a value the analysis cannot track. Constructor
@@ -3132,23 +3164,32 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
   return false;
 }
 
-void FactsGenerator::handleUse(const Expr *E) {
+void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
   OriginNode *Node = getOriginNode(*E);
   if (!Node)
     return;
   // For DeclRefExpr: Remove the outer layer of origin which borrows from the
   // decl directly (e.g., when this is not a reference). This is a use of the
   // underlying decl.
+  //
+  // Not when the value is bound to a reference parameter: there the outer origin
+  // -- the borrow of the object itself -- is exactly what the callee receives, and
+  // for an owner lvalue there is no r-value origin to peel to at all, so peeling
+  // would drop the use entirely.
   if (auto *DRE = dyn_cast<DeclRefExpr>(E);
-      DRE && !DRE->getDecl()->getType()->isReferenceType())
+      DRE && !BoundToReference && !DRE->getDecl()->getType()->isReferenceType())
     Node = getRValueOrigins(DRE, Node);
   // Skip if there is no inner origin (e.g., when it is not a pointer type).
   if (!Node)
     return;
   if (!UseFacts.contains(E)) {
     UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
+    if (BoundToReference)
+      UF->markAsReferenceBinding();
     CurrentBlockFacts.push_back(UF);
     UseFacts[E] = UF;
+  } else if (BoundToReference) {
+    UseFacts[E]->markAsReferenceBinding();
   }
 }
 
