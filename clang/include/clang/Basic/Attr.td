@@ -2176,6 +2176,13 @@ def DestructionOrderSafe : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+def Downcasts : InheritableAttr {
+  let Spellings = [Clang<"downcasts", 0>];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [DowncastsDocs];
+  let SimpleHandler = 1;
+}
+
 def LifetimeNonInvalidating : InheritableAttr {
   let Spellings = [Clang<"lifetime_non_invalidating", 0>];
   let Subjects = SubjectList<[CXXMethod], ErrorDiag>;

@@ -2395,6 +2395,40 @@ def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
   "%3, whose destructor is not known to be safe; that destructor runs at shutdown "
   "as part of destroying %0, so it must be safe too">,
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_missing_downcasts : Warning<
+  "%0 performs a base-to-derived conversion but is not marked "
+  "'[[clang::downcasts]]'; a constructor or destructor cannot tell that calling it "
+  "would convert an object whose derived part is not alive, so the marker is what "
+  "carries that across translation units">,
+  InGroup<LifetimeSafetyDowncasts>, DefaultIgnore;
+def warn_lifetime_safety_missing_downcasts_call : Warning<
+  "%0 calls %1, which is marked '[[clang::downcasts]]', but is not marked that way "
+  "itself; the marker has to reach every caller, or a constructor or destructor "
+  "further up cannot see the hazard">,
+  InGroup<LifetimeSafetyDowncasts>, DefaultIgnore;
+def note_lifetime_safety_downcast_here : Note<
+  "base-to-derived conversion to %0 is here">;
+def warn_lifetime_safety_cdtor_downcast : Warning<
+  "%select{constructor|destructor}0 of %1 performs a base-to-derived conversion to "
+  "%2; the derived part of an object under "
+  "%select{construction|destruction}0 is not alive, so referring to a member or "
+  "base class through it is undefined. Storage a derived member owns "
+  "%select{is not initialized yet|has already been freed}0. Use a 'dynamic_cast', "
+  "which is well defined here and simply fails">,
+  InGroup<LifetimeSafetyDowncasts>, DefaultIgnore;
+def warn_lifetime_safety_cdtor_calls_downcasts : Warning<
+  "%select{constructor|destructor}0 of %1 calls %2, which is marked "
+  "'[[clang::downcasts]]'; the derived part of an object under "
+  "%select{construction|destruction}0 is not alive, so a base-to-derived "
+  "conversion reached from here may refer to a member whose storage "
+  "%select{is not initialized yet|has already been freed}0">,
+  InGroup<LifetimeSafetyDowncasts>, DefaultIgnore;
+def warn_lifetime_safety_override_adds_downcasts : Warning<
+  "this override is marked '[[clang::downcasts]]' but the function it overrides is "
+  "not; a call through the base class is checked against the base's declaration, so "
+  "a constructor or destructor could reach this base-to-derived conversion without "
+  "anything reporting it">,
+  InGroup<LifetimeSafetyDowncasts>, DefaultIgnore;
 def note_cat_conform_to_noescape_prot : Note<
   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
 

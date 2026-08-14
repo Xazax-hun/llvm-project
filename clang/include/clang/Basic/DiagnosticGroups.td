@@ -729,6 +729,34 @@ and functions are treated as safe.
   }];
 }
 
+def LifetimeSafetyDowncasts : DiagGroup<"lifetime-safety-downcasts"> {
+  code Documentation = [{
+Enforces that a constructor or destructor cannot reach a base-to-derived
+conversion.
+
+Inside a constructor or destructor of a class ``C``, the derived part of the
+object either has not been constructed yet or has already been destroyed, so
+referring to a member or base class outside ``C``'s own subobject is undefined
+behavior. Every heap buffer a derived member owned has already been freed by the
+time a base destructor runs, so a base destructor that reads derived state is a
+use-after-free -- and nothing at the read distinguishes it from a live object.
+
+Rather than chase where the conversion happens -- it may be several calls away,
+applied to a parameter or to a pointer loaded from the heap, in a body that lives
+in another translation unit -- the hazard is declared. A function that performs a
+base-to-derived conversion, or calls a function marked ``[[clang::downcasts]]``,
+must itself be marked ``[[clang::downcasts]]``; a constructor or destructor may
+not perform such a conversion nor call a function marked that way. Since the
+requirement is checked at each definition, it holds across translation units with
+no body having to be visible. An override may not add the marker when the function
+it overrides lacks it, since a call through the base would not see it.
+
+``dynamic_cast`` is exempt: inside a constructor or destructor the object is
+treated as being of that constructor's or destructor's own class, so a
+``dynamic_cast`` to a derived type is well defined and simply fails.
+  }];
+}
+
 def LifetimeSafetyNonInvalidatingViolation
     : DiagGroup<"lifetime-safety-non-invalidating-violation"> {
   code Documentation = [{
@@ -1080,6 +1108,11 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyCaptureByViolation,
                                          LifetimeSafetyNonInvalidatingViolation,
                                          LifetimeSafetyDestructionOrder,
+                                         // A base-to-derived conversion reachable
+                                         // from a constructor or destructor reads
+                                         // a subobject that is not alive yet, or
+                                         // no longer is.
+                                         LifetimeSafetyDowncasts,
                                          // A borrow of `this`/a parameter that
                                          // escapes (via return or a field) from
                                          // an unannotated function is a soundness

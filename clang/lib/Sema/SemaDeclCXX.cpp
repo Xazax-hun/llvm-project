@@ -19144,6 +19144,8 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
           diag::warn_lifetime_safety_override_of_destruction_order_safe,
           New->getLocation()) ||
       !Diags.isIgnored(diag::warn_lifetime_safety_override_of_non_invalidating,
+                       New->getLocation()) ||
+      !Diags.isIgnored(diag::warn_lifetime_safety_override_adds_downcasts,
                        New->getLocation())) {
     for (unsigned I = 0, E = Old->getNumParams();
          I != E && I < New->getNumParams(); ++I)
@@ -19206,6 +19208,16 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
         !New->hasAttr<LifetimeNonInvalidatingAttr>()) {
       Diag(New->getLocation(),
            diag::warn_lifetime_safety_override_of_non_invalidating);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
+    // '[[clang::downcasts]]' runs the other way round: it marks a HAZARD rather
+    // than a promise, so the danger is an override that ADDS it. A constructor or
+    // destructor calling through the base is checked against the base's
+    // declaration, so a base-to-derived conversion this override reaches would be
+    // invisible there.
+    if (New->hasAttr<DowncastsAttr>() && !Old->hasAttr<DowncastsAttr>()) {
+      Diag(New->getLocation(),
+           diag::warn_lifetime_safety_override_adds_downcasts);
       Diag(Old->getLocation(), diag::note_overridden_virtual_function);
     }
   }
