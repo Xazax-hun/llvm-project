@@ -2962,6 +2962,212 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
       .TraverseTranslationUnitDecl(TU);
 }
 
+//===----------------------------------------------------------------------===//
+// Static destruction order safety
+//===----------------------------------------------------------------------===//
+
+/// True if destroying an object of type \p QT at shutdown cannot observe another
+/// object of static storage duration.
+///
+/// Trivially destructible types are safe because nothing runs for them: their
+/// storage simply persists to process exit. Otherwise the type must promise it,
+/// via '[[clang::destruction_order_safe]]', and that promise is verified against
+/// its destructor. Standard library types are treated as safe -- a container's
+/// destructor releases only what it owns, so it cannot reach an unrelated static
+/// object.
+static bool isDestructionOrderSafeType(QualType QT) {
+  QT = QT.getNonReferenceType();
+  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
+    QT = AT->getElementType();
+  if (QT.isDestructedType() == QualType::DK_none)
+    return true; // nothing runs at shutdown
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD)
+    return true; // no destructor to run
+  if (RD->hasAttr<DestructionOrderSafeAttr>())
+    return true;
+  if (lifetimes::isInStlNamespace(RD))
+    return true;
+  // A class is safe when everything destroyed as part of it is: bases and
+  // members run their own destructors at shutdown too.
+  if (const CXXDestructorDecl *DD = RD->getDestructor())
+    if (!DD->isImplicit())
+      return false; // a user-written destructor must promise explicitly
+  if (!RD->hasDefinition())
+    return false;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (!isDestructionOrderSafeType(B.getType()))
+      return false;
+  for (const FieldDecl *FD : RD->fields())
+    if (!isDestructionOrderSafeType(FD->getType()))
+      return false;
+  return true;
+}
+
+/// True if \p FD may be called from a verified destructor.
+static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
+  if (!FD)
+    return false;
+  // A constexpr/consteval function is exempt: it is meant to be evaluable
+  // without reference to program state.
+  if (FD->isConstexpr())
+    return true;
+  if (FD->hasAttr<DestructionOrderSafeAttr>())
+    return true;
+  // An implicitly defined special member only touches subobjects of its own
+  // class; it has no way to name a global.
+  if (FD->isImplicit())
+    return true;
+  if (lifetimes::isInStlNamespace(FD))
+    return true;
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
+    const CXXRecordDecl *P = MD->getParent();
+    if (P->hasAttr<DestructionOrderSafeAttr>() ||
+        lifetimes::isInStlNamespace(P))
+      return true;
+  }
+  return false;
+}
+
+/// Verifies the body of a 'destruction_order_safe' function: it may not
+/// reference an object of static storage duration that has a non-trivial
+/// destructor (that object may already be gone), and it may only call functions
+/// that are themselves safe.
+///
+/// A lambda body is held to the same rules: it runs under the constraints of
+/// whatever invokes it, and the visitor descends into it naturally.
+namespace {
+class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
+  Sema &S;
+  const FunctionDecl *Subject;
+
+public:
+  DestructionOrderSafeBodyChecker(Sema &S, const FunctionDecl *Subject)
+      : S(S), Subject(Subject) {
+    ShouldVisitImplicitCode = false;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr *DRE) override {
+    const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+    if (!VD || !VD->hasGlobalStorage())
+      return true;
+    // Referencing a trivially destructible object of static storage duration is
+    // fine: nothing runs for it, so its storage outlives every destructor. Only
+    // an object that is actually destroyed can be observed after the fact.
+    if (VD->getType().isDestructedType() == QualType::DK_none)
+      return true;
+    S.Diag(DRE->getExprLoc(),
+           diag::warn_lifetime_safety_destruction_order_global_ref)
+        << Subject << VD;
+    return true;
+  }
+
+  bool VisitCallExpr(CallExpr *CE) override {
+    const FunctionDecl *Callee = CE->getDirectCallee();
+    if (!Callee) {
+      S.Diag(CE->getExprLoc(),
+             diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
+          << Subject;
+      return true;
+    }
+    if (!isDestructionOrderSafeFunction(Callee))
+      S.Diag(CE->getExprLoc(),
+             diag::warn_lifetime_safety_destruction_order_unsafe_call)
+          << Subject << Callee;
+    return true;
+  }
+
+  bool VisitCXXConstructExpr(CXXConstructExpr *CCE) override {
+    if (const CXXConstructorDecl *Ctor = CCE->getConstructor())
+      if (!isDestructionOrderSafeFunction(Ctor))
+        S.Diag(CCE->getExprLoc(),
+               diag::warn_lifetime_safety_destruction_order_unsafe_call)
+            << Subject << Ctor;
+    return true;
+  }
+};
+} // namespace
+
+/// Enforces static destruction order safety across the TU.
+///
+/// Two rules, checked together because the second is what makes the first
+/// meaningful:
+///   - an object of static storage duration must be trivially destructible or
+///     have a 'destruction_order_safe' type;
+///   - the destructor of such a type, and the body of any annotated function,
+///     must not reach another static object or call an unchecked function.
+static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
+                                                   TranslationUnitDecl *TU) {
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  if (Diags.isIgnored(diag::warn_lifetime_safety_unsafe_static_destruction,
+                      SourceLocation()))
+    return;
+  llvm::TimeTraceScope TimeProfile("LifetimeSafetyDestructionOrder");
+
+  struct Walker : DynamicRecursiveASTVisitor {
+    Sema &S;
+    explicit Walker(Sema &S) : S(S) { ShouldVisitImplicitCode = false; }
+
+    bool VisitVarDecl(VarDecl *VD) override {
+      // Only objects that are actually destroyed at shutdown.
+      if (!VD->hasGlobalStorage() || VD->isInvalidDecl())
+        return true;
+      // Report the definition, not every declaration: a static data member is
+      // declared in-class and defined out-of-line, and an `extern` declaration
+      // is destroyed in whichever TU defines it -- which will report it there.
+      if (VD->isThisDeclarationADefinition() != VarDecl::Definition)
+        return true;
+      if (S.SourceMgr.isInSystemHeader(VD->getLocation()))
+        return true;
+      if (isDestructionOrderSafeType(VD->getType()))
+        return true;
+      S.Diag(VD->getLocation(),
+             diag::warn_lifetime_safety_unsafe_static_destruction)
+          << (VD->isStaticDataMember() ? 1 : 0) << VD->getType();
+      return true;
+    }
+
+    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
+      if (!RD->hasAttr<DestructionOrderSafeAttr>() || !RD->hasDefinition())
+        return true;
+      if (S.SourceMgr.isInSystemHeader(RD->getLocation()))
+        return true;
+      // Destroying the object destroys its bases and members too, and those
+      // destructor calls are implicit -- the body checker never sees them. So the
+      // promise has to extend to every subobject.
+      for (const CXXBaseSpecifier &B : RD->bases())
+        if (!isDestructionOrderSafeType(B.getType()))
+          S.Diag(B.getBeginLoc(),
+                 diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
+              << RD << 0 << (const NamedDecl *)nullptr << B.getType();
+      for (FieldDecl *FD : RD->fields())
+        if (!isDestructionOrderSafeType(FD->getType()))
+          S.Diag(FD->getLocation(),
+                 diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
+              << RD << 1 << FD << FD->getType();
+      return true;
+    }
+
+    bool VisitFunctionDecl(FunctionDecl *FD) override {
+      if (!FD->doesThisDeclarationHaveABody() || FD->isImplicit())
+        return true;
+      if (S.SourceMgr.isInSystemHeader(FD->getLocation()))
+        return true;
+      // Verify a body that carries the promise, either directly or by being the
+      // destructor of a type that carries it.
+      bool Annotated = FD->hasAttr<DestructionOrderSafeAttr>();
+      const auto *DD = dyn_cast<CXXDestructorDecl>(FD);
+      bool SafeTypeDtor =
+          DD && DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
+      if (!Annotated && !SafeTypeDtor)
+        return true;
+      DestructionOrderSafeBodyChecker(S, FD).TraverseStmt(FD->getBody());
+      return true;
+    }
+  };
+  Walker(S).TraverseDecl(TU);
+}
+
 /// Runs the lifetime safety analysis over every namespace-scope variable whose
 /// initializer is dynamic.
 ///
@@ -3088,8 +3294,10 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
 
   // Namespace-scope dynamic initializers, in both modes: neither the per-
   // function path nor the TU sweeps above reach them.
-  if (S.getLangOpts().CPlusPlus)
+  if (S.getLangOpts().CPlusPlus) {
     LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
+    LifetimeSafetyDestructionOrderAnalysis(S, TU);
+  }
 }
 
 void clang::sema::AnalysisBasedWarnings::

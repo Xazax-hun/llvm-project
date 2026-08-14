@@ -4599,6 +4599,60 @@ functions that do not return a pointer-like type.
   }];
 }
 
+def DestructionOrderSafeDocs : Documentation {
+  let Category = DocCatDecl;
+  let Content = [{
+Declares that a type, or a function, is safe with respect to the order in which
+objects of static storage duration are destroyed.
+
+At process shutdown, objects with static storage duration are destroyed in
+reverse order of construction -- and across translation units that order is not
+specified at all. A destructor that reaches out to another such object may
+therefore read one that has already been destroyed. This is the classic "logger
+destroyed before its clients" bug, and it is invisible to intra-procedural
+analysis: nothing at the use site distinguishes a live global from a dead one.
+
+The safe programming model addresses this by construction rather than by
+detection. A variable of static storage duration is permitted only when its
+destruction cannot observe another such object:
+
+* its type is trivially destructible (nothing runs at shutdown), or
+* its type is annotated ``[[clang::destruction_order_safe]]``.
+
+Annotating a type is a promise about its destructor, and that promise is
+verified. The destructor of an annotated type -- and the body of any annotated
+function -- may only:
+
+* call functions that are themselves ``destruction_order_safe``, or are
+  ``constexpr``/``consteval``, and
+* refrain from referencing any object of static storage duration whose type has a
+  non-trivial destructor.
+
+Referencing a trivially destructible global is allowed: its storage outlives all
+destructors, so no ordering hazard exists.
+
+Standard library types and functions are treated as destruction-order-safe. A
+standard container's destructor releases only what it owns, so it cannot observe
+an unrelated static object.
+
+.. code-block:: c++
+
+  struct [[clang::destruction_order_safe]] Counter {
+    int n = 0;
+    ~Counter() { n = 0; }         // touches nothing outside itself: verified
+  };
+  Counter c;                      // allowed
+
+  std::string name;               // allowed: std::string is destruction-order-safe
+
+  struct Auditor { ~Auditor(); };
+  Auditor a;                      // rejected: non-trivial destructor, unannotated
+
+A lambda passed to such a function is held to the same rules, since its body runs
+under the same constraints as the function that invokes it.
+  }];
+}
+
 def LifetimeNonInvalidatingDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{

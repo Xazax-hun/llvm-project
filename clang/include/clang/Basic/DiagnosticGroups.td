@@ -711,6 +711,24 @@ programming model.
   }];
 }
 
+def LifetimeSafetyDestructionOrder
+    : DiagGroup<"lifetime-safety-destruction-order"> {
+  code Documentation = [{
+Enforces safety with respect to the order in which objects of static storage
+duration are destroyed.
+
+At shutdown such objects are destroyed in reverse order of construction, and
+across translation units the order is unspecified, so a destructor that reads
+another such object may read one already destroyed. Nothing at the use site
+distinguishes a live global from a dead one, so this is addressed by construction:
+a variable of static storage duration must be trivially destructible or have a
+type annotated '[[clang::destruction_order_safe]]', and the destructor of an
+annotated type may only call destruction-order-safe or constexpr functions and
+must not reference a global with a non-trivial destructor. Standard library types
+and functions are treated as safe.
+  }];
+}
+
 def LifetimeSafetyNonInvalidatingViolation
     : DiagGroup<"lifetime-safety-non-invalidating-violation"> {
   code Documentation = [{
@@ -732,6 +750,7 @@ def LifetimeSafetyValidations : DiagGroup<"lifetime-safety-validations",
                                            LifetimeSafetyImmortalViolation,
                                            LifetimeSafetyCaptureByViolation,
                                            LifetimeSafetyNonInvalidatingViolation,
+                                           LifetimeSafetyDestructionOrder,
                                            LifetimeSafetyMisplacedLifetimebound]> {
   code Documentation = [{
 Verify function implementations adhere to the annotated lifetime contracts through lifetime safety
@@ -1060,6 +1079,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyImmortalViolation,
                                          LifetimeSafetyCaptureByViolation,
                                          LifetimeSafetyNonInvalidatingViolation,
+                                         LifetimeSafetyDestructionOrder,
                                          // A borrow of `this`/a parameter that
                                          // escapes (via return or a field) from
                                          // an unannotated function is a soundness

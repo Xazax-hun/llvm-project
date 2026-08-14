@@ -2356,6 +2356,34 @@ def warn_lifetime_safety_override_of_non_invalidating : Warning<
   "invalidate anything, so a borrow the caller took beforehand would be left "
   "silently dangling by this override">,
   InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
+def warn_lifetime_safety_unsafe_static_destruction : Warning<
+  "%select{variable|static data member}0 of static storage duration has type %1, "
+  "whose destructor is not known to be safe against static destruction order; at "
+  "shutdown it may observe another such object that was already destroyed. Give "
+  "%1 a trivial destructor, or annotate it "
+  "'[[clang::destruction_order_safe]]' so its destructor is verified">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_global_ref : Warning<
+  "%0 is 'destruction_order_safe' but references %1, an object of static storage "
+  "duration with a non-trivial destructor; at shutdown that object may already "
+  "have been destroyed">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_call : Warning<
+  "%0 is 'destruction_order_safe' but calls %1, which is not; the promise covers "
+  "only what this body can be checked against, so the callee must be "
+  "'destruction_order_safe' (or 'constexpr') too">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_indirect_call : Warning<
+  "%0 is 'destruction_order_safe' but performs an indirect call, whose target "
+  "cannot be checked for static destruction order safety">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
+  "%0 is 'destruction_order_safe' but its %select{base class|member %2}1 has type "
+  "%3, whose destructor is not known to be safe; that destructor runs at shutdown "
+  "as part of destroying %0, so it must be safe too">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def note_lifetime_safety_destruction_order_dtor : Note<
+  "destructor of 'destruction_order_safe' type %0 is verified">;
 def note_cat_conform_to_noescape_prot : Note<
   "%select{category|class extension}0 conforms to protocol %1 which defines method %2">;
 

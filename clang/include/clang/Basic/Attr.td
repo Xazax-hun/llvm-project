@@ -2169,6 +2169,13 @@ def LifetimeImmortal : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+def DestructionOrderSafe : InheritableAttr {
+  let Spellings = [Clang<"destruction_order_safe", 0>];
+  let Subjects = SubjectList<[CXXRecord, Function], ErrorDiag>;
+  let Documentation = [DestructionOrderSafeDocs];
+  let SimpleHandler = 1;
+}
+
 def LifetimeNonInvalidating : InheritableAttr {
   let Spellings = [Clang<"lifetime_non_invalidating", 0>];
   let Subjects = SubjectList<[CXXMethod], ErrorDiag>;
