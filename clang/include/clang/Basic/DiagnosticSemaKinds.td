@@ -11307,6 +11307,12 @@ def warn_lifetime_safety_reinterpret_cast
               "provenance">,
       InGroup<LifetimeSafetyTypePunning>,
       DefaultIgnore;
+def warn_lifetime_safety_void_pointer_cast
+    : Warning<"recovering a typed pointer from a 'void *' is not modeled by "
+              "lifetime safety analysis; 'void *' is opaque, so the conversion can "
+              "name any type and hides where the pointer came from">,
+      InGroup<LifetimeSafetyTypePunning>,
+      DefaultIgnore;
 def warn_lifetime_safety_downcast
     : Warning<"a base-to-derived conversion is not modeled by lifetime safety "
               "analysis; whether the derived subobject is alive depends on how far "

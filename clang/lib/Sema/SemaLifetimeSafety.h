@@ -72,6 +72,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_coroutine,
       diag::warn_lifetime_safety_union,
       diag::warn_lifetime_safety_reinterpret_cast,
+      diag::warn_lifetime_safety_void_pointer_cast,
       diag::warn_lifetime_safety_downcast,
       diag::warn_lifetime_safety_owner_of_indirection,
       diag::warn_lifetime_safety_pointer_of_indirection,
@@ -718,6 +719,10 @@ public:
   }
   void reportReinterpretCast(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_reinterpret_cast)
+        << E->getSourceRange();
+  }
+  void reportVoidPointerCast(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_void_pointer_cast)
         << E->getSourceRange();
   }
   void reportDowncast(const Expr *E) override {

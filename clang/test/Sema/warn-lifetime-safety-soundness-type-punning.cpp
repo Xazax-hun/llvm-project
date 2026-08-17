@@ -52,10 +52,21 @@ struct Plain {
 int plain_member(Plain &s) { return s.a + s.b; } // no-warning
 
 int static_casts(double d, void *vp) {
-  int i = static_cast<int>(d);     // no-warning
-  int *p = static_cast<int *>(vp); // no-warning
+  int i = static_cast<int>(d); // no-warning: not a pointer conversion at all
+  // Recovering a typed pointer out of a `void *` IS reported, for the same reason a
+  // reinterpret_cast is: `void *` is opaque, so the conversion can name any type and
+  // nothing records where the pointer came from. Splitting a conversion in two
+  // through one is how a cast evades any check that compares the source and target
+  // types -- `Base * -> void * -> Derived *` has a record on only one side of each
+  // half, so neither half looks like a base-to-derived conversion.
+  int *p = static_cast<int *>(vp); // expected-warning {{recovering a typed pointer from a 'void *' is not modeled by lifetime safety analysis}}
   return i + (p != nullptr);
 }
+
+// Casting TO `void *` is not reported: that is the opaque-userdata idiom, and what a
+// callee may do with such a parameter is handled conservatively at the call (a
+// `void` pointee is assumed to reach an owner).
+void *to_void(int *p) { return static_cast<void *>(p); } // no-warning
 
 // Per-construct opt-out.
 void opt_out(U u) {

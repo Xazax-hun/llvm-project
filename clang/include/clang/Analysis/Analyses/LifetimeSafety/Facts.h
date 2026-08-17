@@ -565,6 +565,15 @@ enum class UntrackedConstructReason : uint8_t {
   /// (reinterpreting storage), hiding its provenance from the analysis, so a
   /// borrow recovered through it is not tracked.
   ReinterpretCast,
+  /// A cast that recovers a typed pointer out of a `void *`. Like a
+  /// `reinterpret_cast`, it hides where the pointer came from: `void *` is opaque,
+  /// so the conversion can name any type at all, and splitting a conversion in two
+  /// through one launders it past checks that look at the source and target types
+  /// (`Base * -> void * -> Derived *` has a record on only one side of each half).
+  /// Casting *to* `void *` is not reported -- that is the opaque-userdata idiom,
+  /// and what a callee may do with such a parameter is handled conservatively
+  /// elsewhere.
+  VoidPointerCast,
   /// A base-to-derived conversion. Whether the derived subobject is alive depends
   /// on whether the complete object's construction has finished and its
   /// destruction has not begun -- which nothing at the conversion reveals. Inside

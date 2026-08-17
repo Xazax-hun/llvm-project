@@ -859,6 +859,27 @@ void FactsGenerator::VisitCXXNullPtrLiteralExpr(
   getOriginNode(*N);
 }
 
+/// True if \p CE recovers a typed pointer out of a `void *`.
+///
+/// Like a `reinterpret_cast` this hides where the pointer came from: `void *` is
+/// opaque, so the conversion can name any type, and splitting a conversion in two
+/// through one launders it past any check that compares the source and target types
+/// -- `Base * -> void * -> Derived *` has a record on only one side of each half.
+///
+/// Casting *to* `void *` is not reported: that is the opaque-userdata idiom, and
+/// what a callee may do with such a parameter is already handled conservatively
+/// (paramMayMutateOwner treats a `void` pointee as possibly reaching an owner).
+static bool isCastFromVoidPointer(const CastExpr *CE) {
+  QualType From = CE->getSubExpr()->getType();
+  if (!From->isPointerType() || !From->getPointeeType()->isVoidType())
+    return false;
+  QualType To = CE->getType();
+  // Only recovering a TYPED pointer loses something; `void *` to `void *` (adding
+  // cv-qualification, say) does not.
+  return (To->isPointerType() || To->isReferenceType()) &&
+         !To->getPointeeType()->isVoidType();
+}
+
 /// True if \p CE converts a base class pointer/reference to a derived one.
 ///
 /// Keyed on the TYPES, not on the cast kind: a `static_cast`, a C-style cast and a
@@ -910,6 +931,13 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   if (isDowncast(CE))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::Downcast, cast<Expr>(CE)));
+
+  // And recovering a typed pointer out of a `void *`, which launders provenance
+  // the same way -- and is how a base-to-derived conversion evades the test above,
+  // by going through `void *` so neither half has a record on both sides.
+  if (isCastFromVoidPointer(CE))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::VoidPointerCast, cast<Expr>(CE)));
 
   OriginNode *Dest = getOriginNode(*CE);
   if (!Dest)

@@ -174,6 +174,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::ReinterpretCast:
     OS << "ReinterpretCast";
     break;
+  case UntrackedConstructReason::VoidPointerCast:
+    OS << "VoidPointerCast";
+    break;
   case UntrackedConstructReason::Downcast:
     OS << "Downcast";
     break;

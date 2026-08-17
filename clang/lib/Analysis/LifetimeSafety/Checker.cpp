@@ -1746,6 +1746,10 @@ public:
       if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
         SemaHelper->reportReinterpretCast(E);
       break;
+    case UntrackedConstructReason::VoidPointerCast:
+      if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
+        SemaHelper->reportVoidPointerCast(E);
+      break;
     case UntrackedConstructReason::Downcast:
       if (ReportedUntrackedLocs.insert(E->getExprLoc()).second)
         SemaHelper->reportDowncast(E);

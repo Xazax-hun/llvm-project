@@ -20,12 +20,20 @@ volatile char sink;
 //
 // Note both annotations below are TRUTHFUL -- the parameter really does not
 // escape -- so nothing else flags these.
+//
+// The CALLER-side assumed invalidation is what this file is about. Recovering the
+// real type out of the `void *` inside the callee is reported separately, under
+// -Wlifetime-safety-type-punning: the conversion can name any type and hides where
+// the pointer came from. The two are independent -- the caller-side rule still has
+// to hold for a callee whose body is in another translation unit, which is why the
+// cast being refused here does not make it redundant.
 
 //===----------------------------------------------------------------------===//
 // void * parameter.
 //===----------------------------------------------------------------------===//
 
 static void clear_through_void(void *p [[clang::noescape]]) {
+  // expected-warning@+1 {{recovering a typed pointer from a 'void *' is not modeled}}
   *static_cast<string *>(p) = string(); // frees the old buffer
 }
 

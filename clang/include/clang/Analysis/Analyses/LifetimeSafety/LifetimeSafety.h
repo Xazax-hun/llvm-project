@@ -366,6 +366,7 @@ public:
   // Reports a `reinterpret_cast`, which can launder a borrow through an
   // unrelated type and hide its provenance from the analysis.
   virtual void reportReinterpretCast(const Expr *E) {}
+  virtual void reportVoidPointerCast(const Expr *E) {}
   virtual void reportDowncast(const Expr *E) {}
 
   // Reports a value of a [[gsl::Owner]] container whose element type is an

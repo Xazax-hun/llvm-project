@@ -1,4 +1,5 @@
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-downcasts -verify %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-downcasts \
+// RUN:   -Wlifetime-safety-type-punning -verify %s
 
 volatile char sink;
 
@@ -136,3 +137,22 @@ Unrelated *unrelated(Unrelated *u) { return static_cast<Unrelated *>(u); } // no
 
 // A conversion to the same class is not a downcast.
 Derived *same(Derived *d) { return static_cast<Derived *>(d); } // no-warning
+
+//===----------------------------------------------------------------------===//
+// Laundering the conversion through `void *`.
+//
+// Comparing the source and target types is defeated by splitting the conversion in
+// two: `Base * -> void *` has no record on the target side and `void * -> Derived *`
+// none on the source side, so neither half looks like a downcast. Recovering a typed
+// pointer out of a `void *` is refused in its own right, under
+// -Wlifetime-safety-type-punning, on the same grounds as a 'reinterpret_cast': the
+// conversion can name any type and nothing records where the pointer came from.
+//===----------------------------------------------------------------------===//
+
+struct ViaVoid : Base {
+  ~ViaVoid() override {
+    void *p = this; // no-warning: casting TO void * is the userdata idiom
+    // expected-warning@+1 {{recovering a typed pointer from a 'void *' is not modeled}}
+    (void)static_cast<Derived *>(p);
+  }
+};
