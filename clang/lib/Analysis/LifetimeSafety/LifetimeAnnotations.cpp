@@ -240,9 +240,21 @@ bool shouldTrackImplicitObjectArg(const Expr &ImplicitObjectArgument,
   // Track dereference operator and transparent functions like begin(), get(),
   // etc. for all GSL pointers. Only do so for lifetime safety analysis and not
   // for Sema's statement-local analysis as it starts to have false-positives.
+  //
+  // These names are a HEURISTIC about what the result borrows: for a view, they
+  // hand out a borrow of what the view points AT, not of the view object. That is
+  // true of the standard library -- `string_view::data()` returns a pointer into
+  // the viewed buffer -- but it is only a guess, and a user-defined view can have
+  // its own storage: a member named `data` may perfectly well return a pointer to
+  // the object's own bytes. So an explicit '[[clang::lifetimebound]]' on the
+  // implicit object parameter, which states that the result may refer to THIS
+  // object, wins -- otherwise the guess silently redirects the borrow away from
+  // the object and a use after the view dies is reported nowhere. No standard
+  // library view annotates these accessors, so this changes nothing for the STL.
   if (RunningUnderLifetimeSafety &&
       isGslPointerType(Callee->getFunctionObjectParameterType()) &&
-      isReferenceOrPointerLikeType(Callee->getReturnType())) {
+      isReferenceOrPointerLikeType(Callee->getReturnType()) &&
+      !getImplicitObjectParamLifetimeBoundAttr(Callee)) {
     // Propagate origins through GSL pointer arithmetic and dereference
     // operators.
     switch (Callee->getOverloadedOperator()) {
