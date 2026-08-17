@@ -465,6 +465,95 @@ struct [[clang::destruction_order_safe]] GenericLambdaOk {
 };
 
 //===----------------------------------------------------------------------===//
+// Construction runs at shutdown too.
+//
+// Every type-level rule here asks whether a type's DESTRUCTOR is safe, so a type
+// with a trivial destructor and a hazardous CONSTRUCTOR passes all of them. And a
+// constructor that is implicit or defaulted cannot carry the promise -- there is no
+// body to make one about -- yet it runs the constructor of every base and every
+// member. Those calls appear nowhere in the body being verified, so one
+// attribute-free wrapper was enough to launder arbitrary code into shutdown.
+//===----------------------------------------------------------------------===//
+
+// Trivially destructible, so no type rule constrains it; its constructor is the
+// hazard.
+struct Peeker {
+  char c;
+  Peeker() : c((char)g_counter.n) {}
+};
+
+// Written directly, this was always caught. The wrapper is what hid it.
+struct [[clang::destruction_order_safe]] MakesPeekerDirectly {
+  ~MakesPeekerDirectly() {
+    Peeker p; // expected-warning {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    (void)p;
+  }
+};
+
+// (1) An IMPLICIT default constructor runs its member's constructor.
+struct WrapsPeeker {
+  Peeker p;
+};
+struct [[clang::destruction_order_safe]] MakesWrapper {
+  ~MakesWrapper() {
+    WrapsPeeker w; // expected-warning {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    (void)w;
+  }
+};
+
+// (2) ...and its BASE's constructor.
+struct DerivesPeeker : Peeker {};
+struct [[clang::destruction_order_safe]] MakesDerived {
+  ~MakesDerived() {
+    DerivesPeeker d; // expected-warning {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    (void)d;
+  }
+};
+
+// (3) A template wrapper is the same shape.
+template <class T> struct Box2 {
+  T t;
+};
+struct [[clang::destruction_order_safe]] MakesBox {
+  ~MakesBox() {
+    Box2<Peeker> b; // expected-warning {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    (void)b;
+  }
+};
+
+// (4) A verified constructor's IMPLICIT initializers run too. Only written ones
+// were traversed, so leaving the member defaulted skipped it.
+struct HasImplicitMemberInit {
+  Peeker p;
+  // expected-warning@+1 {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+  [[clang::destruction_order_safe]] HasImplicitMemberInit() {}
+};
+
+// (5) An annotated class with no user-declared constructor at all: the attribute
+// cannot describe what the compiler generates, so the generated initializers are
+// what gets checked.
+struct [[clang::destruction_order_safe]] AnnotatedAggregate {
+  Peeker p;
+};
+struct [[clang::destruction_order_safe]] MakesAnnotatedAggregate {
+  ~MakesAnnotatedAggregate() {
+    AnnotatedAggregate a; // expected-warning {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    (void)a;
+  }
+};
+
+// A wrapper whose member's constructor is safe stays clean.
+struct WrapsCounter {
+  Counter c;
+};
+struct [[clang::destruction_order_safe]] MakesSafeWrapper {
+  ~MakesSafeWrapper() {
+    WrapsCounter w; // no-warning
+    (void)w;
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // The promise must be repeated on overrides.
 //
 // The callee check resolves against the statically named method, so an override

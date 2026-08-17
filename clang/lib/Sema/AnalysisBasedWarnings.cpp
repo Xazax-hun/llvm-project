@@ -3333,6 +3333,13 @@ class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   /// is not dependent is reached twice, from two distinct AST nodes that share one
   /// source location.
   llvm::SmallPtrSet<const void *, 8> ReportedLocs;
+  /// Implicit or defaulted constructors already descended into, so a class that
+  /// reaches itself cannot loop.
+  llvm::SmallPtrSet<const Decl *, 8> DescendedCtors;
+  /// While descending through an implicit or defaulted constructor, the location of
+  /// the construction the user actually wrote. Reports anchor there rather than at
+  /// the member or base declaration the generated code happens to point at.
+  SourceLocation DescentLoc;
 
   /// True the first time \p Loc is reported.
   bool firstReportAt(SourceLocation Loc) {
@@ -3440,26 +3447,56 @@ public:
   }
 
   bool VisitCXXConstructExpr(CXXConstructExpr *CCE) override {
-    const CXXConstructorDecl *Ctor = CCE->getConstructor();
-    if (!Ctor)
-      return true;
-    // An IMPLICIT constructor has no body to inspect, but it is not inert: it runs
-    // the class's default member initializers, and an NSDMI names whatever it
-    // likes. (The comment that used to justify trusting implicit special members
-    // -- "only touches subobjects of its own class" -- overlooked exactly this.)
-    if (Ctor->isImplicit()) {
-      for (const FieldDecl *FD : Ctor->getParent()->fields())
-        if (const Expr *Init = FD->getInClassInitializer())
-          TraverseStmt(const_cast<Expr *>(Init));
-      return true;
-    }
-    if (!isDestructionOrderSafeFunction(Ctor) &&
-        firstReportAt(CCE->getExprLoc())) {
-      S.Diag(CCE->getExprLoc(),
-             diag::warn_lifetime_safety_destruction_order_unsafe_call)
-          << Subject << SubjectKind << Ctor;
-    }
+    checkConstruction(CCE->getConstructor(), CCE->getExprLoc());
     return true;
+  }
+
+  /// Checks a constructor that runs at shutdown.
+  ///
+  /// A constructor written with a body follows the ordinary callee rule: it must
+  /// carry the promise. One that is IMPLICIT or DEFAULTED cannot -- there is no
+  /// body to make a promise about, and `[[clang::destruction_order_safe]]` on a
+  /// `= default` says nothing about what the compiler generates. But such a
+  /// constructor is far from inert: besides the class's default member
+  /// initializers it runs the CONSTRUCTOR of every base and every member, and
+  /// those calls appear nowhere in the body being verified.
+  ///
+  /// So `Outer o;` -- where `struct Outer { Inner i; };` -- ran `Inner::Inner()`
+  /// at shutdown with nothing checking it, while writing `Inner i;` directly in
+  /// the same destructor was correctly refused. One attribute-free wrapper was
+  /// the whole trick. Descend into what the constructor actually runs instead.
+  ///
+  /// Note this is about CONSTRUCTION, which the type-level rules do not cover at
+  /// all: they ask whether a type's DESTRUCTOR is safe, so a type with a trivial
+  /// destructor and a hazardous constructor passes every one of them.
+  void checkConstruction(const CXXConstructorDecl *Ctor, SourceLocation Loc) {
+    if (!Ctor)
+      return;
+    if (!Ctor->isImplicit() && !Ctor->isDefaulted()) {
+      SourceLocation At = DescentLoc.isValid() ? DescentLoc : Loc;
+      if (!isDestructionOrderSafeFunction(Ctor) && firstReportAt(At))
+        S.Diag(At, diag::warn_lifetime_safety_destruction_order_unsafe_call)
+            << Subject << SubjectKind << Ctor;
+      return;
+    }
+    // Guard the descent only: a report is deduplicated by location instead, so a
+    // constructor reached from two places is still reported at each of them.
+    if (!DescendedCtors.insert(Ctor->getCanonicalDecl()).second)
+      return;
+    SourceLocation SavedAnchor = DescentLoc;
+    if (!DescentLoc.isValid())
+      DescentLoc = Loc;
+    // A default member initializer, which runs even when nothing else does.
+    for (const FieldDecl *FD : Ctor->getParent()->fields())
+      if (const Expr *Init = FD->getInClassInitializer())
+        TraverseStmt(const_cast<Expr *>(Init));
+    // The base and member constructors. Taking these from the initializer list
+    // rather than re-deriving them keeps arrays, virtual bases and delegation
+    // right, and each one lands back here for the same treatment.
+    for (const CXXCtorInitializer *Init : Ctor->inits())
+      if (Expr *E = Init->getInit())
+        TraverseStmt(E);
+    DescentLoc = SavedAnchor;
   }
 
   /// Destroying an object runs its destructor, and that is never a `CallExpr` --
@@ -3622,10 +3659,12 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       // A constructor's member-initializer list is code too, and it is not reachable
       // from getBody(). A marked constructor whose body is `{}` would otherwise pass
       // while its initializers read an object already destroyed at shutdown.
+      // Every initializer, not only the written ones: an implicit base or member
+      // initializer runs the same way and calls the same constructors.
       if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
         for (const CXXCtorInitializer *Init : Ctor->inits())
-          if (Init->isWritten())
-            Checker.TraverseStmt(Init->getInit());
+          if (Expr *E = Init->getInit())
+            Checker.TraverseStmt(E);
       return true;
     }
   };
