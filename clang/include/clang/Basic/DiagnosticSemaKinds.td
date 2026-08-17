@@ -2390,6 +2390,13 @@ def warn_lifetime_safety_destruction_order_unsafe_object : Warning<
   "whose destructor is not known to be safe; that destructor runs here, during "
   "shutdown">,
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_construction : Warning<
+  "%0 %select{is 'destruction_order_safe'|runs during static destruction}1 but "
+  "%select{creates a local|creates a temporary}2 of type %3, whose construction "
+  "runs code that is not known to be safe; a constructor runs here, during "
+  "shutdown -- for a container that includes its elements', which the library "
+  "calls where this body cannot see it">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
 def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
   "%0 is 'destruction_order_safe' but its %select{base class|member %2}1 has type "
   "%3, whose destructor is not known to be safe; that destructor runs at shutdown "

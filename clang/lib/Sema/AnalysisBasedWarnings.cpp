@@ -3009,6 +3009,98 @@ static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
   return RD->getIdentifier() && Erasing.contains(RD->getName());
 }
 
+static bool constructionIsInvisible(QualType QT, unsigned Depth);
+
+/// True if constructing \p QT runs a user-written constructor.
+static bool constructionRunsUserCode(QualType QT, unsigned Depth = 0) {
+  if (Depth > 8)
+    return true; // give up conservatively rather than recurse without bound
+  QT = QT.getNonReferenceType();
+  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
+    QT = AT->getElementType();
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false; // no constructor of ours runs
+  // A promise about the class covers its OWN constructor, which is verified against
+  // it (see carriesDestructionOrderPromise). It does not cover what a member
+  // container constructs: that verification walks the constructor's initializers and
+  // arrives at the container's constructor, which is library code it trusts. So keep
+  // looking for a container even here.
+  if (RD->hasAttr<DestructionOrderSafeAttr>())
+    return constructionIsInvisible(QT, Depth);
+  if (lifetimes::isInStlNamespace(RD)) {
+    // A container CONSTRUCTS its elements, so this follows the template arguments
+    // exactly as the destruction question does. What a type-erasing type constructs
+    // its type does not name at all.
+    if (isTypeErasingStdType(RD))
+      return true;
+    if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+      std::function<bool(const TemplateArgument &)> ArgRuns =
+          [&](const TemplateArgument &A) -> bool {
+        if (A.getKind() == TemplateArgument::Pack)
+          return llvm::any_of(A.pack_elements(), ArgRuns);
+        if (A.getKind() == TemplateArgument::Type)
+          return constructionRunsUserCode(A.getAsType(), Depth + 1);
+        return false;
+      };
+      return llvm::any_of(CTSD->getTemplateArgs().asArray(), ArgRuns);
+    }
+    return false;
+  }
+  for (const CXXConstructorDecl *Ctor : RD->ctors())
+    if (!Ctor->isImplicit() && !Ctor->isDefaulted())
+      return true;
+  // Otherwise only the generated constructor runs, which runs the bases' and
+  // members' constructors and the default member initializers.
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (constructionRunsUserCode(B.getType(), Depth + 1))
+      return true;
+  for (const FieldDecl *FD : RD->fields())
+    if (constructionRunsUserCode(FD->getType(), Depth + 1))
+      return true;
+  return false;
+}
+
+/// True if constructing \p QT runs a constructor the body being verified cannot
+/// see.
+///
+/// Every rule keyed on a type asks whether its DESTRUCTOR is safe, so a type with a
+/// trivial destructor and a hazardous constructor passed all of them -- and creating
+/// an object inside verified shutdown code runs its constructor there.
+///
+/// A user type's own constructor needs no type-level rule: it appears as a
+/// CXXConstructExpr and is reported precisely, by name, there. What cannot be seen
+/// that way is a CONTAINER's elements: `std::vector<Inner> v(1);` runs
+/// `Inner::Inner()` from inside the library, and nothing at the call site says so.
+/// So this asks only about that.
+///
+/// Note it is asked only where an object is CREATED in shutdown code, never of a
+/// static-duration variable: that one's constructor runs at startup, which is the
+/// static *initialization* order problem and a different hazard.
+static bool constructionIsInvisible(QualType QT, unsigned Depth) {
+  if (Depth > 8)
+    return false; // the precise per-constructor report still applies
+  QT = QT.getNonReferenceType();
+  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
+    QT = AT->getElementType();
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (lifetimes::isInStlNamespace(RD))
+    return constructionRunsUserCode(QT, Depth);
+  // A user type reached here has its own constructors reported precisely -- or, if it
+  // carries the promise, verified against it. Neither reaches what a member CONTAINER
+  // constructs, since that verification stops at the container's own constructor and
+  // trusts it, so keep looking for one among the bases and members.
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (constructionIsInvisible(B.getType(), Depth + 1))
+      return true;
+  for (const FieldDecl *FD : RD->fields())
+    if (constructionIsInvisible(FD->getType(), Depth + 1))
+      return true;
+  return false;
+}
+
 /// True if \p RD (or a base) declares a class-specific deallocation function that
 /// is user code and does not carry the destruction-order promise.
 ///
@@ -3516,18 +3608,32 @@ public:
         << Subject << SubjectKind << Kind << QT;
   }
 
+  /// Creating an object here runs its constructor here, at shutdown -- including,
+  /// for a container, its elements' constructors, which the library calls where this
+  /// body cannot see it.
+  void checkConstructedType(QualType QT, unsigned Kind, SourceLocation Loc) {
+    if (QT.isNull() || !constructionIsInvisible(QT, /*Depth=*/0) ||
+        !firstReportAt(Loc))
+      return;
+    S.Diag(Loc, diag::warn_lifetime_safety_destruction_order_unsafe_construction)
+        << Subject << SubjectKind << Kind << QT;
+  }
+
   bool VisitDeclStmt(DeclStmt *DS) override {
     for (const Decl *D : DS->decls())
       if (const auto *VD = dyn_cast<VarDecl>(D))
         // A static local is checked by the Walker as its own declaration; here we
         // care about the automatic ones, destroyed as this body unwinds.
-        if (VD->hasLocalStorage())
+        if (VD->hasLocalStorage()) {
           checkDestroyedType(VD->getType(), /*local=*/0, VD->getLocation());
+          checkConstructedType(VD->getType(), /*local=*/0, VD->getLocation());
+        }
     return true;
   }
 
   bool VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *BTE) override {
     checkDestroyedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
+    checkConstructedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
     return true;
   }
 

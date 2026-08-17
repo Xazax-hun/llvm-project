@@ -542,6 +542,72 @@ struct [[clang::destruction_order_safe]] MakesAnnotatedAggregate {
   }
 };
 
+// A CONTAINER constructs its elements, and that call happens inside the library --
+// nothing at the call site names it, so unlike a user type's own constructor it
+// cannot be reported precisely. That makes it a question about the TYPE, following
+// the template arguments the same way the destruction question does.
+struct [[clang::destruction_order_safe]] MakesVectorOfPeeker {
+  ~MakesVectorOfPeeker() {
+    // expected-warning@+1 {{creates a local of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    vector<Peeker> v;
+    (void)v;
+  }
+};
+
+// Reached through a member, where the container is not the local's own type.
+struct HoldsVectorOfPeeker {
+  vector<Peeker> v;
+};
+struct [[clang::destruction_order_safe]] MakesHolder {
+  ~MakesHolder() {
+    // expected-warning@+1 {{creates a local of type 'HoldsVectorOfPeeker', whose construction runs code that is not known to be safe}}
+    HoldsVectorOfPeeker h;
+    (void)h;
+  }
+};
+
+// Containers whose elements run no user code stay clean, including nested ones.
+struct [[clang::destruction_order_safe]] MakesSafeContainers {
+  ~MakesSafeContainers() {
+    vector<int> a;     // no-warning
+    string b;          // no-warning
+    vector<string> c;  // no-warning
+    vector<Pod> d;     // no-warning
+    vector<Counter> e; // no-warning: Counter is annotated, so its ctor is verified
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)d;
+    (void)e;
+  }
+};
+
+// The promise covers the class's OWN constructor, which is verified against it -- but
+// that verification walks the initializers and arrives at a member container's
+// constructor, which is library code it trusts. So the container question still has
+// to be asked of an annotated type's members, or annotating the WRAPPER would hide
+// exactly what the rule exists to see.
+struct [[clang::destruction_order_safe]] AnnotatedHoldsVector {
+  vector<Peeker> v;
+  [[clang::destruction_order_safe]] AnnotatedHoldsVector() {}
+};
+struct [[clang::destruction_order_safe]] MakesAnnotatedHolder {
+  ~MakesAnnotatedHolder() {
+    // expected-warning@+1 {{creates a local of type 'AnnotatedHoldsVector', whose construction runs code that is not known to be safe}}
+    AnnotatedHoldsVector h;
+    (void)h;
+  }
+};
+
+// The escape hatch is not a silencer: annotating the element to clear the container
+// rule routes that element's CONSTRUCTOR through the verifier, which then reports
+// the hazard in its own right.
+struct [[clang::destruction_order_safe]] AnnotatedButLeaky {
+  char c;
+  AnnotatedButLeaky()
+      : c((char)g_counter.n) {} // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+};
+
 // A wrapper whose member's constructor is safe stays clean.
 struct WrapsCounter {
   Counter c;

@@ -111,9 +111,13 @@ bool carriesDestructionOrderPromise(const FunctionDecl *FD) {
     return false;
   if (FD->hasAttr<DestructionOrderSafeAttr>())
     return true;
-  // On a class, the attribute is a promise about that class's destructor.
-  if (const auto *DD = dyn_cast<CXXDestructorDecl>(FD))
-    return DD->getParent()->hasAttr<DestructionOrderSafeAttr>();
+  // On a class, the attribute is a promise about that class's construction and
+  // destruction: creating an object inside shutdown code runs its constructor
+  // there, so a promise that covered only the destructor could be satisfied by a
+  // type whose constructor reaches an already-destroyed object.
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
+    if (isa<CXXDestructorDecl>(MD) || isa<CXXConstructorDecl>(MD))
+      return MD->getParent()->hasAttr<DestructionOrderSafeAttr>();
   return false;
 }
 
