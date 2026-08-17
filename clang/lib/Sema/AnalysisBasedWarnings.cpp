@@ -3261,6 +3261,39 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   return false;
 }
 
+/// True if \p VD is a static-duration variable of dependent type that no
+/// instantiation will ever speak for, so the dependent pattern is all there is to
+/// report.
+///
+/// A lambda written OUTSIDE any function body -- in a type alias template's
+/// `decltype`, say -- has no enclosing template whose instantiation would carry it,
+/// and Clang produces no instantiated closure for one: `static T t` inside it stays
+/// spelled `T` in the AST while an object of the substituted type really is
+/// constructed and destroyed at run time. There is no concrete declaration anywhere
+/// to judge, so judge the pattern -- conservatively, since `T` is unknown.
+///
+/// A lambda INSIDE a function template is unaffected: instantiating the function
+/// instantiates the closure, so a concrete `static Logger t` exists and is reported
+/// there precisely. Likewise `static T t` written directly in a function template.
+static bool isUninstantiableDependentStatic(const VarDecl *VD) {
+  if (!VD->getType()->isDependentType())
+    return false;
+  const auto *MD =
+      dyn_cast_or_null<CXXMethodDecl>(VD->getParentFunctionOrMethod());
+  if (!MD || !MD->getParent()->isLambda())
+    return false;
+  if (MD->getParent()->getDeclContext()->isFunctionOrMethod())
+    return false;
+  // A GENERIC lambda's call operator is a template, and its specializations ARE
+  // visited, so they report the substituted type precisely; do not also report the
+  // pattern's `T`. Only a lambda with nothing to instantiate needs the fallback.
+  if (FunctionTemplateDecl *FTD =
+          MD->getParent()->getDependentLambdaCallOperator())
+    if (!FTD->specializations().empty())
+      return false;
+  return true;
+}
+
 /// Verifies the body of a 'destruction_order_safe' function: it may not
 /// reference an object of static storage duration that has a non-trivial
 /// destructor (that object may already be gone), and it may only call functions
@@ -3291,6 +3324,20 @@ class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   /// without claiming anything (1). Only the wording differs, but saying "is
   /// 'destruction_order_safe'" about a function that is not would be a lie.
   unsigned SubjectKind;
+  /// Generic-lambda call operators already descended into, so a recursive lambda
+  /// cannot loop.
+  llvm::SmallPtrSet<const Decl *, 4> VisitedLambdaSpecs;
+  /// Locations already reported. A generic lambda's dependent PATTERN is written
+  /// inside the body being checked and is traversed with it, while its
+  /// INSTANTIATION is descended into separately -- so anything in the lambda that
+  /// is not dependent is reached twice, from two distinct AST nodes that share one
+  /// source location.
+  llvm::SmallPtrSet<const void *, 8> ReportedLocs;
+
+  /// True the first time \p Loc is reported.
+  bool firstReportAt(SourceLocation Loc) {
+    return ReportedLocs.insert(Loc.getPtrEncoding()).second;
+  }
 
 public:
   DestructionOrderSafeBodyChecker(Sema &S, const FunctionDecl *Subject,
@@ -3325,6 +3372,8 @@ public:
     // an object that is actually destroyed can be observed after the fact.
     if (VD->getType().isDestructedType() == QualType::DK_none)
       return true;
+    if (!firstReportAt(DRE->getExprLoc()))
+      return true;
     S.Diag(DRE->getExprLoc(),
            diag::warn_lifetime_safety_destruction_order_global_ref)
         << Subject << SubjectKind << VD;
@@ -3343,9 +3392,10 @@ public:
       if (CE->isTypeDependent() || CE->isValueDependent() ||
           CE->getCallee()->isTypeDependent())
         return true;
-      S.Diag(CE->getExprLoc(),
-             diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
-          << Subject << SubjectKind;
+      if (firstReportAt(CE->getExprLoc()))
+        S.Diag(CE->getExprLoc(),
+               diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
+            << Subject << SubjectKind;
       return true;
     }
     // Invoking a TYPE-ERASING callable is an indirect call wearing a direct call's
@@ -3357,9 +3407,10 @@ public:
     if (const auto *MD = dyn_cast<CXXMethodDecl>(Callee))
       if (MD->getOverloadedOperator() == OO_Call &&
           isTypeErasingStdType(MD->getParent())) {
-        S.Diag(CE->getExprLoc(),
-               diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
-            << Subject << SubjectKind;
+        if (firstReportAt(CE->getExprLoc()))
+          S.Diag(CE->getExprLoc(),
+                 diag::warn_lifetime_safety_destruction_order_unsafe_indirect_call)
+              << Subject << SubjectKind;
         return true;
       }
     if (isDestructionOrderSafeFunction(Callee))
@@ -3367,13 +3418,24 @@ public:
     // A lambda's call operator declared inside the function being verified is
     // already covered by this traversal -- its body is written here. One declared
     // elsewhere is not, and follows the ordinary rule.
+    //
+    // Except for a GENERIC lambda, where what is written here is the dependent
+    // PATTERN: a dependent call in it (`[](auto tag){ decltype(tag)::helper(); }`)
+    // resolves to nothing, so "already covered" is false and the exemption let a
+    // verified body reach arbitrary unverified code. Descend into the instantiation
+    // that this call actually names.
     if (const auto *MD = dyn_cast<CXXMethodDecl>(Callee))
       if (MD->getParent()->isLambda() &&
-          MD->getParent()->getDeclContext() == Subject)
+          MD->getParent()->getDeclContext() == Subject) {
+        if (Callee->getPrimaryTemplate() && Callee->getBody() &&
+            VisitedLambdaSpecs.insert(Callee->getCanonicalDecl()).second)
+          TraverseStmt(Callee->getBody());
         return true;
-    S.Diag(CE->getExprLoc(),
-           diag::warn_lifetime_safety_destruction_order_unsafe_call)
-        << Subject << SubjectKind << Callee;
+      }
+    if (firstReportAt(CE->getExprLoc()))
+      S.Diag(CE->getExprLoc(),
+             diag::warn_lifetime_safety_destruction_order_unsafe_call)
+          << Subject << SubjectKind << Callee;
     return true;
   }
 
@@ -3391,7 +3453,8 @@ public:
           TraverseStmt(const_cast<Expr *>(Init));
       return true;
     }
-    if (!isDestructionOrderSafeFunction(Ctor)) {
+    if (!isDestructionOrderSafeFunction(Ctor) &&
+        firstReportAt(CCE->getExprLoc())) {
       S.Diag(CCE->getExprLoc(),
              diag::warn_lifetime_safety_destruction_order_unsafe_call)
           << Subject << SubjectKind << Ctor;
@@ -3404,7 +3467,7 @@ public:
   /// temporary, or the target of `delete`. So the type has to be checked directly,
   /// mirroring what the record-level walk already does for bases and members.
   void checkDestroyedType(QualType QT, unsigned Kind, SourceLocation Loc) {
-    if (QT.isNull() || isDestructionOrderSafeType(QT))
+    if (QT.isNull() || isDestructionOrderSafeType(QT) || !firstReportAt(Loc))
       return;
     S.Diag(Loc, diag::warn_lifetime_safety_destruction_order_unsafe_object)
         << Subject << SubjectKind << Kind << QT;
@@ -3450,6 +3513,9 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
 
   struct Walker : DynamicRecursiveASTVisitor {
     Sema &S;
+    /// Lambda call-operator specializations already visited, since the same closure
+    /// can be reached from more than one place.
+    llvm::SmallPtrSet<const Decl *, 8> SeenLambdaSpecs;
     explicit Walker(Sema &S) : S(S) {
       ShouldVisitImplicitCode = false;
       // The ban and the verification must both see INSTANTIATED bodies. In a
@@ -3458,6 +3524,31 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       // type acquire static storage duration with no annotation anywhere (the
       // templated Meyers singleton).
       ShouldVisitTemplateInstantiations = true;
+    }
+
+    /// Visits the instantiations of a GENERIC lambda's call operator.
+    ///
+    /// ShouldVisitTemplateInstantiations reaches instantiated bodies through the
+    /// specializations of the templates the traversal enumerates -- which are the
+    /// ones declared at file or class scope. A generic lambda's call operator is a
+    /// function template minted inside an expression, so its specializations are
+    /// never enumerated and only the dependent PATTERN is seen. Everything
+    /// dependent is then invisible: `static T t;` in `[]<class T>(){}` reopened the
+    /// templated Meyers singleton, and a dependent call
+    /// (`[](auto tag){ decltype(tag)::helper(); }`) let a verified destructor reach
+    /// arbitrary unverified code, defeating the body check outright.
+    bool VisitLambdaExpr(LambdaExpr *LE) override {
+      const CXXRecordDecl *RD = LE->getLambdaClass();
+      if (!RD)
+        return true;
+      FunctionTemplateDecl *FTD = RD->getDependentLambdaCallOperator();
+      if (!FTD)
+        return true;
+      for (FunctionDecl *Spec : FTD->specializations())
+        if (Spec->doesThisDeclarationHaveABody() &&
+            SeenLambdaSpecs.insert(Spec->getCanonicalDecl()).second)
+          TraverseDecl(Spec);
+      return true;
     }
 
     bool VisitVarDecl(VarDecl *VD) override {
@@ -3471,7 +3562,10 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
         return true;
       if (S.SourceMgr.isInSystemHeader(VD->getLocation()))
         return true;
-      if (isDestructionOrderSafeType(VD->getType()))
+      // A dependent type is normally judged at the instantiation, which the walk
+      // also visits -- except where no instantiation is ever produced.
+      if (!isUninstantiableDependentStatic(VD) &&
+          isDestructionOrderSafeType(VD->getType()))
         return true;
       S.Diag(VD->getLocation(),
              diag::warn_lifetime_safety_unsafe_static_destruction)
@@ -3522,8 +3616,16 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
         return true;
       // Verified independently, right here. Callees are not followed: they must
       // carry the promise themselves, and the walk reaches each of them in turn.
-      DestructionOrderSafeBodyChecker(S, FD, /*SubjectKind=*/Promised ? 0 : 1)
-          .TraverseStmt(FD->getBody());
+      DestructionOrderSafeBodyChecker Checker(S, FD,
+                                              /*SubjectKind=*/Promised ? 0 : 1);
+      Checker.TraverseStmt(FD->getBody());
+      // A constructor's member-initializer list is code too, and it is not reachable
+      // from getBody(). A marked constructor whose body is `{}` would otherwise pass
+      // while its initializers read an object already destroyed at shutdown.
+      if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
+        for (const CXXCtorInitializer *Init : Ctor->inits())
+          if (Init->isWritten())
+            Checker.TraverseStmt(Init->getInit());
       return true;
     }
   };

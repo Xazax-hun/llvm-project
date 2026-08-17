@@ -399,6 +399,72 @@ int g_force2 = (Holder2<Logger>::get(), 0);
 int g_force_ok = (singleton<int>(), 0);
 
 //===----------------------------------------------------------------------===//
+// Code the Decl walk did not reach.
+//
+// Two places a body lives that walking FunctionDecl bodies with
+// ShouldVisitTemplateInstantiations does not get to.
+//===----------------------------------------------------------------------===//
+
+// (1) A constructor's member-initializer list. It is not reachable from getBody(),
+// so a marked constructor whose body is `{}` passed verification while its
+// initializers read an object already destroyed at shutdown.
+struct [[clang::destruction_order_safe]] MemInit {
+  char v;
+  [[clang::destruction_order_safe]] MemInit()
+      : v((char)g_counter.n) {} // expected-warning {{is 'destruction_order_safe' but references 'g_counter'}}
+};
+
+// A truthful one stays clean.
+struct [[clang::destruction_order_safe]] MemInitOk {
+  int v;
+  [[clang::destruction_order_safe]] MemInitOk() : v(0) {} // no-warning
+};
+
+// (2) A GENERIC lambda's call operator is a function template minted inside an
+// expression, so the traversal -- which reaches instantiated bodies through the
+// specializations of the templates it enumerates -- never sees its instantiations,
+// only the dependent pattern. Everything dependent was then invisible: `static T t`
+// reopened the templated Meyers singleton, and a dependent CALL let a verified body
+// reach arbitrary unverified code, since the "a lambda written here is already
+// covered by this traversal" exemption is false when what is written is a pattern.
+int g_generic = []<class T>() {
+  static T t; // expected-warning {{variable of static storage duration has type 'Logger'}}
+  return 0;
+}.operator()<Logger>();
+
+// A lambda with nothing to instantiate is the residual case. One written in a type
+// alias template's `decltype` has no enclosing template whose instantiation would
+// carry it, and Clang produces no instantiated closure for it -- `static T t` stays
+// spelled `T` in the AST while an object of the substituted type really is created
+// and destroyed. There is no concrete declaration anywhere to judge, so the pattern
+// is judged, conservatively: `T` is unknown, hence not known to be safe. (The cost
+// is that a harmless instantiation such as `Alias<int>` is reported too.)
+template <class T> using Alias = decltype([] {
+  static T t; // expected-warning {{variable of static storage duration has type 'T'}}
+  return 0;
+});
+template <class T> int run_alias() { return Alias<T>{}(); }
+int g_alias = run_alias<Logger>();
+
+struct [[clang::destruction_order_safe]] CallsGenericLambda {
+  ~CallsGenericLambda() {
+    auto g = [](auto tag) {
+      (void)sizeof(decltype(tag));
+      unchecked(); // expected-warning {{is 'destruction_order_safe' but calls 'unchecked', which is not}}
+    };
+    g(0);
+  }
+};
+
+// A generic lambda that reaches nothing unsafe stays clean.
+struct [[clang::destruction_order_safe]] GenericLambdaOk {
+  ~GenericLambdaOk() {
+    auto g = [](auto x) { return (char)sizeof(x); };
+    sink = g(0);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // The promise must be repeated on overrides.
 //
 // The callee check resolves against the statically named method, so an override
