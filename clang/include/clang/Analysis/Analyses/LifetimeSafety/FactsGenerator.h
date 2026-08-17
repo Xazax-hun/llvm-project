@@ -42,6 +42,9 @@ public:
   void VisitDeclRefExpr(const DeclRefExpr *DRE);
   void VisitCXXConstructExpr(const CXXConstructExpr *CCE);
   void VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE);
+  /// Replays the "this construct is not modeled" refusals for an expression the CFG
+  /// does not descend into, so they are not lost where no Visit method ever runs.
+  void refuseUnmodeledConstructsIn(const Stmt *S);
   void VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE);
   void VisitMemberExpr(const MemberExpr *ME);
   void VisitCallExpr(const CallExpr *CE);

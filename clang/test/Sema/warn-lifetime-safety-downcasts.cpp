@@ -67,17 +67,31 @@ struct InMemInit {
       : v((char)static_cast<Derived *>(b)->x) {}
 };
 
-// KNOWN GAP: a default member initializer is not reached. The CFG does not descend
-// into a CXXDefaultInitExpr's subexpression, so no expression-level check sees it --
-// this predates the refusal and is not specific to it.
+// A default member initializer reached through AGGREGATE initialization. There is no
+// constructor to carry it -- the CXXDefaultInitExpr sits inline in the enclosing
+// function, and the CFG does not descend into its subexpression, so nothing in there
+// is handed to a Visit method. The refusals are replayed for it explicitly. (Reached
+// through a constructor, written or implicit, the initializer belongs to that
+// constructor and is analyzed with it, which is why only the aggregate form was
+// affected.)
 struct InNSDMI {
   Base *p;
-  char v = (char)static_cast<Derived *>(p)->x; // no-warning (see above)
+  // expected-warning@+1 {{a base-to-derived conversion is not modeled}}
+  char v = (char)static_cast<Derived *>(p)->x;
 };
 void use_nsdmi(Base *b) {
   InNSDMI n{b};
   sink = n.v;
 }
+
+// Reached through a constructor instead: reported once, with the initializer analyzed
+// as part of that constructor.
+struct InNSDMIWithCtor {
+  Base *p;
+  // expected-warning@+1 {{a base-to-derived conversion is not modeled}}
+  char v = (char)static_cast<Derived *>(p)->x;
+  InNSDMIWithCtor(Base *b) : p(b) {}
+};
 
 // In a lambda, including one at namespace scope.
 auto in_namespace_lambda = [](Base *b) {
