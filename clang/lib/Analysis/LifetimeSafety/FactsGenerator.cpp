@@ -900,6 +900,26 @@ static bool isDowncast(const CastExpr *CE) {
       T = T->getPointeeType();
     return T;
   };
+  // A POINTER TO MEMBER runs the other way round. Converting `Derived::*` to
+  // `Base::*` is what lets a Base object reach a member that only exists on
+  // Derived (`b->*p`), so that is the hazardous direction -- the mirror of the
+  // object-pointer case. `Base::* -> Derived::*` is the implicit, safe widening: a
+  // member of Base is a member of every Derived.
+  //
+  // This needs its own test because a member-pointer type has no pointee class to
+  // peel: the peeling below yields the POINTED-TO type (`std::string`), not the
+  // class, so both sides came back null and the conversion was never examined.
+  if (const auto *ToMP = CE->getType()->getAs<MemberPointerType>())
+    if (const auto *FromMP =
+            CE->getSubExpr()->getType()->getAs<MemberPointerType>()) {
+      const CXXRecordDecl *ToCls = ToMP->getMostRecentCXXRecordDecl();
+      const CXXRecordDecl *FromCls = FromMP->getMostRecentCXXRecordDecl();
+      return ToCls && FromCls && ToCls->hasDefinition() &&
+             FromCls->hasDefinition() &&
+             ToCls->getCanonicalDecl() != FromCls->getCanonicalDecl() &&
+             FromCls->isDerivedFrom(ToCls);
+    }
+
   const CXXRecordDecl *To = Pointee(CE->getType())->getAsCXXRecordDecl();
   const CXXRecordDecl *From =
       Pointee(CE->getSubExpr()->getType())->getAsCXXRecordDecl();

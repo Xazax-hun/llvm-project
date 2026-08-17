@@ -21,6 +21,7 @@ volatile char sink;
 struct Base {
   virtual ~Base();
   virtual void tick();
+  int tag;
 };
 struct Derived : Base {
   int x;
@@ -137,6 +138,51 @@ Unrelated *unrelated(Unrelated *u) { return static_cast<Unrelated *>(u); } // no
 
 // A conversion to the same class is not a downcast.
 Derived *same(Derived *d) { return static_cast<Derived *>(d); } // no-warning
+
+//===----------------------------------------------------------------------===//
+// A pointer to member, where the hazardous direction is REVERSED.
+//
+// Converting `Derived::*` to `Base::*` is what lets a Base object reach a member
+// only the derived class has (`b->*p`), so that is the dangerous one -- the mirror
+// of the object-pointer case. `Base::* -> Derived::*` is the implicit, safe
+// widening: a member of Base is a member of every Derived.
+//
+// This needs its own test because a member-pointer type has no pointee CLASS to
+// peel -- peeling yields the pointed-to type (`int`), not the class -- so both
+// sides came back null and the conversion was never examined. It is also the only
+// laundering channel that produces no laundered pointer VALUE: `this->*p` looks
+// like an ordinary member access, so no other net saw it either.
+//===----------------------------------------------------------------------===//
+
+int Base::*to_base() {
+  // expected-warning@+1 {{a base-to-derived conversion is not modeled}}
+  return static_cast<int Base::*>(&Derived::x);
+}
+
+struct MemPtrInDtor : Base {
+  ~MemPtrInDtor() override {
+    // expected-warning@+1 {{a base-to-derived conversion is not modeled}}
+    int Base::*p = static_cast<int Base::*>(&Derived::x);
+    sink = (char)((Base *)this->*p);
+  }
+};
+
+// A constant initializer at file scope is analyzed too. It was skipped because a
+// member-pointer variable cannot hold a borrow, which is true but decides only
+// whether the initializer is looked at -- and this one contains the conversion.
+// expected-warning@+1 {{a base-to-derived conversion is not modeled}}
+int Base::*const g_field = static_cast<int Base::*>(&Derived::x);
+
+// The safe widening direction is not reported, nor is a same-class conversion.
+int widen(Derived *d) {
+  int Base::*p = &Base::tag;
+  int Derived::*q = p; // no-warning
+  return d->*q;
+}
+int same_class(Base *b) {
+  int Base::*p = static_cast<int Base::*>(&Base::tag); // no-warning
+  return b->*p;
+}
 
 //===----------------------------------------------------------------------===//
 // Laundering the conversion through `void *`.

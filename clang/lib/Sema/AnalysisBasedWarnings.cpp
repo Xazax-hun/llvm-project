@@ -2981,8 +2981,14 @@ static bool typeMayHoldBorrow(QualType QT, unsigned Depth = 0) {
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
+  // A POINTER TO MEMBER counts. It designates a member of a class rather than an
+  // object, so it holds no borrow of its own -- but this gate decides whether a
+  // constant initializer is analyzed AT ALL, and such an initializer can contain a
+  // conversion the model refuses: `Derived::* -> Base::*` is how a base object
+  // reaches a member only the derived class has, and it is a constant expression,
+  // so skipping it left the conversion unexamined.
   if (QT->isPointerType() || QT->isReferenceType() ||
-      lifetimes::isGslPointerType(QT))
+      QT->isMemberPointerType() || lifetimes::isGslPointerType(QT))
     return true;
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
