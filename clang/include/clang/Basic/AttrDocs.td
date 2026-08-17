@@ -4599,52 +4599,6 @@ functions that do not return a pointer-like type.
   }];
 }
 
-def DowncastsDocs : Documentation {
-  let Category = DocCatDecl;
-  let Content = [{
-Declares that a function performs a base-to-derived conversion, directly or
-through something it calls.
-
-Inside a constructor or destructor of a class ``C``, the derived part of the
-object either has not been constructed yet or has already been destroyed, so
-referring to a member or base class outside ``C``'s own subobject is undefined
-([class.cdtor]). By the time a base destructor runs, every heap buffer a derived
-member owned has already been freed -- a base destructor that reads derived state
-is a use-after-free, and nothing at the read distinguishes it from a live object.
-The CRTP "lifecycle hook" is the idiomatic way to write the mistake:
-
-.. code-block:: c++
-
-  template <class D> struct Lifecycle {
-    D &self() { return static_cast<D &>(*this); }   // needs [[clang::downcasts]]
-    ~Lifecycle() { self().on_destroy(); }           // reads destroyed state
-  };
-
-Rather than chase where a downcast might happen -- the conversion may be several
-calls away, applied to a parameter or to a pointer loaded from the heap, and its
-body may live in another translation unit -- the hazard is declared. A function
-that performs a base-to-derived conversion, or that calls a function marked
-``[[clang::downcasts]]``, must itself be marked ``[[clang::downcasts]]``; that
-requirement is checked at each definition, so it holds across translation units
-without any function's body having to be visible. A constructor or destructor may
-then not perform such a conversion, nor call a function marked this way.
-
-Because the marker is a hazard rather than a promise, an override may not add it
-when the function it overrides lacks it: callers dispatching through the base
-class see only the base's declaration, so the hazard would be invisible to them.
-
-``dynamic_cast`` is exempt, and is the way to write a checked downcast inside a
-constructor or destructor: there the object is treated as being of the
-constructor's or destructor's own class, so a ``dynamic_cast`` to a derived type
-is well defined and simply fails.
-
-Note that the marker says nothing about *which* object is converted. A
-constructor or destructor that downcasts an unrelated object -- walking a
-polymorphic container, say -- is reported too, because the declaration does not
-record whose object a conversion applies to. Use ``dynamic_cast`` there.
-  }];
-}
-
 def DestructionOrderSafeDocs : Documentation {
   let Category = DocCatDecl;
   let Content = [{

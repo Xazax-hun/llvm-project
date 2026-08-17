@@ -731,29 +731,31 @@ and functions are treated as safe.
 
 def LifetimeSafetyDowncasts : DiagGroup<"lifetime-safety-downcasts"> {
   code Documentation = [{
-Enforces that a constructor or destructor cannot reach a base-to-derived
-conversion.
+Reports a base-to-derived conversion, which the safe programming model does not
+model.
 
-Inside a constructor or destructor of a class ``C``, the derived part of the
-object either has not been constructed yet or has already been destroyed, so
-referring to a member or base class outside ``C``'s own subobject is undefined
-behavior. Every heap buffer a derived member owned has already been freed by the
-time a base destructor runs, so a base destructor that reads derived state is a
-use-after-free -- and nothing at the read distinguishes it from a live object.
+Whether the derived part of an object is alive depends on how far the complete
+object's construction has got and whether its destruction has begun -- and nothing
+at the conversion reveals that. Inside a constructor or destructor of a base it is
+undefined behavior ([class.cdtor]), and because bases are destroyed *after* the
+derived part, a base destructor that reaches derived state is reading storage a
+derived member has already freed. The analysis models ``this`` as a live complete
+object, so the conversion, the member access and the read all look perfectly
+modelable and no borrow ever expires; there is nothing for it to catch. The CRTP
+"lifecycle hook" is the idiomatic way to write the mistake:
 
-Rather than chase where the conversion happens -- it may be several calls away,
-applied to a parameter or to a pointer loaded from the heap, in a body that lives
-in another translation unit -- the hazard is declared. A function that performs a
-base-to-derived conversion, or calls a function marked ``[[clang::downcasts]]``,
-must itself be marked ``[[clang::downcasts]]``; a constructor or destructor may
-not perform such a conversion nor call a function marked that way. Since the
-requirement is checked at each definition, it holds across translation units with
-no body having to be visible. An override may not add the marker when the function
-it overrides lacks it, since a call through the base would not see it.
+.. code-block:: c++
 
-``dynamic_cast`` is exempt: inside a constructor or destructor the object is
-treated as being of that constructor's or destructor's own class, so a
-``dynamic_cast`` to a derived type is well defined and simply fails.
+  template <class D> struct Lifecycle {
+    D &self() { return static_cast<D &>(*this); }
+    ~Lifecycle() { self().on_destroy(); }   // reads already-freed state
+  };
+
+So the construct is refused rather than analyzed, in the same way ``reinterpret_cast``,
+inline asm, ``setjmp``/``longjmp`` and exceptions are refused. ``dynamic_cast`` is
+not reported and is the way to write a checked downcast: it is verified at run time,
+and inside a constructor or destructor the object is treated as being of that
+constructor's or destructor's own class, so the conversion simply fails.
   }];
 }
 

@@ -859,6 +859,36 @@ void FactsGenerator::VisitCXXNullPtrLiteralExpr(
   getOriginNode(*N);
 }
 
+/// True if \p CE converts a base class pointer/reference to a derived one.
+///
+/// Keyed on the TYPES, not on the cast kind: a `static_cast`, a C-style cast and a
+/// `reinterpret_cast` all reach the same subobject, and the operand may be `this`,
+/// a parameter, or a pointer loaded from the heap. (A `reinterpret_cast` is refused
+/// on its own account anyway.)
+///
+/// `dynamic_cast` is excluded. It is checked at run time, and inside a constructor
+/// or destructor the object is treated as being of that constructor's or
+/// destructor's own class, so a conversion to a derived type is well defined and
+/// simply fails -- which makes it the way to write a checked downcast.
+static bool isDowncast(const CastExpr *CE) {
+  if (CE->getCastKind() == CK_Dynamic)
+    return false;
+  auto Pointee = [](QualType T) {
+    T = T.getNonReferenceType();
+    if (T->isPointerType())
+      T = T->getPointeeType();
+    return T;
+  };
+  const CXXRecordDecl *To = Pointee(CE->getType())->getAsCXXRecordDecl();
+  const CXXRecordDecl *From =
+      Pointee(CE->getSubExpr()->getType())->getAsCXXRecordDecl();
+  if (!To || !From || !To->hasDefinition() || !From->hasDefinition())
+    return false;
+  if (To->getCanonicalDecl() == From->getCanonicalDecl())
+    return false;
+  return To->isDerivedFrom(From);
+}
+
 void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   // Safe-model soundness: a reinterpret_cast can launder a borrow through an
   // unrelated type (reinterpreting storage), hiding its provenance, so a borrow
@@ -867,6 +897,19 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   if (isa<CXXReinterpretCastExpr>(CE))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::ReinterpretCast, cast<Expr>(CE)));
+
+  // Likewise a base-to-derived conversion. Whether the derived subobject is alive
+  // depends on whether the complete object's construction has finished and its
+  // destruction has not begun, and nothing at the conversion reveals that: inside
+  // a constructor or destructor of a base it is undefined ([class.cdtor]), and a
+  // base destructor reaching derived state is a use-after-free, since bases are
+  // destroyed after the derived part. The analysis models `this` as a live
+  // complete object, so every step -- the conversion, the member access, the read
+  // -- looks perfectly modelable and no loan ever expires. Refuse the construct
+  // instead, the way inline asm, setjmp and reinterpret_cast are refused.
+  if (isDowncast(CE))
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::Downcast, cast<Expr>(CE)));
 
   OriginNode *Dest = getOriginNode(*CE);
   if (!Dest)

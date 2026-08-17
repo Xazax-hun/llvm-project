@@ -565,6 +565,15 @@ enum class UntrackedConstructReason : uint8_t {
   /// (reinterpreting storage), hiding its provenance from the analysis, so a
   /// borrow recovered through it is not tracked.
   ReinterpretCast,
+  /// A base-to-derived conversion. Whether the derived subobject is alive depends
+  /// on whether the complete object's construction has finished and its
+  /// destruction has not begun -- which nothing at the conversion reveals. Inside
+  /// a constructor or destructor of a base it is undefined ([class.cdtor]), and a
+  /// base destructor reaching derived state is a use-after-free, since bases are
+  /// destroyed after the derived part. `dynamic_cast` is excluded: it is checked at
+  /// run time, and inside a constructor or destructor the object is treated as
+  /// being of that constructor's or destructor's own class, so it simply fails.
+  Downcast,
   /// A by-reference lambda capture of an indirection-typed variable (e.g. `[&sv]`
   /// where sv is a std::string_view): the capture forms a reference to a view --
   /// two levels of indirection -- and a reassignment of the view inside the
