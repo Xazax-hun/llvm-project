@@ -5,7 +5,7 @@
 // analysis modeled the call as ordinary (the temporary outliving the call), so
 // the deferred parameter use was never connected to the expired temporary.
 // Coroutines are now rejected as an unsupported construct.
-// EXPECT-ASAN: heap-use-after-free
+// EXPECT-ASAN: stack-use-after-scope
 #include <coroutine>
 #include <string>
 

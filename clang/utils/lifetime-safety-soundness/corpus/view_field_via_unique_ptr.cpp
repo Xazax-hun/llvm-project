@@ -4,7 +4,7 @@
 // holds a borrow but is annotated neither [[gsl::Owner]] nor [[gsl::Pointer]],
 // so unique_ptr<Box> is an owner-of-indirection: the safe model requires Box to
 // be annotated before it can be modeled.
-// EXPECT-ASAN: stack-use-after-scope
+// EXPECT-ASAN: heap-use-after-free
 #include <memory>
 #include <string>
 #include <string_view>

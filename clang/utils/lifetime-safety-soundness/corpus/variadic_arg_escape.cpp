@@ -4,7 +4,7 @@
 // declared parameters, so handleUnannotatedIndirectionArgs skipped it. The
 // borrow escaped silently. A variadic-slot argument that can hold a borrow is
 // now flagged (-Wlifetime-safety-unannotated-indirection) at the call site.
-// EXPECT-ASAN: stack-use-after-scope
+// EXPECT-ASAN: stack-use-after-return
 #include <cstdarg>
 #include <cstdio>
 const int *g_stash = nullptr;

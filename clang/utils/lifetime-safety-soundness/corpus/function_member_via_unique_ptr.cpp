@@ -8,7 +8,7 @@
 // is untracked until Holder is annotated. Same family as
 // view_field_via_unique_ptr.cpp / vector_of_function_capture.cpp, laundered
 // through a trusted owner's operator->.
-// EXPECT-ASAN: stack-use-after-scope
+// EXPECT-ASAN: heap-use-after-free
 #include <functional>
 #include <memory>
 #include <string>

@@ -165,7 +165,17 @@ def evaluate(args, use_asan, path):
     confirmed, kind, sout = (None, "", "")
     if use_asan:
         confirmed, kind, sout = check_asan(args, path, file_flags)
-    return os.path.basename(path), desc, warned, confirmed, kind, aout, sout
+    # A corpus entry states which run-time error it is supposed to produce. Checking it
+    # catches an entry that still reports SOMETHING while no longer demonstrating what it
+    # was written for -- this found seven entries whose declaration had gone stale, one of
+    # which had moved from a stack bug to a heap one. Substring, so a coarse expectation
+    # like "use-after-free" accepts "heap-use-after-free".
+    #
+    # The kind is only deterministic because this harness pins the ASan flags and options
+    # it runs with; do not tighten it without keeping that true.
+    drifted = bool(confirmed and expect and expect not in kind)
+    return (os.path.basename(path), desc, warned, confirmed, kind, aout, sout,
+            drifted, expect)
 
 
 def main():
@@ -214,13 +224,18 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         results = list(pool.map(lambda p: evaluate(args, use_asan, p), files))
 
-    bypasses, uncaught, unconfirmed, passed = [], [], [], 0
-    for name, desc, warned, confirmed, kind, aout, sout in results:
+    bypasses, uncaught, unconfirmed, drifted_kinds, passed = [], [], [], [], 0
+    for (name, desc, warned, confirmed, kind, aout, sout, drifted,
+         expect) in results:
         if warned:
             status, color = "CAUGHT", Color.OK
             passed += 1
             if use_asan and not confirmed:
                 status, color = "CAUGHT (asan did not reproduce)", Color.DIM
+            elif drifted:
+                status = f"CAUGHT (asan: {kind}, expected {expect})"
+                color = Color.WARN
+                drifted_kinds.append(name)
         elif confirmed:
             status, color = f"BYPASS [asan: {kind}]", Color.BAD
             bypasses.append(name)
@@ -247,8 +262,12 @@ def main():
     if unconfirmed:
         print(f"{Color.WARN}{len(unconfirmed)} neither flagged nor reproduced "
               f"(check the corpus entry):{Color.END} {', '.join(unconfirmed)}")
+    if drifted_kinds:
+        print(f"{Color.WARN}{len(drifted_kinds)} reported a different run-time error "
+              f"than declared (the entry no longer demonstrates what it was written "
+              f"for):{Color.END} {', '.join(drifted_kinds)}")
 
-    return 1 if (bypasses or uncaught or unconfirmed) else 0
+    return 1 if (bypasses or uncaught or unconfirmed or drifted_kinds) else 0
 
 
 if __name__ == "__main__":

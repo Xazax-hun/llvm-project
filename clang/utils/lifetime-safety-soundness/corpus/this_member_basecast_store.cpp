@@ -5,7 +5,7 @@
 // disconnected origin and was dropped, leaving the dangling field read silent.
 // `this`-member recognition now strips derived-to-base/no-op casts of this.
 // FLAGS: -Wno-unused
-// EXPECT-ASAN: stack-use-after-scope
+// EXPECT-ASAN: stack-use-after-return
 struct Base {
   const int *p = nullptr;
   __attribute__((noinline)) int read() const { return *p; }

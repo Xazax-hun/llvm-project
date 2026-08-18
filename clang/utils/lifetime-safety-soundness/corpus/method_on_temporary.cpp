@@ -1,5 +1,5 @@
 // DESC: a lifetimebound accessor called on a temporary object
-// EXPECT-ASAN: heap-use-after-free
+// EXPECT-ASAN: stack-use-after-scope
 #include <string>
 struct H {
   std::string s;

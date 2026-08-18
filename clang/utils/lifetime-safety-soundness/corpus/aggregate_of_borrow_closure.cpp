@@ -7,7 +7,7 @@
 // the escaping-temporary / unknown-ownership / lost-loan backstops were all
 // bypassed. Found by the multi-agent bypass hunt (Agent A). The fix makes a
 // containing record see a closure member that captures a borrow.
-// EXPECT-ASAN: heap-use-after-free
+// EXPECT-ASAN: stack-use-after-return
 #include <string>
 
 template <class F> struct Box {
