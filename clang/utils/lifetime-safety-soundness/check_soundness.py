@@ -30,6 +30,7 @@ Exit status is non-zero if any corpus program is not flagged by the analysis
 """
 
 import argparse
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -151,6 +152,22 @@ def check_asan(args, path, file_flags):
         return False, "", out
 
 
+def evaluate(args, use_asan, path):
+    """Runs both checks for one corpus program.
+
+    Independent of every other program -- each ASan build gets its own temporary
+    directory -- so these run concurrently. The work is almost entirely waiting on
+    subprocesses, which release the GIL, so threads are enough and no corpus state has
+    to be shared between processes.
+    """
+    desc, file_flags, expect = parse_directives(path)
+    warned, aout = check_analysis(args, path, file_flags)
+    confirmed, kind, sout = (None, "", "")
+    if use_asan:
+        confirmed, kind, sout = check_asan(args, path, file_flags)
+    return os.path.basename(path), desc, warned, confirmed, kind, aout, sout
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -168,6 +185,9 @@ def main():
     ap.add_argument("--stdlib", help="-stdlib= value (e.g. libc++)")
     ap.add_argument("--cflag", action="append", default=[],
                     help="extra compiler flag (repeatable)")
+    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1,
+                    help="corpus programs to check concurrently (default: number "
+                         "of cores; use 1 for serial output while debugging)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print compiler/ASan output for failures")
     ap.add_argument("files", nargs="*",
@@ -188,15 +208,14 @@ def main():
         os.path.join(CORPUS, f) for f in os.listdir(CORPUS)
         if f.endswith(".cpp"))
 
-    bypasses, uncaught, unconfirmed, passed = [], [], [], 0
-    for path in files:
-        name = os.path.basename(path)
-        desc, file_flags, expect = parse_directives(path)
-        warned, aout = check_analysis(args, path, file_flags)
-        confirmed, kind, sout = (None, "", "")
-        if use_asan:
-            confirmed, kind, sout = check_asan(args, path, file_flags)
+    # map() yields in submission order, so the report stays byte-for-byte identical to
+    # the serial one regardless of the order results actually arrive in.
+    jobs = max(1, min(args.jobs, len(files)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        results = list(pool.map(lambda p: evaluate(args, use_asan, p), files))
 
+    bypasses, uncaught, unconfirmed, passed = [], [], [], 0
+    for name, desc, warned, confirmed, kind, aout, sout in results:
         if warned:
             status, color = "CAUGHT", Color.OK
             passed += 1
