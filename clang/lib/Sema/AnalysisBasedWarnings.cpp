@@ -3854,30 +3854,62 @@ static void LifetimeSafetyFileVarInitAnalysis(
     Sema &S, TranslationUnitDecl *TU,
     clang::lifetimes::LifetimeSafetyStats &LSStats) {
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyFileVarInitAnalysis");
-  lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
 
-  std::function<void(const DeclContext *)> Visit = [&](const DeclContext *DC) {
-    for (const Decl *D : DC->decls()) {
-      // Namespaces, extern "C" blocks and (for static data members) records all
-      // nest further file-scope variables.
-      if (const auto *Inner = dyn_cast<DeclContext>(D))
-        if (isa<NamespaceDecl, LinkageSpecDecl, CXXRecordDecl>(D))
-          Visit(Inner);
-      const auto *VD = dyn_cast<VarDecl>(D);
-      if (!VD || !VD->isFileVarDecl() || !VD->hasInit() ||
+  // Enumerating these declarations by hand does not work. A hand-rolled recursion
+  // has to name every DeclContext that can nest a file-scope variable, and two
+  // kinds are not reachable that way at all:
+  //
+  //   - An implicitly-instantiated class template specialization lives in the
+  //     template's folding set, so it appears in NO enclosing DeclContext::decls()
+  //     chain. `template <class T> struct A { static inline X x = ...; };` was
+  //     therefore never analyzed for any instantiation -- and since the dependent
+  //     PATTERN is skipped as well (correctly: it says nothing until T is known),
+  //     the initializer was analyzed for no T at all.
+  //   - An `export`-ed declaration in a module interface unit sits inside an
+  //     ExportDecl, which any list of "contexts that nest variables" is liable to
+  //     omit -- as this one did, silently skipping every exported namespace-scope
+  //     initializer in the TU.
+  //
+  // A RecursiveASTVisitor enumerates both, so use one. ShouldVisitTemplateInstantiations
+  // is what reaches the specializations, mirroring the destruction-order sweep above,
+  // which already visits class-template statics for exactly this reason.
+  struct Walker : DynamicRecursiveASTVisitor {
+    Sema &S;
+    lifetimes::LifetimeSafetySemaHelperImpl SemaHelper;
+    clang::lifetimes::LifetimeSafetyStats &LSStats;
+    /// Guards against analyzing one variable twice, which would double its
+    /// diagnostics: a specialization is reachable both through its lexical parent
+    /// and through the enumeration of the template's specializations.
+    llvm::SmallPtrSet<const Decl *, 16> Seen;
+
+    Walker(Sema &S, clang::lifetimes::LifetimeSafetyStats &LSStats)
+        : S(S), SemaHelper(S), LSStats(LSStats) {
+      ShouldVisitImplicitCode = false;
+      ShouldVisitTemplateInstantiations = true;
+    }
+
+    /// Statements cannot contain a file-scope variable -- a local class may not
+    /// have static data members, and a `static` local is analyzed with its
+    /// enclosing function. Skipping them keeps this sweep as cheap as the
+    /// declaration-only walk it replaces; it runs for every C++ TU.
+    bool TraverseStmt(Stmt *) override { return true; }
+
+    bool VisitVarDecl(VarDecl *VD) override {
+      if (!VD->isFileVarDecl() || !VD->hasInit() ||
           VD->getDeclContext()->isDependentContext())
-        continue;
+        return true;
       // A constant initializer performs no stores at runtime, so it usually needs
       // no CFG -- but it can still CAPTURE a borrow. Binding a reference or
       // pointer to another object of static storage duration is a constant
       // expression, and it is exactly the destruction-order hazard: the value is
       // computed at compile time, yet the captured reference outlives whatever it
       // refers to. So skip only when the variable cannot hold a borrow at all.
-      if (VD->hasConstantInitialization() &&
-          !typeMayHoldBorrow(VD->getType()))
-        continue;
+      if (VD->hasConstantInitialization() && !typeMayHoldBorrow(VD->getType()))
+        return true;
       if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
-        continue;
+        return true;
+      if (!Seen.insert(VD->getCanonicalDecl()).second)
+        return true;
       AnalysisDeclContext AC(nullptr, VD);
       AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
       AC.getCFGBuildOptions().AddLifetime = true;
@@ -3890,9 +3922,10 @@ static void LifetimeSafetyFileVarInitAnalysis(
       else
         SemaHelper.reportAnalysisBailout(
             VD, lifetimes::BailoutReason::CFGUnavailable);
+      return true;
     }
   };
-  Visit(TU);
+  Walker(S, LSStats).TraverseDecl(TU);
 }
 
 static bool shouldRunUnsafeBufferUsageAnalysis(const Sema &S,

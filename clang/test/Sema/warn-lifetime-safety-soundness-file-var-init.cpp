@@ -76,6 +76,56 @@ Watch Holder::s_watch; // expected-warning {{borrows from a mutable global or st
 static int g_wire4 = (Holder::s_watch.v = g_mut, 0);
 
 //===----------------------------------------------------------------------===//
+// A static data member of a class TEMPLATE is reached, for each instantiation.
+//===----------------------------------------------------------------------===//
+
+// Enumerating these variables by walking DeclContext::decls() by hand cannot
+// reach an implicitly-instantiated specialization at all: it lives in the
+// template's folding set, so it appears in NO enclosing decls() chain. And the
+// dependent PATTERN is skipped -- correctly, since `static T t;` says nothing
+// until T is known. Together those meant the initializer was analyzed for no
+// instantiation whatsoever, which is why this needs a RecursiveASTVisitor with
+// ShouldVisitTemplateInstantiations rather than a hand-rolled descent.
+
+template <class T> struct PerType {
+  static inline Watch s_watch; // expected-warning {{borrows from a mutable global or static object}}
+  // expected-warning@+1 {{cannot track static variable 's_watch' here}}
+  static inline int s_wire = (s_watch.v = g_mut, 0);
+};
+static int g_use = PerType<int>::s_wire;
+
+// The out-of-line definition of such a member was already reached (it is a
+// namespace-scope declaration in its own right); keep it here so the two forms
+// stay together and neither regresses into reporting twice.
+template <class T> struct OutOfLine {
+  static Watch s_watch; // expected-warning {{borrows from a mutable global or static object}}
+  static int s_wire;
+};
+template <class T> Watch OutOfLine<T>::s_watch;
+// expected-warning@+1 {{cannot track static variable 's_watch' here}}
+template <class T> int OutOfLine<T>::s_wire = (OutOfLine<T>::s_watch.v = g_mut, 0);
+static int g_use2 = OutOfLine<char>::s_wire;
+
+// A nested class inside a class template, and a CRTP base, are the same shape:
+// the specialization that actually holds the initializer is implicit.
+template <class T> struct Outer {
+  struct Inner {
+    static inline Watch s_watch; // expected-warning {{borrows from a mutable global or static object}}
+    // expected-warning@+1 {{cannot track static variable 's_watch' here}}
+    static inline int s_wire = (s_watch.v = g_mut, 0);
+  };
+};
+static int g_use3 = Outer<int>::Inner::s_wire;
+
+template <class D> struct CrtpBase {
+  static inline Watch s_watch; // expected-warning {{borrows from a mutable global or static object}}
+  // expected-warning@+1 {{cannot track static variable 's_watch' here}}
+  static inline int s_wire = (s_watch.v = g_mut, 0);
+};
+struct Impl : CrtpBase<Impl> {};
+static int g_use4 = Impl::s_wire;
+
+//===----------------------------------------------------------------------===//
 // Negatives: ordinary global initialization stays clean.
 //===----------------------------------------------------------------------===//
 
