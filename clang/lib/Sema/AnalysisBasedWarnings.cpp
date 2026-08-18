@@ -2843,6 +2843,11 @@ void sema::AnalysisBasedWarnings::issueWarningsForRegisteredVarDecl(
   AC.getCFGBuildOptions().AddTemporaryDtors = true;
   AC.getCFGBuildOptions().AddCXXNewAllocator = false;
   AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+  // ...and through AGGREGATE initialization, where there is no constructor to carry
+  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
+  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
+  // ever handed to the analysis.
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
 
   auto Range = VarDeclPossiblyUnreachableDiags.equal_range(VD);
   auto SecondRange =
@@ -2926,6 +2931,11 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
     AC.getCFGBuildOptions().AddParameterLifetimes = true;
     AC.getCFGBuildOptions().AddInitializers = true;
     AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+  // ...and through AGGREGATE initialization, where there is no constructor to carry
+  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
+  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
+  // ever handed to the analysis.
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
     AC.getCFGBuildOptions().setAllAlwaysAdd();
     if (AC.getCFG())
       runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
@@ -4358,6 +4368,11 @@ void clang::sema::AnalysisBasedWarnings::
   AC.getCFGBuildOptions().AddTemporaryDtors = true;
   AC.getCFGBuildOptions().AddCXXNewAllocator = false;
   AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+  // ...and through AGGREGATE initialization, where there is no constructor to carry
+  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
+  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
+  // ever handed to the analysis.
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
   AC.getCFGBuildOptions().setAllAlwaysAdd();
   AC.getCFGBuildOptions().AddLifetime = true;
 
@@ -4411,6 +4426,11 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
   AC.getCFGBuildOptions().AddTemporaryDtors = true;
   AC.getCFGBuildOptions().AddCXXNewAllocator = false;
   AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+  // ...and through AGGREGATE initialization, where there is no constructor to carry
+  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
+  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
+  // ever handed to the analysis.
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
 
   bool EnableLifetimeSafetyAnalysis =
       !S.getLangOpts().EnableLifetimeSafetyTUAnalysis &&

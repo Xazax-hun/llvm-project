@@ -678,11 +678,10 @@ void FactsGenerator::VisitCXXConstructExpr(const CXXConstructExpr *CCE) {
 
 void FactsGenerator::VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE) {
   if (const Expr *Init = DIE->getExpr()) {
+    // The subexpression is in the CFG -- AddCXXDefaultInitExprInAggregates asks for it
+    // -- so everything inside is visited normally, through a constructor or through
+    // aggregate initialization alike. Nothing has to be replayed here.
     killAndFlowOrigin(*DIE, *Init);
-    // Through aggregate initialization there is no constructor whose analysis would
-    // cover this initializer, and the CFG does not descend into it, so its refusals
-    // have to be replayed here or they are lost entirely.
-    refuseUnmodeledConstructsIn(Init);
   }
 }
 
@@ -1148,42 +1147,6 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   }
 }
 
-// Defined below; declared here for use in VisitUnaryOperator.
-
-/// Replays the refusals for constructs inside an expression the CFG does not walk.
-///
-/// A default member initializer reached through AGGREGATE initialization has no
-/// constructor to carry it: the `CXXDefaultInitExpr` appears inline in the enclosing
-/// function and the CFG does not descend into its subexpression, so nothing in there
-/// is ever handed to a Visit method. Reached through a constructor -- written or
-/// implicit -- the initializer belongs to that constructor and is analyzed with it,
-/// which is why only the aggregate form was affected.
-///
-/// Only the REFUSALS are replayed, never the dataflow. Each is decided by the
-/// expression alone, so emitting them here cannot perturb an origin or a loan; the
-/// checker deduplicates by source location.
-void FactsGenerator::refuseUnmodeledConstructsIn(const Stmt *S) {
-  if (!S)
-    return;
-  if (const auto *CE = dyn_cast<CastExpr>(S)) {
-    if (isa<CXXReinterpretCastExpr>(CE))
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::ReinterpretCast, cast<Expr>(CE)));
-    if (isDowncast(CE))
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::Downcast, cast<Expr>(CE)));
-    if (isCastFromVoidPointer(CE))
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::VoidPointerCast, cast<Expr>(CE)));
-  }
-  if (const auto *ME = dyn_cast<MemberExpr>(S))
-    if (const auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
-        FD && FD->getParent()->isUnion())
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::Union, cast<Expr>(ME)));
-  for (const Stmt *Child : S->children())
-    refuseUnmodeledConstructsIn(Child);
-}
 
 void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   switch (UO->getOpcode()) {
