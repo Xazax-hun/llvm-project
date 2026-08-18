@@ -943,12 +943,48 @@ static bool isDowncast(const CastExpr *CE) {
   return To->isDerivedFrom(From);
 }
 
+/// True if \p CE reinterprets the bytes of one type as another -- what a
+/// `reinterpret_cast` does, however it happens to be spelled.
+///
+/// Keyed on the cast KIND rather than the spelling. `(T *)p` and
+/// `reinterpret_cast<T *>(p)` produce the identical `BitCast`, so testing for
+/// CXXReinterpretCastExpr caught only the second: a C-style cast performing the
+/// byte-identical reinterpretation walked straight through, on a global array or a
+/// local buffer alike.
+///
+/// Only WRITTEN casts count. An implicit BitCast is the front end's own bookkeeping --
+/// converting to `void *` nests one inside the explicit NoOp cast -- and flagging those
+/// would report every such conversion.
+///
+/// A conversion involving `void *` is left to isCastFromVoidPointer: casting TO one is
+/// the opaque-userdata idiom and is allowed, and recovering FROM one has its own report.
+static bool reinterpretsBytes(const CastExpr *CE) {
+  if (!isa<ExplicitCastExpr>(CE))
+    return false;
+  switch (CE->getCastKind()) {
+  case CK_BitCast:
+  case CK_LValueBitCast:
+  case CK_ReinterpretMemberPointer:
+    break;
+  default:
+    return false;
+  }
+  auto IsVoidPointer = [](QualType T) {
+    T = T.getNonReferenceType();
+    return T->isPointerType() && T->getPointeeType()->isVoidType();
+  };
+  return !IsVoidPointer(CE->getType()) &&
+         !IsVoidPointer(CE->getSubExpr()->getType());
+}
+
 void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
-  // Safe-model soundness: a reinterpret_cast can launder a borrow through an
-  // unrelated type (reinterpreting storage), hiding its provenance, so a borrow
-  // recovered through it is not tracked. Surface it as unsupported, regardless
-  // of the cast kind or whether the result has a trackable origin.
-  if (isa<CXXReinterpretCastExpr>(CE))
+  // Safe-model soundness: reinterpreting one type's bytes as another can launder a
+  // borrow through an unrelated type, hiding its provenance, so a borrow recovered
+  // that way is not tracked. Surface it as unsupported however it is spelled -- the
+  // `reinterpret_cast` keyword, or a C-style or functional cast that does the same
+  // thing. (The keyword is also tested directly, since a reinterpret_cast between a
+  // pointer and an integer uses a different cast kind.)
+  if (isa<CXXReinterpretCastExpr>(CE) || reinterpretsBytes(CE))
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::ReinterpretCast, cast<Expr>(CE)));
 

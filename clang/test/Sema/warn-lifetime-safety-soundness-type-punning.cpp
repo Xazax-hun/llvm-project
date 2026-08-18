@@ -44,12 +44,54 @@ long ptr_to_int(int *p) {
   return reinterpret_cast<long>(p); // expected-warning {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
 }
 
-// A non-union struct member access and a C-style/static cast stay silent.
+// The SPELLING is not what matters: `(T *)p` produces the identical `BitCast` that
+// `reinterpret_cast<T *>(p)` does, so testing for the keyword caught only one of them.
+// A C-style cast reinterpreting one type's bytes as another walked straight through --
+// on a global array, where no other net applies, that was a clean use-after-free.
+struct Wide {
+  long a, b;
+};
+alignas(Wide) char g_buf[sizeof(Wide)];
+
+long c_style_pun(char *p) {
+  return ((Wide *)p)->a; // expected-warning {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
+}
+
+long c_style_pun_array() {
+  return ((Wide *)g_buf)->a; // expected-warning {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
+}
+
+long functional_pun(char *p) {
+  using WideP = Wide *;
+  return WideP(p)->a; // expected-warning {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
+}
+
+// A reference reinterpretation uses a different cast kind (LValueBitCast) and is
+// covered too.
+long ref_pun(char &c) {
+  return reinterpret_cast<Wide &>(c).a; // expected-warning {{'reinterpret_cast' is not modeled by lifetime safety analysis}}
+}
+
+// A non-union struct member access, and a cast that does not reinterpret bytes, stay
+// silent. (A C-style cast that DOES reinterpret is reported above -- what counts is the
+// cast's kind, not how it is written.)
 struct Plain {
   int a;
   int b;
 };
 int plain_member(Plain &s) { return s.a + s.b; } // no-warning
+
+// Casting TO `void *` is the opaque-userdata idiom and is allowed; a derived-to-base
+// conversion and a const conversion are not reinterpretation either.
+struct PunBase {
+  int x;
+};
+struct PunDerived : PunBase {
+  int y;
+};
+void *to_void(Plain *p) { return (void *)p; }              // no-warning
+PunBase *upcast(PunDerived *p) { return (PunBase *)p; }    // no-warning
+const Plain *add_const(Plain *p) { return (const Plain *)p; } // no-warning
 
 int static_casts(double d, void *vp) {
   int i = static_cast<int>(d); // no-warning: not a pointer conversion at all
