@@ -15,6 +15,7 @@
 #include "clang/AST/Type.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/OperatorKinds.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringSet.h"
 
 namespace clang::lifetimes {
@@ -134,6 +135,12 @@ bool isInStlNamespace(const Decl *D) {
       }
   }
   return false;
+}
+
+bool isLibraryOwned(const Decl *D) {
+  if (!D || !isInStlNamespace(D))
+    return false;
+  return D->getASTContext().getSourceManager().isInSystemHeader(D->getLocation());
 }
 
 bool isPointerLikeType(QualType QT) {

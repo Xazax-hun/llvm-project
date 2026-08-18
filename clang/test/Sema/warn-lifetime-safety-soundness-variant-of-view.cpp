@@ -3,14 +3,10 @@
 #include "Inputs/lifetime-analysis.h"
 using std::string_view;
 
-namespace std {
-// Minimal stand-in: recognized by name (std::variant). Its value lives in a
-// union/type-erased buffer the analysis does not expand, so a view alternative
-// is untracked -- the bug this check closes.
-template <class... Ts> class variant {
-  char buf[32];
-};
-} // namespace std
+// `std::variant` comes from the shared header, which is treated as a system header so
+// its stand-ins count as library code (a declaration in namespace `std` is trusted only
+// when the library wrote it). Its value lives in a type-erased buffer the analysis does
+// not expand, so a view alternative is untracked -- the bug this check closes.
 
 struct [[gsl::Pointer]] View { const char *p; };
 

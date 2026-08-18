@@ -22,6 +22,20 @@ namespace clang ::lifetimes {
 // namespace outside of the std namespace.
 bool isInStlNamespace(const Decl *D);
 
+/// True if \p D is code the standard library OWNS: spelled in a library namespace AND
+/// declared in a system header.
+///
+/// The namespace alone does not say who wrote the code. Specializing a standard
+/// template for a program-defined type is legal, conforming C++, and the
+/// specialization lands literally in namespace `std` -- so a test that asks only about
+/// the namespace hands arbitrary user code the trust meant for the library, and
+/// `template <> struct std::hash<Key> { ~hash(); };` becomes a type whose destructor
+/// nothing verifies. Ask where the code was written instead.
+///
+/// An implicit specialization such as `std::vector<int>` reports the pattern's
+/// location, in the library header, so ordinary use keeps its trust.
+bool isLibraryOwned(const Decl *D);
+
 bool isPointerLikeType(QualType QT);
 
 /// Whether `E` denotes the enclosing object `this` -- either the `CXXThisExpr`

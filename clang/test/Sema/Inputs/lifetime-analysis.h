@@ -1,4 +1,12 @@
 
+// These declarations stand in for the standard library, so they must be treated as
+// library-owned code: several checks now ask whether a declaration in namespace `std`
+// was written by the LIBRARY (a system header) rather than by the user, because a user
+// specialization of a standard template is legal C++ and lands in `std` too. Without
+// this the stubs would be judged as user code and behave unlike the real libc++ they
+// model.
+#pragma clang system_header
+
 namespace __gnu_cxx {
 template <typename T>
 struct basic_iterator {
@@ -361,6 +369,33 @@ public:
   function& operator=(function&&) { return *this; }
   R operator()(Args...) const;
   ~function();
+};
+
+// Minimal variadic stand-in, recognized by name. Its alternatives arrive as a single
+// template Pack, which is the path a check following template arguments has to look
+// inside. The value lives in a type-erased buffer the analysis does not expand, so a
+// view alternative is untracked; the destructor is non-trivial so the type is also
+// relevant to destruction-order questions.
+template <class... Ts> class variant {
+  char buf[32];
+
+public:
+  variant();
+  ~variant();
+};
+
+// Minimal stand-in for the template users most often specialize for their own types.
+// A user specialization of it is legal C++ and lands in namespace `std`, which is why
+// trust has to key on whether the LIBRARY wrote a declaration, not on its namespace.
+template <class T> struct hash {
+  unsigned long operator()(const T &) const;
+};
+
+// Minimal owning pointer with a DELETER argument: the library CALLS that argument
+// rather than destroying it, which is what makes it a hook. (The unique_ptr above
+// takes no deleter.)
+template <class T, class D> struct owner_with_deleter {
+  ~owner_with_deleter();
 };
 
 }

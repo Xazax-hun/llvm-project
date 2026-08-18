@@ -3028,7 +3028,7 @@ static bool constructionRunsUserCode(QualType QT, unsigned Depth = 0) {
   // looking for a container even here.
   if (RD->hasAttr<DestructionOrderSafeAttr>())
     return constructionIsInvisible(QT, Depth);
-  if (lifetimes::isInStlNamespace(RD)) {
+  if (lifetimes::isLibraryOwned(RD)) {
     // A container CONSTRUCTS its elements, so this follows the template arguments
     // exactly as the destruction question does. What a type-erasing type constructs
     // its type does not name at all.
@@ -3086,7 +3086,7 @@ static bool constructionIsInvisible(QualType QT, unsigned Depth) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
-  if (lifetimes::isInStlNamespace(RD))
+  if (lifetimes::isLibraryOwned(RD))
     return constructionRunsUserCode(QT, Depth);
   // A user type reached here has its own constructors reported precisely -- or, if it
   // carries the promise, verified against it. Neither reaches what a member CONTAINER
@@ -3122,8 +3122,7 @@ static bool hasUncheckedDeallocationFunction(const CXXRecordDecl *RD) {
           continue;
         // The standard library's own deallocation functions do not reach user
         // globals, and neither does anything else in a system header.
-        if (lifetimes::isInStlNamespace(FD) ||
-            Ctx.getSourceManager().isInSystemHeader(FD->getLocation()))
+        if (Ctx.getSourceManager().isInSystemHeader(FD->getLocation()))
           continue;
         if (!lifetimes::carriesDestructionOrderPromise(FD))
           return true;
@@ -3199,15 +3198,14 @@ static bool hasUncheckedLibraryHook(QualType QT) {
   // The library's own allocators, deleters and traits (std::allocator,
   // std::default_delete, std::char_traits, std::less, std::hash) reach nothing
   // the user destroys.
-  if (lifetimes::isInStlNamespace(RD) ||
-      RD->getASTContext().getSourceManager().isInSystemHeader(RD->getLocation()))
+  if (RD->getASTContext().getSourceManager().isInSystemHeader(RD->getLocation()))
     return false;
 
   // Deriving from the library's own hook type is the idiomatic way to write one
   // (`struct MyTraits : std::char_traits<char>`), and inherits the distinctive
   // names rather than declaring them.
   bool DerivesStdHook = !RD->forallBases([](const CXXRecordDecl *Base) {
-    return !lifetimes::isInStlNamespace(Base);
+    return !lifetimes::isLibraryOwned(Base);
   });
 
   bool IsHook = DerivesStdHook;
@@ -3282,7 +3280,7 @@ static bool holdsUnsafeInitializerList(QualType QT, unsigned Depth = 0) {
   }
   // An aggregate holding one is trivially destructible too, so the walk would end at
   // it before ever reaching the member.
-  if (lifetimes::isInStlNamespace(RD))
+  if (lifetimes::isLibraryOwned(RD))
     return false; // a library type owns what it holds; the ordinary rules cover it
   for (const CXXBaseSpecifier &B : RD->bases())
     if (holdsUnsafeInitializerList(B.getType(), Depth + 1))
@@ -3322,7 +3320,7 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
   // individually for a written-out class, but it does not see an implicit
   // template instantiation -- so `Box<Logger> g;` needs this to be caught here.
   bool Annotated = RD->hasAttr<DestructionOrderSafeAttr>();
-  if (lifetimes::isInStlNamespace(RD)) {
+  if (lifetimes::isLibraryOwned(RD)) {
     if (isTypeErasingStdType(RD))
       return false;
     // Follow what the specialization may destroy. Variadic templates such as
@@ -3378,9 +3376,7 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   // either case its body goes through the verifier below.
   if (lifetimes::carriesDestructionOrderPromise(FD))
     return true;
-  if (lifetimes::isInStlNamespace(FD))
-    return true;
-  // Anything else declared in a system header is library code that does not name
+  // Code declared in a system header is library code that does not name
   // a user's globals: `free`, `memcpy`, and the rest of libc reach nothing that
   // is destroyed at shutdown. `std::free` is a using-declaration of the global
   // `::free`, so the namespace test above does not cover it -- and a replaced
@@ -3411,7 +3407,7 @@ static bool isDestructionOrderSafeFunction(const FunctionDecl *FD) {
   // annotate the class, then put the global access in any non-destructor member
   // and nothing checked it.
   if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
-    if (lifetimes::isInStlNamespace(MD->getParent()))
+    if (lifetimes::isLibraryOwned(MD->getParent()))
       return true;
   return false;
 }

@@ -5,28 +5,11 @@
 using std::string;
 using std::vector;
 
-namespace std {
-// Minimal variadic stand-in: its alternatives arrive as a single template Pack,
-// which is the path that has to be looked inside.
-template <class... Ts> struct variant {
-  variant();
-  ~variant();
-};
-// Minimal type-erasing callable: the target it dispatches to appears nowhere in
-// the type, which is what makes invoking it an indirect call.
-template <class Sig> struct function {
-  function();
-  template <class F> function(F);
-  ~function();
-  void operator()() const;
-};
-// Minimal owning pointer with a DELETER argument: the library calls that argument
-// rather than destroying it, which is what makes it a hook. (The stub unique_ptr
-// in the shared header takes no deleter.)
-template <class T, class D> struct owner_with_deleter {
-  ~owner_with_deleter();
-};
-} // namespace std
+// The `std` stand-ins these tests need -- variant, function, owner_with_deleter --
+// live in Inputs/lifetime-analysis.h alongside the others. They model LIBRARY types,
+// and since a declaration in namespace `std` is now trusted only when the library
+// wrote it, declaring them here would (correctly) make them user code and change what
+// the tests are about.
 
 volatile char sink;
 
@@ -657,6 +640,54 @@ struct [[clang::destruction_order_safe]] MakesSafeWrapper {
     (void)w;
   }
 };
+
+//===----------------------------------------------------------------------===//
+// Trust follows who WROTE the code, not the namespace it is spelled in.
+//
+// Specializing a standard template for a program-defined type is legal, conforming
+// C++, and the specialization lands literally in namespace `std`. A test that asks
+// only about the namespace therefore hands arbitrary user code the trust meant for
+// the library: `template <> struct std::hash<Key> { ~hash(); };` became a type whose
+// destructor nothing verifies, and the same licence reached a verified body's callees,
+// a container's hooks, and a class-specific `operator delete`.
+//
+// So a declaration in a library namespace is trusted only when it is also in a system
+// header. An implicit specialization such as `vector<int>` reports the pattern's
+// location in the library header, so ordinary library use is unaffected -- the stubs
+// this file includes are in a header marked `#pragma clang system_header` for exactly
+// that reason.
+//===----------------------------------------------------------------------===//
+
+struct HashKey {};
+
+namespace std {
+// User-written, in namespace std: not library-owned, so the ordinary rules apply and
+// this destructor is not taken on trust.
+template <> struct hash<HashKey> {
+  ~hash();
+};
+} // namespace std
+
+std::hash<HashKey> g_user_spec; // expected-warning {{whose destructor is not known to be safe}}
+
+// A verified body may not call a member of such a specialization either.
+namespace std {
+template <> struct hash<int *> {
+  void poke() const;
+};
+} // namespace std
+struct [[clang::destruction_order_safe]] CallsUserSpecMember {
+  ~CallsUserSpecMember() {
+    std::hash<int *> t;
+    t.poke(); // expected-warning {{is 'destruction_order_safe' but calls 'poke', which is not}}
+  }
+};
+
+// Ordinary library types keep their trust: their specializations are implicit, and the
+// pattern lives in the (system) header.
+string g_lib_string;
+vector<int> g_lib_vector;
+vector<string> g_lib_nested;
 
 //===----------------------------------------------------------------------===//
 // The promise must be repeated on overrides.

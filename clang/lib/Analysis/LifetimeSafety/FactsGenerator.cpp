@@ -20,6 +20,7 @@
 #include "clang/AST/StmtCXX.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/FactsGenerator.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Origins.h"
 #include "clang/Analysis/Analyses/PostOrderCFGView.h"
@@ -323,6 +324,13 @@ static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
       break;
     }
   if (!InActualStd)
+    return false;
+  // ...and the code must be the library's OWN. A user specialization of a standard
+  // template -- `template <> struct std::hash<Tag>` -- is legal, conforming C++ and
+  // sits in the real `std` namespace, so the namespace test alone handed this
+  // allow-list to user-written methods: one merely NAMED `data` was exempted from
+  // assumed invalidation even while it reallocated.
+  if (!MD.getASTContext().getSourceManager().isInSystemHeader(MD.getLocation()))
     return false;
   switch (MD.getOverloadedOperator()) {
   case OO_Subscript: // operator[]
