@@ -3291,20 +3291,28 @@ static bool isStdInitializerListDecl(const CXXRecordDecl *RD) {
 /// ends the walk for such a type. Every sibling wrapper -- vector, optional,
 /// unique_ptr, array, pair -- owns its elements and is caught by the ordinary rules;
 /// this is the one that does not.
-static bool holdsUnsafeInitializerList(QualType QT, unsigned Depth = 0) {
-  if (Depth > 8)
-    return false; // give up rather than recurse without bound
+static bool holdsUnsafeInitializerList(
+    QualType QT, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Seen) {
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
+  // Already explored on another path, and it answered no there: a by-value member or
+  // base graph is acyclic, so a repeat visit is sharing rather than a cycle. This is
+  // what makes a depth limit unnecessary -- and a limit here could not be right either
+  // way round. Returning "safe" at the limit reopened the hole this function exists to
+  // close, at nine levels of wrappers; returning "unsafe" reported every deeply nested
+  // aggregate, because unlike its callers this walk has to descend past a trivially
+  // destructible type rather than stopping at one.
+  if (!Seen.insert(RD).second)
+    return false;
   if (isStdInitializerListDecl(RD)) {
     if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
       for (const TemplateArgument &A : CTSD->getTemplateArgs().asArray())
         if (A.getKind() == TemplateArgument::Type &&
-            !isDestructionOrderSafeType(A.getAsType(), Depth + 1))
+            !isDestructionOrderSafeType(A.getAsType()))
           return true;
     return false;
   }
@@ -3313,12 +3321,17 @@ static bool holdsUnsafeInitializerList(QualType QT, unsigned Depth = 0) {
   if (lifetimes::isLibraryOwned(RD))
     return false; // a library type owns what it holds; the ordinary rules cover it
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (holdsUnsafeInitializerList(B.getType(), Depth + 1))
+    if (holdsUnsafeInitializerList(B.getType(), Seen))
       return true;
   for (const FieldDecl *FD : RD->fields())
-    if (holdsUnsafeInitializerList(FD->getType(), Depth + 1))
+    if (holdsUnsafeInitializerList(FD->getType(), Seen))
       return true;
   return false;
+}
+
+static bool holdsUnsafeInitializerList(QualType QT) {
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Seen;
+  return holdsUnsafeInitializerList(QT, Seen);
 }
 
 static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
@@ -3339,7 +3352,7 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
   // Likewise a std::initializer_list, whose hidden backing array holds the objects
   // actually destroyed at shutdown while the list's own type -- and an aggregate
   // holding one -- is trivially destructible.
-  if (holdsUnsafeInitializerList(QT, Depth))
+  if (holdsUnsafeInitializerList(QT))
     return false;
   if (Ops == ShutdownOps::Destroy && QT.isDestructedType() == QualType::DK_none)
     return true; // nothing runs at shutdown

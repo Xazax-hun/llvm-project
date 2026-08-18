@@ -337,6 +337,43 @@ struct HoldsSafeInitList {
 // soundness-warning@+1 {{can hold a borrow but is annotated neither}}
 HoldsSafeInitList g_holds_safe_il; // no destruction-order warning
 
+// The walk has no depth limit, and cannot have one. Unlike its callers it must descend
+// PAST a trivially destructible type -- hiding an initializer_list inside one is the whole
+// hazard -- so a limit that answered "safe" reopened the hole at nine wrappers, and one
+// that answered "unsafe" reported every deeply nested aggregate instead. A by-value member
+// graph is acyclic, so the recursion terminates on its own; a visited set keeps it linear
+// on a wide one.
+struct D1 {
+  std::initializer_list<Logger> il;
+};
+struct D2 { D1 m; };
+struct D3 { D2 m; };
+struct D4 { D3 m; };
+struct D5 { D4 m; };
+struct D6 { D5 m; };
+struct D7 { D6 m; };
+struct D8 { D7 m; };
+struct D9 { D8 m; };
+struct D10 { D9 m; };
+struct D11 { D10 m; };
+// soundness-warning@+1 {{can hold a borrow but is annotated neither}}
+D11 g_deeply_wrapped; // expected-warning {{whose destructor is not known to be safe}}
+
+// ...and nesting that holds no initializer_list stays clean at the same depth, which is
+// what a conservative limit got wrong.
+struct S1 { int x = 0; };
+struct S2 { S1 m; };
+struct S3 { S2 m; };
+struct S4 { S3 m; };
+struct S5 { S4 m; };
+struct S6 { S5 m; };
+struct S7 { S6 m; };
+struct S8 { S7 m; };
+struct S9 { S8 m; };
+struct S10 { S9 m; };
+struct S11 { S10 m; };
+S11 g_deeply_wrapped_safe; // no-warning
+
 //===----------------------------------------------------------------------===//
 // Standard library types are not blanket-safe.
 //
