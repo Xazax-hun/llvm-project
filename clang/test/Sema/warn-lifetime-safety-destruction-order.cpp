@@ -260,6 +260,45 @@ struct [[clang::destruction_order_safe]] Annotated {
 Annotated g_annotated; // no-warning
 
 //===----------------------------------------------------------------------===//
+// std::initializer_list does not own its elements.
+//
+// It is trivially destructible, so every rule that keys on the declared type ended
+// its walk there. But declaring one at static storage duration makes the compiler
+// synthesize a SEPARATE backing array, also of static storage duration, and it is
+// that array's elements which are destroyed at shutdown -- by
+// __cxx_global_array_dtor, running an arbitrary element destructor that nothing
+// verified. An aggregate holding one is trivially destructible too, so the walk
+// stopped before reaching the member.
+//
+// Every sibling wrapper owns what it holds and was already caught: vector, optional,
+// unique_ptr, array, pair. This is the one that does not.
+//===----------------------------------------------------------------------===//
+
+// soundness-warning@+1 {{can hold a borrow but is annotated neither}}
+std::initializer_list<Logger> g_il; // expected-warning {{whose destructor is not known to be safe}}
+// soundness-warning@+1 {{can hold a borrow but is annotated neither}}
+std::initializer_list<int> g_il_ok; // no destruction-order warning
+
+// An aggregate holding one, with no annotation anywhere.
+struct HoldsInitList {
+  std::initializer_list<Logger> il;
+};
+// soundness-warning@+1 {{can hold a borrow but is annotated neither}}
+HoldsInitList g_holds_il; // expected-warning {{whose destructor is not known to be safe}}
+
+// ...and the subobject rule on an annotated type, which this also passed.
+struct [[clang::destruction_order_safe]] AnnotatedHoldsInitList {
+  std::initializer_list<Logger> il; // expected-warning {{its member 'il' has type 'std::initializer_list<Logger>'}}
+};
+
+// A safe element type stays clean, as does an aggregate holding one.
+struct HoldsSafeInitList {
+  std::initializer_list<int> il;
+};
+// soundness-warning@+1 {{can hold a borrow but is annotated neither}}
+HoldsSafeInitList g_holds_safe_il; // no destruction-order warning
+
+//===----------------------------------------------------------------------===//
 // Standard library types are not blanket-safe.
 //
 // What a standard container destroys is its element, so the promise has to follow

@@ -3241,7 +3241,59 @@ static bool hasUncheckedLibraryHook(QualType QT) {
 /// has to follow the template arguments -- `std::vector<int>` is safe while
 /// `std::vector<Logger>` is not. And a type-erasing type destroys something its
 /// type does not name at all, which cannot be checked.
-static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0) {
+static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0);
+
+/// True if \p RD is `std::initializer_list`.
+static bool isStdInitializerListDecl(const CXXRecordDecl *RD) {
+  return RD && lifetimes::isInStlNamespace(RD) && RD->getIdentifier() &&
+         RD->getName() == "initializer_list";
+}
+
+/// True if \p QT is, or holds, a `std::initializer_list` whose elements are not safe
+/// to destroy at shutdown.
+///
+/// The list is trivially destructible and does not own its elements. Declaring one at
+/// static storage duration makes the compiler synthesize a SEPARATE backing array,
+/// also of static storage duration, and it is that array's elements which are
+/// destroyed at shutdown -- by __cxx_global_array_dtor, running an arbitrary element
+/// destructor with nothing having verified it.
+///
+/// Neither the list's own type nor an aggregate holding one describes that object, and
+/// both are trivially destructible, so this has to be asked before the shortcut that
+/// ends the walk for such a type. Every sibling wrapper -- vector, optional,
+/// unique_ptr, array, pair -- owns its elements and is caught by the ordinary rules;
+/// this is the one that does not.
+static bool holdsUnsafeInitializerList(QualType QT, unsigned Depth = 0) {
+  if (Depth > 8)
+    return false; // give up rather than recurse without bound
+  QT = QT.getNonReferenceType();
+  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
+    QT = AT->getElementType();
+  const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (isStdInitializerListDecl(RD)) {
+    if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
+      for (const TemplateArgument &A : CTSD->getTemplateArgs().asArray())
+        if (A.getKind() == TemplateArgument::Type &&
+            !isDestructionOrderSafeType(A.getAsType(), Depth + 1))
+          return true;
+    return false;
+  }
+  // An aggregate holding one is trivially destructible too, so the walk would end at
+  // it before ever reaching the member.
+  if (lifetimes::isInStlNamespace(RD))
+    return false; // a library type owns what it holds; the ordinary rules cover it
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (holdsUnsafeInitializerList(B.getType(), Depth + 1))
+      return true;
+  for (const FieldDecl *FD : RD->fields())
+    if (holdsUnsafeInitializerList(FD->getType(), Depth + 1))
+      return true;
+  return false;
+}
+
+static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
   if (Depth > 8)
     return false; // give up rather than recurse without bound
   QT = QT.getNonReferenceType();
@@ -3254,6 +3306,11 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0) {
   // that shortcut said "nothing runs" while an owner of the type still called
   // this function.
   if (hasUncheckedDeallocationFunction(RD))
+    return false;
+  // Likewise a std::initializer_list, whose hidden backing array holds the objects
+  // actually destroyed at shutdown while the list's own type -- and an aggregate
+  // holding one -- is trivially destructible.
+  if (holdsUnsafeInitializerList(QT, Depth))
     return false;
   if (QT.isDestructedType() == QualType::DK_none)
     return true; // nothing runs at shutdown
