@@ -2398,6 +2398,12 @@ def warn_lifetime_safety_destruction_order_unsafe_construction : Warning<
   "shutdown -- for a container that includes its elements', which the library "
   "calls where this body cannot see it">,
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_library_call : Warning<
+  "%0 %select{is 'destruction_order_safe'|runs during static destruction}1 but calls "
+  "%2 on an object of type %3, whose construction runs code that is not known to be "
+  "safe; the library constructs objects of that type where this body cannot see it, "
+  "so the promise has to reach them too">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
 def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
   "%0 is 'destruction_order_safe' but its %select{base class|member %2}1 has type "
   "%3, whose destructor is not known to be safe; that destructor runs at shutdown "

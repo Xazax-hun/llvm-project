@@ -3009,10 +3009,18 @@ static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
   return RD->getIdentifier() && Erasing.contains(RD->getName());
 }
 
-static bool constructionIsInvisible(QualType QT, unsigned Depth);
-
-/// True if constructing \p QT runs a user-written constructor.
-static bool constructionRunsUserCode(QualType QT, unsigned Depth = 0) {
+/// True if constructing \p QT at shutdown runs a constructor that is user code and
+/// does not carry the destruction-order promise.
+///
+/// Safety composes, so this is one chain: a library container is safe to build only if
+/// its template arguments are, and a user type only if its own constructors carry the
+/// promise and everything it holds is safe too. `std::vector<Logger>` is unsafe because
+/// `Logger` is, and `Logger` is unsafe because its constructor is unverified user code.
+///
+/// Note every rule keyed on a type asks whether its DESTRUCTOR is safe, so a type with a
+/// trivial destructor and a hazardous constructor passes all of them -- and creating an
+/// object inside verified shutdown code runs its constructor there.
+static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
   if (Depth > 8)
     return true; // give up conservatively rather than recurse without bound
   QT = QT.getNonReferenceType();
@@ -3021,13 +3029,6 @@ static bool constructionRunsUserCode(QualType QT, unsigned Depth = 0) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false; // no constructor of ours runs
-  // A promise about the class covers its OWN constructor, which is verified against
-  // it (see carriesDestructionOrderPromise). It does not cover what a member
-  // container constructs: that verification walks the constructor's initializers and
-  // arrives at the container's constructor, which is library code it trusts. So keep
-  // looking for a container even here.
-  if (RD->hasAttr<DestructionOrderSafeAttr>())
-    return constructionIsInvisible(QT, Depth);
   if (lifetimes::isLibraryOwned(RD)) {
     // A container CONSTRUCTS its elements, so this follows the template arguments
     // exactly as the destruction question does. What a type-erasing type constructs
@@ -3040,46 +3041,49 @@ static bool constructionRunsUserCode(QualType QT, unsigned Depth = 0) {
         if (A.getKind() == TemplateArgument::Pack)
           return llvm::any_of(A.pack_elements(), ArgRuns);
         if (A.getKind() == TemplateArgument::Type)
-          return constructionRunsUserCode(A.getAsType(), Depth + 1);
+          return constructionRunsUncheckedCode(A.getAsType(), Depth + 1);
         return false;
       };
       return llvm::any_of(CTSD->getTemplateArgs().asArray(), ArgRuns);
     }
     return false;
   }
+  // A written constructor is user code, and safe only if it promises. Asked per
+  // constructor rather than per class: the promise on a class covers the constructors
+  // it generates for that class, and nothing more -- so a class carrying it still has
+  // to answer for what its bases and members construct, which is the recursion below.
+  // Annotating a wrapper would otherwise hide exactly what this rule exists to see.
   for (const CXXConstructorDecl *Ctor : RD->ctors())
-    if (!Ctor->isImplicit() && !Ctor->isDefaulted())
+    if (!Ctor->isImplicit() && !Ctor->isDefaulted() &&
+        !lifetimes::carriesDestructionOrderPromise(Ctor))
       return true;
-  // Otherwise only the generated constructor runs, which runs the bases' and
-  // members' constructors and the default member initializers.
+  // Otherwise only generated constructors run, which run the bases' and members'
+  // constructors and the default member initializers.
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (constructionRunsUserCode(B.getType(), Depth + 1))
+    if (constructionRunsUncheckedCode(B.getType(), Depth + 1))
       return true;
   for (const FieldDecl *FD : RD->fields())
-    if (constructionRunsUserCode(FD->getType(), Depth + 1))
+    if (constructionRunsUncheckedCode(FD->getType(), Depth + 1))
       return true;
   return false;
 }
 
-/// True if constructing \p QT runs a constructor the body being verified cannot
-/// see.
+/// True if creating \p QT runs unchecked construction that NO node in the body names.
 ///
-/// Every rule keyed on a type asks whether its DESTRUCTOR is safe, so a type with a
-/// trivial destructor and a hazardous constructor passed all of them -- and creating
-/// an object inside verified shutdown code runs its constructor there.
+/// A user-written constructor is always reported precisely, by name: the descent through
+/// implicit constructors reaches every base's and member's constructor and reports each
+/// unchecked one, so `WrapsPeeker w;` says "calls 'Peeker'" and tells the reader exactly
+/// what to annotate. What that descent cannot see past is a LIBRARY type -- it arrives at
+/// the container's own constructor, which is trusted for being library code, and the
+/// elements the container builds appear nowhere in the AST.
 ///
-/// A user type's own constructor needs no type-level rule: it appears as a
-/// CXXConstructExpr and is reported precisely, by name, there. What cannot be seen
-/// that way is a CONTAINER's elements: `std::vector<Inner> v(1);` runs
-/// `Inner::Inner()` from inside the library, and nothing at the call site says so.
-/// So this asks only about that.
-///
-/// Note it is asked only where an object is CREATED in shutdown code, never of a
-/// static-duration variable: that one's constructor runs at startup, which is the
-/// static *initialization* order problem and a different hazard.
-static bool constructionIsInvisible(QualType QT, unsigned Depth) {
+/// So this walks through user types, whose constructors are covered, looking for a
+/// library type that builds something unchecked. It cannot simply call the chain on each
+/// subobject: that would report the coarse type-level answer for a plain user member and
+/// lose the precise one.
+static bool constructionHidesUncheckedCode(QualType QT, unsigned Depth = 0) {
   if (Depth > 8)
-    return false; // the precise per-constructor report still applies
+    return true; // conservative: at this depth the precise report may not reach it
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
@@ -3087,16 +3091,12 @@ static bool constructionIsInvisible(QualType QT, unsigned Depth) {
   if (!RD || !RD->hasDefinition())
     return false;
   if (lifetimes::isLibraryOwned(RD))
-    return constructionRunsUserCode(QT, Depth);
-  // A user type reached here has its own constructors reported precisely -- or, if it
-  // carries the promise, verified against it. Neither reaches what a member CONTAINER
-  // constructs, since that verification stops at the container's own constructor and
-  // trusts it, so keep looking for one among the bases and members.
+    return constructionRunsUncheckedCode(QT, Depth);
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (constructionIsInvisible(B.getType(), Depth + 1))
+    if (constructionHidesUncheckedCode(B.getType(), Depth + 1))
       return true;
   for (const FieldDecl *FD : RD->fields())
-    if (constructionIsInvisible(FD->getType(), Depth + 1))
+    if (constructionHidesUncheckedCode(FD->getType(), Depth + 1))
       return true;
   return false;
 }
@@ -3575,6 +3575,36 @@ public:
               << Subject << SubjectKind;
         return true;
       }
+    // A library callee is trusted for where it was WRITTEN: library code does not name
+    // a user's globals. That says nothing about what it is parameterized BY -- and a
+    // container calls the constructors of its elements. `m.emplace_back()` on a
+    // `std::vector<Logger>` runs `Logger::Logger` during shutdown with nothing in this
+    // body naming it, so trusting `emplace_back` on account of its header was the whole
+    // gap. The promise has to chain: `emplace_back` is safe only if
+    // `std::vector<Logger>` is, which needs `Logger` to be.
+    //
+    // Asked of the object argument, which is where the element type comes from. The
+    // container itself was constructed elsewhere -- typically as a member of the class
+    // being destroyed -- so no construction in this body describes it, and every
+    // construction-site check necessarily misses it.
+    //
+    // This is the chain itself, not the variant used at a construction site. That one
+    // skips the top-level type's OWN constructors, which are reported precisely at
+    // their CXXConstructExpr -- here the receiver is a library type, so there are none
+    // to skip, and the two can only differ for a receiver whose own constructor is
+    // user-written, which would mean the callee was not library code and this check was
+    // never reached.
+    if (const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE))
+      if (!Callee->isConsteval() &&
+          S.SourceMgr.isInSystemHeader(Callee->getLocation()) &&
+          constructionRunsUncheckedCode(MCE->getObjectType())) {
+        if (firstReportAt(CE->getExprLoc()))
+          S.Diag(
+              CE->getExprLoc(),
+              diag::warn_lifetime_safety_destruction_order_unsafe_library_call)
+              << Subject << SubjectKind << Callee << MCE->getObjectType();
+        return true;
+      }
     if (isDestructionOrderSafeFunction(Callee))
       return true;
     // A lambda's call operator declared inside the function being verified is
@@ -3695,7 +3725,7 @@ public:
   /// for a container, its elements' constructors, which the library calls where this
   /// body cannot see it.
   void checkConstructedType(QualType QT, unsigned Kind, SourceLocation Loc) {
-    if (QT.isNull() || !constructionIsInvisible(QT, /*Depth=*/0) ||
+    if (QT.isNull() || !constructionHidesUncheckedCode(QT) ||
         !firstReportAt(Loc))
       return;
     S.Diag(Loc, diag::warn_lifetime_safety_destruction_order_unsafe_construction)

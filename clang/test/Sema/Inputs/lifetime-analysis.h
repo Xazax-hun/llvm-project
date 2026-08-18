@@ -114,6 +114,8 @@ struct vector {
 
   void push_back(const T&);
   void push_back(T&&);
+  template<typename... Args> T& emplace_back(Args&&... args);
+  size_t size() const;
   const T& back() const;
   void pop_back();
   iterator insert(iterator, T&&);

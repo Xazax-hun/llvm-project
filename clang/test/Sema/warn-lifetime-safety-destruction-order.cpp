@@ -691,6 +691,69 @@ struct [[clang::destruction_order_safe]] MakesSafeEveryWay {
 };
 
 //===----------------------------------------------------------------------===//
+// A library callee is trusted for where it was written, not for what it is
+// parameterized by.
+//===----------------------------------------------------------------------===//
+
+// Library code is trusted because it does not name a user's globals. That says nothing
+// about what it CONSTRUCTS: a container builds its elements, so `m.emplace_back()` on a
+// `vector<Peeker>` runs `Peeker::Peeker` during shutdown with nothing in this body naming
+// it. The container is a member, constructed long before, so no construction site in this
+// body describes it either -- the question has to be asked at the call. The promise
+// chains: `emplace_back` is safe only if `vector<Peeker>` is, which needs `Peeker` to be.
+struct [[clang::destruction_order_safe]] CallsIntoContainer {
+  vector<Peeker> m;
+  ~CallsIntoContainer() {
+    // expected-warning@+1 {{calls 'emplace_back<>' on an object of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    m.emplace_back();
+    // expected-warning@+1 {{calls 'resize' on an object of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    m.resize(3);
+  }
+};
+
+// Through a pointer or reference to the container, the same.
+struct [[clang::destruction_order_safe]] CallsThroughPointer {
+  vector<Peeker> m;
+  ~CallsThroughPointer() {
+    vector<Peeker> *p = &m;
+    // expected-warning@+1 {{calls 'clear' on an object of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    p->clear();
+  }
+};
+
+// Containers whose elements run no unchecked code are called into freely -- this is
+// ordinary library use inside a verified destructor and has to stay clean.
+struct [[clang::destruction_order_safe]] CallsSafeContainers {
+  vector<int> nums;
+  string text;
+  vector<Counter> counters;
+  ~CallsSafeContainers() {
+    nums.push_back(1); // no-warning
+    nums.clear();      // no-warning
+    text.clear();      // no-warning
+    text.push_back(0x61);
+    counters.push_back(Counter()); // no-warning: Counter is annotated
+    sink = (char)nums.size();
+  }
+};
+
+// The promise is asked of each CONSTRUCTOR, not of the class, so annotating just the
+// constructor is enough to make the element safe to build. This is what the rule is
+// really about -- a class-wide attribute could not express it.
+struct PeekerWithSafeCtor {
+  char c = 0;
+  [[clang::destruction_order_safe]] PeekerWithSafeCtor() {}
+};
+struct [[clang::destruction_order_safe]] CallsSafeCtorContainer {
+  vector<PeekerWithSafeCtor> m;
+  ~CallsSafeCtorContainer() {
+    m.emplace_back(); // no-warning
+    vector<PeekerWithSafeCtor> local; // no-warning
+    (void)local;
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Trust follows who WROTE the code, not the namespace it is spelled in.
 //
 // Specializing a standard template for a program-defined type is legal, conforming
