@@ -70,15 +70,33 @@ struct Nested {
 // Negatives: must NOT fire.
 //===----------------------------------------------------------------------===//
 
-// A lifetimebound-`this` accessor whose result borrows the object's IDENTITY
-// but not a member. The result carries the object loan but no member loan, so
-// it is not a self-referential member borrow. (Requires the "borrows a member"
-// condition, not just "shares the object identity".)
-struct Identity {
+// A '[[clang::lifetimebound]]' accessor re-roots its result at the object and
+// projects `.*` -- "a member of this object, identity unknown". That is still a member
+// borrow, so laundering the store through such an accessor is reported exactly as the
+// direct store is. It previously was not, which made `view = raw();` accepted where
+// `view = str;` was refused, and left the store unrecorded so a later mutation in
+// another method had no live borrow to invalidate. The two annotations that produce
+// the shape are the two the analysis itself asks for, so this is the form an adopter
+// arrives at by following its advice.
+struct ViaAccessor {
+  string str;
   string_view view;
-  string_view borrowThis() [[clang::lifetimebound]];
+  string_view raw() const [[clang::lifetimebound]] { return str; }
   void f() {
-    view = borrowThis(); // no-warning (borrows the object, not a member)
+    view = raw(); // expected-warning {{member is bound to a sibling member of the same object}}
+  }
+};
+
+// A borrow of the object's own IDENTITY is reported too, and should be: the
+// diagnostic is about mutating OR MOVING the object, and moving is exactly what
+// invalidates a self-pointer -- `Identity b = a;` leaves `b.self` pointing at `a`.
+// (In unannotated code the shape does not arise: a raw self-pointer member is already
+// refused by -Wlifetime-safety-multilevel-indirection.)
+struct Identity {
+  Identity *self = nullptr;
+  Identity *me() [[clang::lifetimebound]];
+  void f() {
+    self = me(); // expected-warning {{member is bound to a sibling member of the same object}}
   }
 };
 

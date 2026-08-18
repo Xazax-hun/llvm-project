@@ -214,6 +214,20 @@ static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
   return recordReachesField(RD, FD, Visited);
 }
 
+/// True if \p L borrows SOME member of the object it is rooted at, without naming
+/// which -- an `.*` element.
+///
+/// A '[[clang::lifetimebound]]' accessor re-roots its result at the object and
+/// projects `.*`, so `$this.*` means "a member of $this, identity unknown". That is
+/// still a member borrow, but it is deliberately kept out of isFieldBorrowOf: that
+/// predicate is shared with the invalidation and argument-overlap checks, where
+/// widening a precise question to "some member" turns disjoint members into
+/// apparent aliases and costs real precision.
+static bool borrowsUnnamedMember(const Loan *L) {
+  return llvm::any_of(L->getAccessPath().getElements(),
+                      [](const PathElement &E) { return E.isInterior(); });
+}
+
 /// True if the last field named by `AP` is `Field`, i.e. the path denotes that
 /// field itself rather than something containing it. `w.c` names `c` last;
 /// `w.c.buf` does not.
@@ -1765,10 +1779,17 @@ public:
   ///
   /// The stored value must (a) borrow the very object that holds the member --
   /// it shares that object's identity loan, which pins it to the same instance
-  /// -- AND (b) borrow one of that object's members (a field-rooted loan).
-  /// Requiring (b) avoids flagging a lifetimebound-`this` accessor whose result
-  /// borrows the object's identity but not a member (it carries only the object
-  /// loan, no field loan).
+  /// -- AND (b) borrow one of that object's members. Requiring (b) avoids flagging
+  /// a store of a borrow of the object's identity and nothing inside it (`self =
+  /// this`), which no mutation of a member can invalidate.
+  ///
+  /// (b) is satisfied by an IMPRECISE member borrow too. A
+  /// '[[clang::lifetimebound]]' accessor re-roots its result at the object and
+  /// projects `.*` -- a member access of unknown identity -- so requiring a NAMED
+  /// field meant `title = raw();` was accepted where the identical `title = text;`
+  /// was refused, and the store went unrecorded so a later `text.append()` in
+  /// another method had no live borrow to invalidate. The two annotations that
+  /// produced that shape are the two the analysis itself asks for.
   void checkSelfReferentialStore(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
@@ -1789,8 +1810,8 @@ public:
         // the container's `$this` rather than equal to it.
         if (CAP.isPrefixOf(L->getAccessPath()))
           SharesObject = true;
-        if (isFieldBorrowOf(L, RD))
-          BorrowsMember = true; // borrows a member of it
+        if (isFieldBorrowOf(L, RD) || borrowsUnnamedMember(L))
+          BorrowsMember = true; // borrows a member of it, named or not
       }
       if (SharesObject && BorrowsMember &&
           ReportedSelfRefStores.insert(FSF->getStoreExpr()).second) {
