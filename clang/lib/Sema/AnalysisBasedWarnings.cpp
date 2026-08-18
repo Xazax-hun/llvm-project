@@ -3495,6 +3495,9 @@ class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   /// where the object lives -- currently a `new` expression's initializer, so that
   /// one allocation is reported once, as an allocation.
   llvm::SmallPtrSet<const Expr *, 8> ConstructionsCoveredByParent;
+  /// Temporaries whose lifetime is extended to static duration, and which are therefore
+  /// judged as objects of static storage duration rather than as temporaries here.
+  llvm::SmallPtrSet<const Expr *, 8> StaticDurationTemporaries;
 
   /// True the first time \p Loc is reported.
   bool firstReportAt(SourceLocation Loc) {
@@ -3768,7 +3771,23 @@ public:
   }
 
   bool VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *BTE) override {
-    checkDestroyedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
+    if (!StaticDurationTemporaries.contains(BTE))
+      checkDestroyedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
+    return true;
+  }
+
+  /// A temporary whose lifetime is extended to STATIC duration is an object of static
+  /// storage duration, so its destruction is for the walk over such objects to judge --
+  /// exactly as a `static` local's is, which VisitDeclStmt already defers for the same
+  /// reason. Without this, `static const Base &r = Reader();` in an annotated body was
+  /// reported twice, once by each. The MaterializeTemporaryExpr is the parent of the
+  /// CXXBindTemporaryExpr, so it is visited first and the note lands in time.
+  bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *MTE) override {
+    if (MTE->getStorageDuration() == SD_Static ||
+        MTE->getStorageDuration() == SD_Thread)
+      if (const auto *BTE = dyn_cast<CXXBindTemporaryExpr>(
+              MTE->getSubExpr()->IgnoreImpCasts()))
+        StaticDurationTemporaries.insert(BTE);
     return true;
   }
 
@@ -3868,9 +3887,44 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       if (!isUninstantiableDependentStatic(VD) &&
           isDestructionOrderSafeType(VD->getType()))
         return true;
+      // The non-reference type: for a reference bound to a temporary it is the
+      // temporary's type that has the destructor, and advising the reader to give
+      // `const T &` a trivial destructor made no sense.
       S.Diag(VD->getLocation(),
              diag::warn_lifetime_safety_unsafe_static_destruction)
-          << (VD->isStaticDataMember() ? 1 : 0) << VD->getType();
+          << (VD->isStaticDataMember() ? 1 : 0)
+          << VD->getType().getNonReferenceType().getUnqualifiedType();
+      return true;
+    }
+
+    /// A static-duration reference bound to a temporary creates a SECOND object of
+    /// static storage duration -- the lifetime-extended temporary -- and its type need
+    /// not be the reference's.
+    ///
+    /// `static const Base &r = Reader();` judged `Base`, which is trivially
+    /// destructible, so the walk stopped there while `~Reader` ran at shutdown
+    /// unverified. Binding to a subobject makes the two types unrelated entirely:
+    /// `static const int &r = Nasty().n;` declares an `int` and creates a `Nasty`.
+    ///
+    /// The model already had the right check for this -- written inside a verified body
+    /// the same construct is caught, by checkDestroyedType at the CXXBindTemporaryExpr
+    /// -- but a namespace-scope initializer has no verified body for it to run in.
+    bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *MTE) override {
+      if (MTE->getStorageDuration() != SD_Static &&
+          MTE->getStorageDuration() != SD_Thread)
+        return true;
+      // When the extending declaration's own type is already unsafe, VisitVarDecl
+      // reported it there; that is the case which always worked, and reporting the
+      // temporary as well would say the same thing twice.
+      if (const ValueDecl *Extending = MTE->getExtendingDecl())
+        if (!isDestructionOrderSafeType(Extending->getType()))
+          return true;
+      QualType QT = MTE->getSubExpr()->getType().getUnqualifiedType();
+      if (isDestructionOrderSafeType(QT))
+        return true;
+      S.Diag(MTE->getExprLoc(),
+             diag::warn_lifetime_safety_unsafe_static_destruction)
+          << /*lifetime-extended temporary=*/2 << QT;
       return true;
     }
 

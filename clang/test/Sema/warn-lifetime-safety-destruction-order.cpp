@@ -53,6 +53,62 @@ Logger Host::s_log; // expected-warning {{static data member of static storage d
 // there.
 extern Logger g_extern; // no-warning
 
+// Binding a static-duration REFERENCE to a temporary creates a second object of static
+// storage duration -- the lifetime-extended temporary -- and its type need not be the
+// reference's. Judging only the declared type let `~Logger` run at shutdown unverified,
+// because `TrivialBase` is trivially destructible and the walk stopped there.
+struct TrivialBase {};
+struct LoggerDerived : TrivialBase {
+  ~LoggerDerived();
+};
+// expected-warning@+1 {{lifetime-extended temporary of static storage duration has type 'LoggerDerived'}}
+static const TrivialBase &g_extended = LoggerDerived();
+// An rvalue reference extends the same way.
+// expected-warning@+1 {{lifetime-extended temporary of static storage duration has type 'LoggerDerived'}}
+static TrivialBase &&g_extended_rvalue = LoggerDerived();
+
+// Binding to a SUBOBJECT makes the two types unrelated entirely: this declares an `int`
+// and creates a `LoggerHolder`.
+struct LoggerHolder {
+  int n = 0;
+  ~LoggerHolder();
+};
+// expected-warning@+1 {{lifetime-extended temporary of static storage duration has type 'LoggerHolder'}}
+static const int &g_extended_member = LoggerHolder().n;
+
+// Inside a function, a static-duration temporary is the same object with the same
+// hazard, and is reported once -- as an object of static storage duration, not also as a
+// temporary by the body check, which defers to this exactly as it does for a static local.
+[[clang::destruction_order_safe]] void arms() {
+  // expected-warning@+1 {{lifetime-extended temporary of static storage duration has type 'LoggerDerived'}}
+  static const TrivialBase &r = LoggerDerived();
+}
+
+// Reported once at the declaration when the DECLARED type is unsafe too, rather than
+// twice: that case always worked.
+struct LoggerPlain {
+  ~LoggerPlain();
+};
+// expected-warning@+1 {{variable of static storage duration has type 'LoggerPlain'}}
+static const LoggerPlain &g_extended_same = LoggerPlain();
+
+// Negatives: an extended temporary that is trivially destructible, one that promises, and
+// one whose destructor only releases its own storage.
+struct TriviallyExtended : TrivialBase {
+  int n = 0;
+};
+static const TrivialBase &g_ok_trivial = TriviallyExtended(); // no-warning
+struct [[clang::destruction_order_safe]] SafeExtended : TrivialBase {
+  ~SafeExtended() {}
+};
+static const TrivialBase &g_ok_safe = SafeExtended(); // no-warning
+struct OwnsOnly : TrivialBase {
+  string s;
+};
+static const TrivialBase &g_ok_owner = OwnsOnly(); // no-warning
+// A temporary with ordinary full-expression lifetime is not a static-duration object.
+static int g_from_temporary = LoggerHolder().n; // no-warning
+
 //===----------------------------------------------------------------------===//
 // Allowed without any annotation.
 //===----------------------------------------------------------------------===//

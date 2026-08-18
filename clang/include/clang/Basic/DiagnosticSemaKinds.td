@@ -2363,7 +2363,8 @@ def warn_lifetime_safety_override_of_non_invalidating : Warning<
   "silently dangling by this override">,
   InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
 def warn_lifetime_safety_unsafe_static_destruction : Warning<
-  "%select{variable|static data member}0 of static storage duration has type %1, "
+  "%select{variable|static data member|lifetime-extended temporary}0 of static "
+  "storage duration has type %1, "
   "whose destructor is not known to be safe against static destruction order; at "
   "shutdown it may observe another such object that was already destroyed. Give "
   "%1 a trivial destructor, or annotate it "
