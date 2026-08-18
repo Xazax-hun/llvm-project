@@ -2392,7 +2392,8 @@ def warn_lifetime_safety_destruction_order_unsafe_object : Warning<
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
 def warn_lifetime_safety_destruction_order_unsafe_construction : Warning<
   "%0 %select{is 'destruction_order_safe'|runs during static destruction}1 but "
-  "%select{creates a local|creates a temporary}2 of type %3, whose construction "
+  "%select{creates a local|creates a temporary|allocates an object|creates a "
+  "function-local static}2 of type %3, whose construction "
   "runs code that is not known to be safe; a constructor runs here, during "
   "shutdown -- for a container that includes its elements', which the library "
   "calls where this body cannot see it">,

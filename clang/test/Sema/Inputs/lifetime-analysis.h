@@ -384,6 +384,22 @@ public:
   ~variant();
 };
 
+// A container that is TRIVIALLY DESTRUCTIBLE whenever its element is -- it keeps the
+// elements in its own storage, so nothing needs destroying -- while still CONSTRUCTING
+// them inside the library. That combination is what leaves a temporary of it with no
+// CXXBindTemporaryExpr, which is the node the construction question used to hang on, so
+// creating one ran every element's constructor unasked. libc++'s std::optional is the
+// real instance: trivially destructible exactly when its value type is. Deliberately not
+// an aggregate -- an aggregate's element constructors appear in the caller's AST and are
+// reported precisely, which is the case that already worked.
+template <class T, unsigned long N> struct fixed_vector {
+  fixed_vector();
+  explicit fixed_vector(unsigned long);
+  T &operator[](unsigned long);
+  const T &operator[](unsigned long) const;
+  unsigned long size() const;
+};
+
 // Minimal stand-in for the template users most often specialize for their own types.
 // A user specialization of it is legal C++ and lands in namespace `std`, which is why
 // trust has to key on whether the LIBRARY wrote a declaration, not on its namespace.

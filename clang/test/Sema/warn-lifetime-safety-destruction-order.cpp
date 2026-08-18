@@ -642,6 +642,55 @@ struct [[clang::destruction_order_safe]] MakesSafeWrapper {
 };
 
 //===----------------------------------------------------------------------===//
+// The container question is asked wherever an object is CREATED, not only at the
+// two spellings that happened to be wired up.
+//===----------------------------------------------------------------------===//
+
+// It used to be asked at exactly two places: an automatic local's declaration, and a
+// CXXBindTemporaryExpr. Each shape below creates the same `vector<Peeker>` -- running
+// `Peeker::Peeker` at shutdown from inside the library -- through a route neither of
+// those covers, so all of them were silent while the plain local was refused.
+struct [[clang::destruction_order_safe]] MakesContainersEveryWay {
+  ~MakesContainersEveryWay() {
+    // The heap: no declaration and no temporary to hang the question on. The library
+    // type's own constructor is trusted, so the per-constructor report is silent too.
+    // expected-warning@+1 {{allocates an object of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    new vector<Peeker>;
+    // Array new constructs each element the same way. `getAllocatedType` is the
+    // element type, so this reports the same type as above.
+    // expected-warning@+1 {{allocates an object of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    new vector<Peeker>[2];
+    // A function-local static is constructed when control first reaches it -- here,
+    // during shutdown. This was skipped as "the Walker's business", but the Walker
+    // judges DESTRUCTION, and `vector<Peeker>`'s destruction is fine.
+    // expected-warning@+1 {{creates a function-local static of type 'vector<Peeker>', whose construction runs code that is not known to be safe}}
+    static vector<Peeker> s;
+  }
+};
+
+// A temporary is asked about at its CXXBindTemporaryExpr -- which exists only when the
+// type needs destroying. `fixed_vector<Peeker, 2>` keeps its elements in its own storage,
+// so with `Peeker` trivially destructible there is no such node at all, and creating one
+// ran two `Peeker` constructors at shutdown with nothing to hang the question on.
+struct [[clang::destruction_order_safe]] MakesTrivialTemporary {
+  ~MakesTrivialTemporary() {
+    // expected-warning@+1 {{creates a temporary of type 'std::fixed_vector<Peeker, 2>', whose construction runs code that is not known to be safe}}
+    (void)std::fixed_vector<Peeker, 2>();
+  }
+};
+
+// Negatives: the same routes with an element that runs no unverified code stay clean,
+// and one object is reported once rather than once per route that describes it.
+struct [[clang::destruction_order_safe]] MakesSafeEveryWay {
+  ~MakesSafeEveryWay() {
+    new vector<int>;                              // no-warning
+    new vector<Counter>;                          // no-warning: Counter is annotated
+    (void)std::fixed_vector<int, 2>();            // no-warning
+    (void)std::fixed_vector<Counter, 2>();        // no-warning
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Trust follows who WROTE the code, not the namespace it is spelled in.
 //
 // Specializing a standard template for a program-defined type is legal, conforming

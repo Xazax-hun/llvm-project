@@ -3491,6 +3491,10 @@ class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   /// the construction the user actually wrote. Reports anchor there rather than at
   /// the member or base declaration the generated code happens to point at.
   SourceLocation DescentLoc;
+  /// Constructions already described by an enclosing node that says more about
+  /// where the object lives -- currently a `new` expression's initializer, so that
+  /// one allocation is reported once, as an allocation.
+  llvm::SmallPtrSet<const Expr *, 8> ConstructionsCoveredByParent;
 
   /// True the first time \p Loc is reported.
   bool firstReportAt(SourceLocation Loc) {
@@ -3597,8 +3601,34 @@ public:
     return true;
   }
 
+  /// Records that \p E constructs a base or member, whose construction belongs to
+  /// the enclosing object rather than to the constructor running it.
+  ///
+  /// A constructor is shutdown code only when something calls it from shutdown code,
+  /// and that is decided at the creation site, which reports the enclosing type. For
+  /// a static-duration object the same constructor runs at STARTUP, where building a
+  /// container of a user type is perfectly fine -- so blaming the constructor would
+  /// report correct code.
+  void markConstructionCoveredByParent(const Expr *E) {
+    if (const auto *CCE = dyn_cast<CXXConstructExpr>(E->IgnoreImplicit()))
+      ConstructionsCoveredByParent.insert(CCE);
+  }
+
   bool VisitCXXConstructExpr(CXXConstructExpr *CCE) override {
     checkConstruction(CCE->getConstructor(), CCE->getExprLoc());
+    // A temporary was asked about at its CXXBindTemporaryExpr, which only exists
+    // when the type needs destroying: `std::optional<Logger>(std::in_place)`, with
+    // `Logger` trivially destructible, has none at all and so was never asked.
+    // Construction is what this node means, so ask here instead -- and a named
+    // variable's initializer is a CXXConstructExpr too, whose report is
+    // deduplicated against the declaration's by location.
+    //
+    // Not while descending through an implicit constructor, though: there the
+    // enclosing object was already reported by its own type, which is the answer
+    // that names something the reader wrote. Asking again of each base and member
+    // would report one object once per container it happens to contain.
+    if (!DescentLoc.isValid() && !ConstructionsCoveredByParent.contains(CCE))
+      checkConstructedType(CCE->getType(), /*temporary=*/1, CCE->getExprLoc());
     return true;
   }
 
@@ -3674,19 +3704,45 @@ public:
 
   bool VisitDeclStmt(DeclStmt *DS) override {
     for (const Decl *D : DS->decls())
-      if (const auto *VD = dyn_cast<VarDecl>(D))
-        // A static local is checked by the Walker as its own declaration; here we
-        // care about the automatic ones, destroyed as this body unwinds.
-        if (VD->hasLocalStorage()) {
+      if (const auto *VD = dyn_cast<VarDecl>(D)) {
+        // Destruction as this body unwinds is the automatic locals' business. A
+        // static local's destructor is registered with atexit and judged by the
+        // Walker, where it is declared.
+        if (VD->hasLocalStorage())
           checkDestroyedType(VD->getType(), /*local=*/0, VD->getLocation());
-          checkConstructedType(VD->getType(), /*local=*/0, VD->getLocation());
-        }
+        // CONSTRUCTION, though, happens here for both. A function-local static is
+        // constructed when control first reaches its declaration -- if that is
+        // inside shutdown code then that is where its constructor runs, and the
+        // Walker does not ask: it judges destruction. Deferring to it left
+        // `static std::vector<Logger> v(1);` in a verified destructor silent.
+        checkConstructedType(VD->getType(),
+                             VD->hasLocalStorage()
+                                 ? /*local=*/0
+                                 : /*function-local static=*/3,
+                             VD->getLocation());
+      }
     return true;
   }
 
   bool VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *BTE) override {
     checkDestroyedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
-    checkConstructedType(BTE->getType(), /*temporary=*/1, BTE->getExprLoc());
+    return true;
+  }
+
+  /// A `new` expression constructs its allocated type here, and until now nothing
+  /// asked: there is no declaration and no temporary to hang the question on, so
+  /// `new std::vector<Logger>(1)` ran the element constructors at shutdown while the
+  /// identical local was refused. (The library type's own constructor is trusted, so
+  /// the per-constructor report does not fire either.)
+  ///
+  /// The allocated object's own CXXConstructExpr -- which exists even for array new
+  /// -- describes this same construction, so claim it: one allocation should be
+  /// reported once, and as an allocation rather than as a temporary.
+  bool VisitCXXNewExpr(CXXNewExpr *NE) override {
+    if (const auto *CCE = dyn_cast_or_null<CXXConstructExpr>(NE->getInitializer()))
+      ConstructionsCoveredByParent.insert(CCE);
+    checkConstructedType(NE->getAllocatedType(), /*allocates=*/2,
+                         NE->getExprLoc());
     return true;
   }
 
@@ -3828,8 +3884,10 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       // initializer runs the same way and calls the same constructors.
       if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
         for (const CXXCtorInitializer *Init : Ctor->inits())
-          if (Expr *E = Init->getInit())
+          if (Expr *E = Init->getInit()) {
+            Checker.markConstructionCoveredByParent(E);
             Checker.TraverseStmt(E);
+          }
       return true;
     }
   };
