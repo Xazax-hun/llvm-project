@@ -126,6 +126,49 @@ struct Impl : CrtpBase<Impl> {};
 static int g_use4 = Impl::s_wire;
 
 //===----------------------------------------------------------------------===//
+// A DEFAULT ARGUMENT is code in the same position.
+//===----------------------------------------------------------------------===//
+
+// It is owned by a declaration, runs whenever a call omits the argument, and is reached
+// by no other entry point. The CFG deliberately does not descend into a
+// CXXDefaultArgExpr -- the expression belongs to the callee's declaration, so adding it
+// to each caller's CFG would make one Expr appear in several -- and the per-function path
+// analyzes bodies, which a default argument is not. So a hazard written wholly inside one
+// was invisible, while the identical expression at the call site is reported.
+//
+// Analyzing it once, at its declaration, is well defined: a default argument cannot name
+// a local or another parameter, so only globals, static members and its own temporaries
+// are in scope, and those mean the same thing from here as from any call site.
+
+Watch g_dflt_free; // expected-warning {{borrows from a mutable global or static object}}
+// expected-warning@+1 {{cannot track global variable 'g_dflt_free' here}}
+void takes_free(int x = (g_dflt_free.v = g_mut, 0));
+
+// A constructor's default argument, and a method's.
+Watch g_dflt_ctor; // expected-warning {{borrows from a mutable global or static object}}
+struct HasDefaultedCtor {
+  // expected-warning@+1 {{cannot track global variable 'g_dflt_ctor' here}}
+  HasDefaultedCtor(int x = (g_dflt_ctor.v = g_mut, 0));
+};
+
+Watch g_dflt_method; // expected-warning {{borrows from a mutable global or static object}}
+struct HasDefaultedMethod {
+  // expected-warning@+1 {{cannot track global variable 'g_dflt_method' here}}
+  void go(int x = (g_dflt_method.v = g_mut, 0));
+};
+
+// Negatives: a default argument that stores nothing and holds no borrow needs no CFG at
+// all, which is what keeps this sweep from costing a CFG per default argument in the
+// translation unit.
+void cheap1(int x = 0);                     // no-warning
+void cheap2(const char *p = nullptr);       // no-warning
+void cheap3(int x = 40 + 2);                // no-warning
+static int doubled(int a) { return a * 2; }
+void cheap4(int x = doubled(3));            // no-warning
+// A borrow of a literal is genuinely immortal.
+void cheap5(const char *p = "literal");     // no-warning
+
+//===----------------------------------------------------------------------===//
 // Negatives: ordinary global initialization stays clean.
 //===----------------------------------------------------------------------===//
 

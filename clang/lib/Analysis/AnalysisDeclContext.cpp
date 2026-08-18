@@ -118,9 +118,12 @@ Stmt *AnalysisDeclContext::getBody(bool &IsAutosynthesized) const {
   else if (const auto *FunTmpl = dyn_cast_or_null<FunctionTemplateDecl>(D))
     return FunTmpl->getTemplatedDecl()->getBody();
   else if (const auto *VD = dyn_cast_or_null<VarDecl>(D)) {
-    if (VD->isFileVarDecl()) {
+    // A parameter's DEFAULT ARGUMENT is code too, and it is the only code a
+    // ParmVarDecl has. It is not a file-scope variable, so it needs naming here
+    // separately -- otherwise constructing a context for one reached the
+    // unreachable below.
+    if (VD->isFileVarDecl() || isa<ParmVarDecl>(VD))
       return const_cast<Stmt *>(dyn_cast_or_null<Stmt>(VD->getInit()));
-    }
   }
 
   llvm_unreachable("unknown code decl");

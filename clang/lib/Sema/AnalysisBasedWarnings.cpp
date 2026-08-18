@@ -4164,10 +4164,50 @@ static void LifetimeSafetyFileVarInitAnalysis(
       // refers to. So skip only when the variable cannot hold a borrow at all.
       if (VD->hasConstantInitialization() && !typeMayHoldBorrow(VD->getType()))
         return true;
+      analyze(VD);
+      return true;
+    }
+
+    /// A DEFAULT ARGUMENT is code in the same position as a namespace-scope initializer:
+    /// owned by a declaration, run whenever a call omits the argument, and reached by no
+    /// other entry point. The CFG deliberately does not descend into a
+    /// CXXDefaultArgExpr -- the expression belongs to the callee's declaration, so
+    /// adding it to each caller's CFG would make one Expr appear in several (PR13385) --
+    /// and the per-function path analyzes bodies, which this is not. So a hazard written
+    /// wholly inside one was invisible, while the identical expression at the call site
+    /// is reported.
+    ///
+    /// Driven from the function rather than from a ParmVarDecl visit, because the
+    /// traversal reaches a function's parameters only when it has written parameter
+    /// source information.
+    ///
+    /// Analyzing it once, here, is well defined: a default argument cannot name a local
+    /// or another parameter, so only globals, static members and its own temporaries are
+    /// in scope, and those mean the same thing from here as from any call site.
+    bool VisitFunctionDecl(FunctionDecl *FD) override {
+      for (const ParmVarDecl *PVD : FD->parameters()) {
+        if (!PVD->hasDefaultArg() || PVD->hasUnparsedDefaultArg() ||
+            PVD->hasUninstantiatedDefaultArg())
+          continue;
+        if (PVD->getDeclContext()->isDependentContext())
+          continue;
+        const Expr *Arg = PVD->getDefaultArg();
+        // `= nullptr`, `= 0` and the rest of the common cases store nothing and carry
+        // no borrow, so they need no CFG at all. Building one for every default
+        // argument in the translation unit would otherwise be the cost of this sweep.
+        if (!Arg || (!Arg->HasSideEffects(S.Context) &&
+                     !typeMayHoldBorrow(PVD->getType())))
+          continue;
+        analyze(PVD);
+      }
+      return true;
+    }
+
+    void analyze(const VarDecl *VD) {
       if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
-        return true;
+        return;
       if (!Seen.insert(VD->getCanonicalDecl()).second)
-        return true;
+        return;
       AnalysisDeclContext AC(nullptr, VD);
       AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
       AC.getCFGBuildOptions().AddLifetime = true;
@@ -4180,7 +4220,6 @@ static void LifetimeSafetyFileVarInitAnalysis(
       else
         SemaHelper.reportAnalysisBailout(
             VD, lifetimes::BailoutReason::CFGUnavailable);
-      return true;
     }
   };
   Walker(S, LSStats).TraverseDecl(TU);
