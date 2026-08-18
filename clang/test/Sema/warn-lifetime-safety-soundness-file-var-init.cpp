@@ -157,6 +157,54 @@ struct HasDefaultedMethod {
   void go(int x = (g_dflt_method.v = g_mut, 0));
 };
 
+// A function declared inside a STATEMENT is reached too. The sweep skipped statements as a
+// cost optimization -- justified for its other job, since a statement cannot contain a
+// file-scope variable -- and default-argument analysis, layered on afterwards, silently
+// inherited that. Every function nested in a statement was unreachable.
+
+Watch g_dflt_lambda; // expected-warning {{borrows from a mutable global or static object}}
+void in_a_lambda() {
+  // expected-warning@+1 {{cannot track global variable 'g_dflt_lambda' here}}
+  auto note = [](int x = (g_dflt_lambda.v = g_mut, 0)) { return x; };
+  sink = (char)note();
+}
+
+// A lambda's call operator is not reached as a declaration at all: the traversal visits its
+// body and parameters through the expression, never TraverseDecl on the operator. So this
+// needed its own hook even after statements were walked, while the local class below did
+// not.
+Watch g_dflt_generic; // expected-warning {{borrows from a mutable global or static object}}
+void in_a_generic_lambda() {
+  // expected-warning@+1 {{cannot track global variable 'g_dflt_generic' here}}
+  auto note = [](auto t, int x = (g_dflt_generic.v = g_mut, 0)) { return (int)t + x; };
+  sink = (char)note(1);
+}
+
+Watch g_dflt_local; // expected-warning {{borrows from a mutable global or static object}}
+Watch g_dflt_local_ctor; // expected-warning {{borrows from a mutable global or static object}}
+void in_a_local_class() {
+  struct Local {
+    // expected-warning@+1 {{cannot track global variable 'g_dflt_local_ctor' here}}
+    Local(int x = (g_dflt_local_ctor.v = g_mut, 0)) : n(x) {}
+    // expected-warning@+1 {{cannot track global variable 'g_dflt_local' here}}
+    int go(int x = (g_dflt_local.v = g_mut, 0)) { return n + x; }
+    int n;
+  };
+  Local l;
+  sink = (char)l.go();
+}
+
+// The function is at file scope; only the declaration carrying the default argument is in a
+// DeclStmt, which is enough to hide it.
+int block_scope_redecl(int);
+Watch g_dflt_redecl; // expected-warning {{borrows from a mutable global or static object}}
+void in_a_block_scope_redeclaration() {
+  // expected-warning@+1 {{cannot track global variable 'g_dflt_redecl' here}}
+  int block_scope_redecl(int x = (g_dflt_redecl.v = g_mut, 0));
+  sink = (char)block_scope_redecl();
+}
+int block_scope_redecl(int x) { return x; }
+
 // Negatives: a default argument that stores nothing and holds no borrow needs no CFG at
 // all, which is what keeps this sweep from costing a CFG per default argument in the
 // translation unit.

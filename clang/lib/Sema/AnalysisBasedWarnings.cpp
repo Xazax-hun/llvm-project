@@ -4156,12 +4156,6 @@ static void LifetimeSafetyFileVarInitAnalysis(
       ShouldVisitTemplateInstantiations = true;
     }
 
-    /// Statements cannot contain a file-scope variable -- a local class may not
-    /// have static data members, and a `static` local is analyzed with its
-    /// enclosing function. Skipping them keeps this sweep as cheap as the
-    /// declaration-only walk it replaces; it runs for every C++ TU.
-    bool TraverseStmt(Stmt *) override { return true; }
-
     bool VisitVarDecl(VarDecl *VD) override {
       if (!VD->isFileVarDecl() || !VD->hasInit() ||
           VD->getDeclContext()->isDependentContext())
@@ -4195,6 +4189,33 @@ static void LifetimeSafetyFileVarInitAnalysis(
     /// or another parameter, so only globals, static members and its own temporaries are
     /// in scope, and those mean the same thing from here as from any call site.
     bool VisitFunctionDecl(FunctionDecl *FD) override {
+      analyzeDefaultArguments(FD);
+      return true;
+    }
+
+    /// A lambda's call operator is not reached as a declaration: the traversal visits its
+    /// body and its parameters through the EXPRESSION and never calls TraverseDecl on the
+    /// operator itself. So a default argument on a lambda parameter stayed invisible even
+    /// once statements were walked, while the same default argument on a local class's
+    /// member function was found.
+    ///
+    /// A generic lambda needs its specializations too: its call operator is a function
+    /// template minted inside an expression, so the specializations the traversal
+    /// enumerates -- those of templates declared at file or class scope -- never include
+    /// it, and only the dependent pattern would be seen.
+    bool VisitLambdaExpr(LambdaExpr *LE) override {
+      if (CXXMethodDecl *Call = LE->getCallOperator())
+        analyzeDefaultArguments(Call);
+      const CXXRecordDecl *RD = LE->getLambdaClass();
+      if (!RD)
+        return true;
+      if (FunctionTemplateDecl *FTD = RD->getDependentLambdaCallOperator())
+        for (FunctionDecl *Spec : FTD->specializations())
+          analyzeDefaultArguments(Spec);
+      return true;
+    }
+
+    void analyzeDefaultArguments(const FunctionDecl *FD) {
       for (const ParmVarDecl *PVD : FD->parameters()) {
         if (!PVD->hasDefaultArg() || PVD->hasUnparsedDefaultArg() ||
             PVD->hasUninstantiatedDefaultArg())
@@ -4210,7 +4231,6 @@ static void LifetimeSafetyFileVarInitAnalysis(
           continue;
         analyze(PVD);
       }
-      return true;
     }
 
     void analyze(const VarDecl *VD) {
