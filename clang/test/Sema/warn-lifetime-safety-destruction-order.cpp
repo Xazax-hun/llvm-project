@@ -691,6 +691,140 @@ struct [[clang::destruction_order_safe]] MakesSafeEveryWay {
 };
 
 //===----------------------------------------------------------------------===//
+// An inherited constructor runs the base's constructor, which its initializer list
+// does not mention.
+//===----------------------------------------------------------------------===//
+
+// A `using Base::Base;` declaration exists precisely to run the base's constructor, and
+// that call is modelled separately from the initializer list. The list is otherwise
+// complete -- it holds the derived class's own member initializers, so `MemberPeeker`
+// below is found -- which made this look covered while the one thing the declaration is
+// for went unchecked.
+struct PeekerBase {
+  char c;
+  PeekerBase(int n) : c((char)(g_counter.n + n)) {}
+};
+struct InheritsPeeker : PeekerBase {
+  using PeekerBase::PeekerBase;
+};
+struct [[clang::destruction_order_safe]] MakesInherited {
+  ~MakesInherited() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'PeekerBase', which is not}}
+    InheritsPeeker d(1);
+    sink = d.c;
+  }
+};
+
+// A chain of using-declarations is followed to the constructor that has a body.
+struct InheritsOnce : PeekerBase {
+  using PeekerBase::PeekerBase;
+};
+struct InheritsTwice : InheritsOnce {
+  using InheritsOnce::InheritsOnce;
+};
+struct [[clang::destruction_order_safe]] MakesMultilevel {
+  ~MakesMultilevel() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'PeekerBase', which is not}}
+    InheritsTwice d(1);
+    sink = d.c;
+  }
+};
+
+// From a template base, where the shadow declaration names the instantiated constructor.
+template <class T> struct PeekerTemplateBase {
+  char c;
+  PeekerTemplateBase(T n) : c((char)(g_counter.n + (int)n)) {}
+};
+struct InheritsTemplate : PeekerTemplateBase<int> {
+  using PeekerTemplateBase<int>::PeekerTemplateBase;
+};
+struct [[clang::destruction_order_safe]] MakesFromTemplateBase {
+  ~MakesFromTemplateBase() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'PeekerTemplateBase', which is not}}
+    InheritsTemplate d(1);
+    sink = d.c;
+  }
+};
+
+// Invoked as an implicit CONVERSION: no construction is spelled in the verified body at
+// all, yet the same constructor runs.
+[[clang::destruction_order_safe]] static char takeInherited(InheritsPeeker d) {
+  return d.c;
+}
+struct [[clang::destruction_order_safe]] MakesByConversion {
+  ~MakesByConversion() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'PeekerBase', which is not}}
+    sink = takeInherited(1);
+  }
+};
+
+// Through a default member initializer, reached by the enclosing class's own descent.
+struct WrapsInherited {
+  InheritsPeeker d{1};
+};
+struct [[clang::destruction_order_safe]] MakesWrappedInherited {
+  ~MakesWrappedInherited() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'PeekerBase', which is not}}
+    WrapsInherited w;
+    sink = w.d.c;
+  }
+};
+
+// The list really does cover the derived class's own members: with a base constructor that
+// promises, this still reports the MEMBER's constructor, and did so before the base was
+// followed at all.
+struct PlainCtorBase {
+  int k;
+  [[clang::destruction_order_safe]] PlainCtorBase(int i) : k(i) {}
+};
+struct InheritsWithMember : PlainCtorBase {
+  Peeker p;
+  using PlainCtorBase::PlainCtorBase;
+};
+struct [[clang::destruction_order_safe]] MakesInheritedWithMember {
+  ~MakesInheritedWithMember() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    InheritsWithMember d(1);
+    sink = d.p.c;
+  }
+};
+
+// Negatives: a base constructor that promises, a base whose constructor is implicit, and
+// inheriting anything OTHER than a constructor.
+struct SafeCtorBase {
+  int k;
+  [[clang::destruction_order_safe]] SafeCtorBase(int i) : k(i) {}
+};
+struct InheritsSafe : SafeCtorBase {
+  using SafeCtorBase::SafeCtorBase;
+};
+struct ImplicitCtorBase {
+  int k = 0;
+};
+struct InheritsImplicit : ImplicitCtorBase {
+  using ImplicitCtorBase::ImplicitCtorBase;
+};
+struct MemberOpBase {
+  int k = 0;
+  void touch();
+  MemberOpBase &operator=(const MemberOpBase &);
+  void operator()();
+};
+struct InheritsOperators : MemberOpBase {
+  using MemberOpBase::touch;
+  using MemberOpBase::operator=;
+  using MemberOpBase::operator();
+};
+struct [[clang::destruction_order_safe]] MakesSafeInherited {
+  ~MakesSafeInherited() {
+    InheritsSafe a(1);      // no-warning
+    InheritsImplicit b;     // no-warning
+    InheritsOperators c;    // no-warning
+    sink = (char)(a.k + b.k + c.k);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // A library callee is trusted for where it was written, not for what it is
 // parameterized by.
 //===----------------------------------------------------------------------===//

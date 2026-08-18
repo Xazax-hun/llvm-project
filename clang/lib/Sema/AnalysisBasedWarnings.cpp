@@ -3707,6 +3707,19 @@ public:
     for (const CXXCtorInitializer *Init : Ctor->inits())
       if (Expr *E = Init->getInit())
         TraverseStmt(E);
+    // An INHERITING constructor (`using Base::Base;`) is the one case the list above
+    // is incomplete for. It holds the derived class's own member initializers -- so a
+    // hazardous MEMBER constructor is found -- but not the call to the base
+    // constructor, which Clang models separately. That call is the entire reason the
+    // using-declaration exists, so an arbitrary unverified base constructor ran at
+    // shutdown behind it while every neighbouring shape was refused: `D(int i) :
+    // Base(i) {}` reports, `struct D : Base {}` with `D d;` reports, and `using
+    // Base::operator=` was never affected.
+    //
+    // Recurses, so a chain of using-declarations (`C : B : A`, each re-`using`) is
+    // followed to the constructor that actually has a body.
+    if (InheritedConstructor Inherited = Ctor->getInheritedConstructor())
+      checkConstruction(Inherited.getConstructor(), Loc);
     DescentLoc = SavedAnchor;
   }
 
