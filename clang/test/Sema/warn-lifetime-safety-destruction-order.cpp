@@ -944,6 +944,129 @@ struct [[clang::destruction_order_safe]] CallsSafeCtorContainer {
 };
 
 //===----------------------------------------------------------------------===//
+// ...nor for what it is HANDED.
+//===----------------------------------------------------------------------===//
+
+// `std::for_each(first, last, f)` invokes `f`, and the iterators' `operator*`,
+// `operator++` and `operator!=`, all from inside the library. None of those calls appears
+// in the verified body, so a NAMED callable escaped entirely -- while a lambda written in
+// the same place was traversed and caught all along.
+//
+// Which member the library calls is not knowable here: an algorithm may copy, assign,
+// compare, dereference, invoke or destroy what it is given, and which of those it does is
+// a property of the library's implementation. So the whole type must be verified, and
+// annotating the class is what does that.
+struct NamedFunctor {
+  void operator()(int) const { sink = (char)g_counter.n; }
+};
+struct UserIterator {
+  int i;
+  int operator*() const { return i; }
+  void operator++() { ++i; }
+  bool operator!=(UserIterator o) const { return i != o.i; }
+};
+struct [[clang::destruction_order_safe]] HandsFunctorToLibrary {
+  ~HandsFunctorToLibrary() {
+    // The iterator is reported first, being the first argument; one report per call.
+    // expected-warning@+1 {{hands an object of type 'UserIterator' to 'for_each<UserIterator, NamedFunctor>'}}
+    std::for_each(UserIterator{0}, UserIterator{1}, NamedFunctor{});
+  }
+};
+
+// With library iterators, the functor itself is what gets named.
+struct [[clang::destruction_order_safe]] HandsFunctorWithLibIterators {
+  vector<int> v;
+  ~HandsFunctorWithLibIterators() {
+    // expected-warning@+2 {{hands an object of type 'NamedFunctor' to 'for_each<__gnu_cxx::basic_iterator<int>, NamedFunctor>'}}
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    std::for_each(v.begin(), v.end(), NamedFunctor{});
+  }
+};
+
+// A TEMPLATED member is reached too. RD->methods() does not enumerate a
+// FunctionTemplateDecl, so writing the hook as a template hid it from every check that
+// walked the method list.
+struct TemplatedFunctor {
+  template <class T> void operator()(T) const { sink = (char)g_counter.n; }
+};
+struct [[clang::destruction_order_safe]] HandsTemplatedFunctor {
+  vector<int> v;
+  ~HandsTemplatedFunctor() {
+    // expected-warning@+2 {{hands an object of type 'TemplatedFunctor' to 'for_each<__gnu_cxx::basic_iterator<int>, TemplatedFunctor>'}}
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    std::for_each(v.begin(), v.end(), TemplatedFunctor{});
+  }
+};
+
+// A CONVERSION operator on the element type is user code the library runs when it uses
+// the value, and it is not an `operator()` at all -- which is why enumerating the
+// operators a library might call is the wrong shape for this rule.
+struct ConvertsToInt {
+  int i;
+  operator int() const { return (int)g_counter.n; }
+};
+struct [[clang::destruction_order_safe]] HandsConvertible {
+  vector<ConvertsToInt> v;
+  ~HandsConvertible() {
+    // Reported on the ITERATOR, argument zero, because its element type is what is
+    // unsafe -- the rule is about the type handed in, not about a particular member.
+    // expected-warning@+2 {{hands an object of type 'iterator' (aka '__gnu_cxx::basic_iterator<ConvertsToInt>') to 'find<__gnu_cxx::basic_iterator<ConvertsToInt>, ConvertsToInt>'}}
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    (void)std::find(v.begin(), v.end(), ConvertsToInt{0});
+  }
+};
+
+// A lambda written in this body is exempt: its call operator is traversed as part of the
+// body, so what it reaches is reported there instead -- which is the report below, on the
+// lambda's own reference to a global rather than on its type.
+struct [[clang::destruction_order_safe]] HandsLambda {
+  vector<int> v;
+  ~HandsLambda() {
+    // expected-warning@+2 {{is 'destruction_order_safe' but references 'g_counter'}}
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    (void)std::any_of(v.begin(), v.end(), [](int) { return g_counter.n != 0; });
+    // A lambda that reaches nothing is entirely clean.
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    (void)std::any_of(v.begin(), v.end(), [](int x) { return x != 0; }); // no-warning
+  }
+};
+
+// Annotating the class is the escape hatch, and it covers every member.
+struct [[clang::destruction_order_safe]] SafeFunctor {
+  void operator()(int) const {}
+};
+struct [[clang::destruction_order_safe]] HandsSafeFunctor {
+  vector<int> v;
+  ~HandsSafeFunctor() {
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    std::for_each(v.begin(), v.end(), SafeFunctor{}); // no-warning
+    // Library types, and scalars, are not user code.
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    (void)std::find(v.begin(), v.end(), 3); // no-warning
+    // An argument of library type is not user code either.
+    vector<string> names;
+    // soundness-note@+3 {{assumed to be invalidated by this operation}}
+    // soundness-warning@+2 {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    // soundness-warning@+1 2 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
+    (void)std::find(names.begin(), names.end(), string()); // no-warning: for destruction order
+  }
+};
+
+// The class annotation promises about EVERY member, not only construction and
+// destruction -- otherwise the promise granted at the call above would be unchecked. So
+// each member is verified in its own right.
+struct [[clang::destruction_order_safe]] PromisesAllMembers {
+  ~PromisesAllMembers() {}
+  void touch() {
+    sink = (char)g_counter.n; // expected-warning {{'touch' is 'destruction_order_safe' but references 'g_counter'}}
+  }
+  // soundness-warning@+1 {{parameter that can hold a borrow is not annotated for lifetime safety}}
+  int compare(const PromisesAllMembers &) const {
+    return (int)g_counter.n; // expected-warning {{'compare' is 'destruction_order_safe' but references 'g_counter'}}
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Trust follows who WROTE the code, not the namespace it is spelled in.
 //
 // Specializing a standard template for a program-defined type is legal, conforming

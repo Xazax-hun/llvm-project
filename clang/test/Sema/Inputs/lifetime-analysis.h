@@ -38,6 +38,13 @@ template<typename T> struct remove_reference<T &&> { typedef T type; };
 template< class InputIt, class T >
 InputIt find( InputIt first, InputIt last, const T& value );
 
+// Algorithms that CALL what they are handed: the functor's operator(), and the
+// iterators' operator*, operator++ and operator!=, all run from inside the library.
+template< class InputIt, class UnaryFunc >
+UnaryFunc for_each( InputIt first, InputIt last, UnaryFunc f );
+template< class InputIt, class Pred >
+bool any_of( InputIt first, InputIt last, Pred p );
+
 template< class ForwardIt1, class ForwardIt2 >
 ForwardIt1 search( ForwardIt1 first, ForwardIt1 last,
                    ForwardIt2 s_first, ForwardIt2 s_last );

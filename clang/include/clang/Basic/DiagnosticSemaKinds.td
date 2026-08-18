@@ -2405,6 +2405,12 @@ def warn_lifetime_safety_destruction_order_unsafe_library_call : Warning<
   "safe; the library constructs objects of that type where this body cannot see it, "
   "so the promise has to reach them too">,
   InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
+def warn_lifetime_safety_destruction_order_unsafe_library_argument : Warning<
+  "%0 %select{is 'destruction_order_safe'|runs during static destruction}1 but hands an "
+  "object of type %2 to %3; %2 is not known to be safe against static destruction "
+  "order, and the library can run its code -- or its elements' -- where this body "
+  "cannot see it. Annotate %2 '[[clang::destruction_order_safe]]' to verify all of it">,
+  InGroup<LifetimeSafetyDestructionOrder>, DefaultIgnore;
 def warn_lifetime_safety_destruction_order_unsafe_subobject : Warning<
   "%0 is 'destruction_order_safe' but its %select{base class|member %2}1 has type "
   "%3, whose destructor is not known to be safe; that destructor runs at shutdown "

@@ -3138,6 +3138,23 @@ static bool hasUncheckedDeallocationFunction(const CXXRecordDecl *RD) {
   });
 }
 
+/// Enumerates \p RD's member functions, INCLUDING member templates.
+///
+/// RD->methods() does not list a FunctionTemplateDecl, so a templated member was
+/// invisible to every check that walked methods() -- a `template <class U> void
+/// operator()(U*)` deleter, or a `template <class U> void deallocate(U*, size_t)`
+/// allocator hook, escaped on the strength of being written as a template.
+static void forEachMemberFunction(
+    const CXXRecordDecl *RD,
+    llvm::function_ref<void(const CXXMethodDecl *)> Visit) {
+  for (const CXXMethodDecl *MD : RD->methods())
+    Visit(MD);
+  for (const Decl *D : RD->decls())
+    if (const auto *FTD = dyn_cast<FunctionTemplateDecl>(D))
+      if (const auto *MD = dyn_cast<CXXMethodDecl>(FTD->getTemplatedDecl()))
+        Visit(MD);
+}
+
 /// True if the standard library may invoke \p FD on a user-supplied template
 /// argument -- an allocator, a deleter, a comparator, a hash, or a character-traits
 /// class.
@@ -3211,14 +3228,14 @@ static bool hasUncheckedLibraryHook(QualType QT) {
   bool IsHook = DerivesStdHook;
   bool Unchecked = false;
   auto Scan = [&](const CXXRecordDecl *R) {
-    for (const CXXMethodDecl *MD : R->methods()) {
+    forEachMemberFunction(R, [&](const CXXMethodDecl *MD) {
       if (MD->isImplicit() || !isHookName(MD))
-        continue;
+        return;
       if (isDistinctiveHookName(MD))
         IsHook = true;
       if (!lifetimes::carriesDestructionOrderPromise(MD))
         Unchecked = true;
-    }
+    });
     return true;
   };
   Scan(RD);
@@ -3239,7 +3256,20 @@ static bool hasUncheckedLibraryHook(QualType QT) {
 /// has to follow the template arguments -- `std::vector<int>` is safe while
 /// `std::vector<Logger>` is not. And a type-erasing type destroys something its
 /// type does not name at all, which cannot be checked.
-static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0);
+/// Which of a type's operations can run at shutdown in the position being judged.
+enum class ShutdownOps {
+  /// Only destruction. A static-duration object's constructor ran at startup, which is
+  /// the static INITIALIZATION order problem -- a different hazard, and out of scope.
+  Destroy,
+  /// Anything the type can do. What the library does with an object it is HANDED --
+  /// copy it, assign it, compare it, dereference it, invoke it, destroy it -- is a
+  /// property of the library's implementation, not something a call site can enumerate.
+  /// So the whole type has to be verified, which is what annotating the class means.
+  Any,
+};
+
+static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0,
+                                       ShutdownOps Ops = ShutdownOps::Destroy);
 
 /// True if \p RD is `std::initializer_list`.
 static bool isStdInitializerListDecl(const CXXRecordDecl *RD) {
@@ -3291,7 +3321,8 @@ static bool holdsUnsafeInitializerList(QualType QT, unsigned Depth = 0) {
   return false;
 }
 
-static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
+static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
+                                       ShutdownOps Ops) {
   if (Depth > 8)
     return false; // give up rather than recurse without bound
   QT = QT.getNonReferenceType();
@@ -3310,10 +3341,10 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
   // holding one -- is trivially destructible.
   if (holdsUnsafeInitializerList(QT, Depth))
     return false;
-  if (QT.isDestructedType() == QualType::DK_none)
+  if (Ops == ShutdownOps::Destroy && QT.isDestructedType() == QualType::DK_none)
     return true; // nothing runs at shutdown
   if (!RD)
-    return true; // no destructor to run
+    return true; // not a class: it has no code of its own
   // An annotated type still has to be safe in its subobjects: the annotation is a
   // promise about the destructor BODY, while bases and members run their own
   // destructors as part of it. The record-level check below reports those
@@ -3335,8 +3366,17 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
         if (A.getKind() == TemplateArgument::Pack)
           return llvm::all_of(A.pack_elements(), ArgIsSafe);
         if (A.getKind() == TemplateArgument::Type)
-          return !hasUncheckedLibraryHook(A.getAsType()) &&
-                 isDestructionOrderSafeType(A.getAsType(), Depth + 1);
+          // The hook test is needed only for the DESTRUCTION question: an argument the
+          // library calls rather than destroys -- an allocator, deleter, comparator,
+          // hash -- is normally trivially destructible, so the recursion below accepts
+          // it while its hooks run unverified. Asking Any already requires every one of
+          // the type's members to be verified, which subsumes it. Neither can replace
+          // the other: applying Any to template arguments generally would refuse
+          // `std::vector<Thing>` for having an ordinary unannotated method, when all
+          // the library does to an element at shutdown is destroy it.
+          return (Ops == ShutdownOps::Any ||
+                  !hasUncheckedLibraryHook(A.getAsType())) &&
+                 isDestructionOrderSafeType(A.getAsType(), Depth + 1, Ops);
         return true;
       };
       if (!llvm::all_of(CTSD->getTemplateArgs().asArray(), ArgIsSafe))
@@ -3352,11 +3392,33 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth) {
         return false; // a user-written destructor must promise explicitly
   if (!RD->hasDefinition())
     return false;
+  // Asked of a type the library is HANDED, the question is not which member it will run
+  // but whether all of the type's code is verified. Two ways that holds: the class
+  // carries the promise, which grants it to every member (and submits every member to
+  // the verifier), or the class declares no code at all -- which is the common case and
+  // is why this cannot simply require the attribute: a code-free aggregate like
+  // `struct Pod { int a, b; };` has nothing to verify and must stay usable.
+  //
+  // This scan is deliberately LOCAL: it asks only what this class itself declares. Bases
+  // and members are reached by the recursion below, in the same mode, so a functor whose
+  // unverified `operator()` sits in a base -- at any depth -- is still refused, and no
+  // inheritance chain is walked here.
+  if (Ops == ShutdownOps::Any) {
+    bool Unchecked = false;
+    forEachMemberFunction(RD, [&](const CXXMethodDecl *MD) {
+      if (MD->isImplicit() || MD->isDefaulted())
+        return;
+      if (!lifetimes::carriesDestructionOrderPromise(MD))
+        Unchecked = true;
+    });
+    if (Unchecked)
+      return false;
+  }
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (!isDestructionOrderSafeType(B.getType(), Depth + 1))
+    if (!isDestructionOrderSafeType(B.getType(), Depth + 1, Ops))
       return false;
   for (const FieldDecl *FD : RD->fields())
-    if (!isDestructionOrderSafeType(FD->getType(), Depth + 1))
+    if (!isDestructionOrderSafeType(FD->getType(), Depth + 1, Ops))
       return false;
   return true;
 }
@@ -3608,6 +3670,34 @@ public:
               << Subject << SubjectKind << Callee << MCE->getObjectType();
         return true;
       }
+    // The same trust, applied to what the call is HANDED rather than to its receiver.
+    // `std::for_each(first, last, Doit{})` invokes `Doit::operator()` -- and the
+    // iterators' `operator*`, `operator++` and `operator!=` -- from inside the library,
+    // so a named callable escaped entirely while a lambda written in the same place was
+    // traversed and caught. Asked of every argument, since which one the library calls
+    // is not knowable from here.
+    if (!Callee->isConsteval() &&
+        S.SourceMgr.isInSystemHeader(Callee->getLocation())) {
+      for (const Expr *Arg : CE->arguments()) {
+        QualType ArgTy = Arg->IgnoreImplicit()->getType();
+        // A lambda written inside this body needs no promise: its call operator is
+        // traversed as part of the body, so whatever it reaches is already reported.
+        // That is why a lambda predicate was caught all along and a named functor was
+        // not.
+        const CXXRecordDecl *ArgRD =
+            ArgTy.getNonReferenceType()->getAsCXXRecordDecl();
+        if (ArgRD && ArgRD->isLambda() && ArgRD->getDeclContext() == Subject)
+          continue;
+        if (isDestructionOrderSafeType(ArgTy, /*Depth=*/0, ShutdownOps::Any))
+          continue;
+        if (firstReportAt(Arg->getExprLoc()))
+          S.Diag(Arg->getExprLoc(),
+                 diag::
+                     warn_lifetime_safety_destruction_order_unsafe_library_argument)
+              << Subject << SubjectKind << ArgTy << Callee;
+        return true;
+      }
+    }
     if (isDestructionOrderSafeFunction(Callee))
       return true;
     // A lambda's call operator declared inside the function being verified is

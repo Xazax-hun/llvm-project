@@ -112,13 +112,15 @@ bool carriesDestructionOrderPromise(const FunctionDecl *FD) {
     return false;
   if (FD->hasAttr<DestructionOrderSafeAttr>())
     return true;
-  // On a class, the attribute is a promise about that class's construction and
-  // destruction: creating an object inside shutdown code runs its constructor
-  // there, so a promise that covered only the destructor could be satisfied by a
-  // type whose constructor reaches an already-destroyed object.
+  // On a class, the attribute is a promise about EVERY member function, not only
+  // construction and destruction. What the library does with an object it is handed --
+  // copy it, assign it, compare it, dereference it, invoke it -- is a property of the
+  // library's implementation, not something a call site can enumerate. So a type is
+  // usable from shutdown code when all of its own code is verified, and that is what
+  // annotating the class means; the verifier below reaches each member in turn because
+  // this returns true for it.
   if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
-    if (isa<CXXDestructorDecl>(MD) || isa<CXXConstructorDecl>(MD))
-      return MD->getParent()->hasAttr<DestructionOrderSafeAttr>();
+    return MD->getParent()->hasAttr<DestructionOrderSafeAttr>();
   return false;
 }
 
