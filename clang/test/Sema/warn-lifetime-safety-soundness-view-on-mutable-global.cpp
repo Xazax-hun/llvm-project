@@ -236,22 +236,31 @@ int *ptr_into_int_array() {
 }
 
 //===----------------------------------------------------------------------===//
-// The permitted interaction: a method call on the global.
+// The permitted interaction: a CONST method call on the global.
 //===----------------------------------------------------------------------===//
 
 struct Owning {
   std::string s;
   void mutate() { s.push_back('x'); }       // non-const
   std::string_view view() const [[clang::lifetimebound]] { return s; }
+  bool empty() const { return s.c_str()[0] == '\0'; }
 };
 Owning g_own;
 
-// A method call on the global is the one allowed way to interact with it: the
-// receiver is a transient access, not a borrow the caller keeps. The receiver is
-// not flagged -- neither for a mutating method nor for a borrow-returning one.
-void method_call_on_global() {
-  g_own.mutate();    // no-warning (receiver is not a borrow)
-  g_own.s.clear();   // no-warning (owner member method call)
+// A CONST method call on the global is the one allowed way to interact with it:
+// the receiver is a transient read, not a borrow the caller keeps, and the
+// method cannot reallocate.
+void const_method_call_on_global() {
+  (void)g_own.empty(); // no-warning
+}
+
+// A NON-CONST method call is a mutable borrow of the global. The callee may
+// reallocate the owner, and -- when the global owns objects that call back into
+// it -- may destroy the very object whose method is running. `this` is a
+// caller-scope placeholder that never expires, so no other check covers that.
+void nonconst_method_call_on_global() {
+  g_own.mutate();    // expected-warning {{borrows from a mutable global or static object}}
+  g_own.s.clear();   // no-warning (mutation scoped to the owner member)
 }
 
 // But a borrow the method *returns* is still flagged at its own use/escape.

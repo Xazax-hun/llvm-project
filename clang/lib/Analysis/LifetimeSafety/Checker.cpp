@@ -425,6 +425,12 @@ public:
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
           checkConstSubversion(IOF);
           checkNonInvalidatingPromise(IOF);
+          // Independent of confidence: what makes a mutation of a mutable
+          // global reportable is the storage it denotes, not how certain the
+          // analysis is that it mutates. A non-const method on a user record
+          // yields an *assumed* invalidation, which is exactly the
+          // `g_scene.killAll()` form.
+          checkMutableGlobalMutation(IOF);
           if (IOF->isAssumed())
             checkAssumedInvalidation(IOF);
           else {
@@ -769,6 +775,74 @@ public:
     const CXXRecordDecl *PointeeRD = QT->getPointeeType()->getAsCXXRecordDecl();
     return !ObjRD || !PointeeRD ||
            PointeeRD->getCanonicalDecl() != ObjRD->getCanonicalDecl();
+  }
+
+  /// Soundness: a mutation of a mutable-owner global, where the mutated storage
+  /// is the global itself. Binding such a global to a non-const implicit object
+  /// (`g_scene.killAll()`) is a mutable borrow of it, with all the reach the
+  /// callee's body has: the method may reallocate the owner, and it may destroy
+  /// objects the owner holds -- including the very object whose method is
+  /// running, when a global scene owns the nodes that call back into it
+  /// (`void Node::update() { g_scene.killAll(); use(label); }`). Nothing else
+  /// covers that: `this` is a caller-scope placeholder the intra-procedural
+  /// analysis never expires, and no edge ties the global to it.
+  ///
+  /// The one permitted interaction with a mutable global stays permitted: a
+  /// CONST method cannot reallocate, and produces no invalidation to reach
+  /// here.
+  ///
+  /// Loan-based rather than AST-matched: the invalidated origin's own loans say
+  /// which storage the mutation denotes, so every spelling that reaches the
+  /// global -- `g.m()`, `g.sub.m()`, `g_arr[i].m()`, a reference or pointer
+  /// bound to it, a selecting receiver -- is covered by the same test, and a
+  /// receiver that merely *borrows from* a global (a local view) is not,
+  /// because its loan roots at the local.
+  void checkMutableGlobalMutation(const InvalidateOriginFact *IOF) {
+    if (!SemaHelper)
+      return;
+    // A field-scoped mutation (`g.buf.append(...)`) mutates only that field,
+    // not what the global owns; the existing rules cover a borrow of the field.
+    if (IOF->getMutatedField())
+      return;
+    // Only the implicit-object argument of a member call. Passing a global to a
+    // non-const reference/pointer parameter also invalidates, but that argument
+    // IS a borrow the callee keeps, so the loan-based use path already reports
+    // it -- at the argument, where this would report a second time.
+    const auto *MCE =
+        dyn_cast_or_null<CXXMemberCallExpr>(IOF->getInvalidationExpr());
+    if (!MCE)
+      return;
+    // Anchor at the receiver: the borrow being taken.
+    const Expr *Recv = MCE->getImplicitObjectArgument();
+    if (!Recv)
+      return;
+    // Exactly the receivers the use path exempts, and no others. A receiver
+    // that COMPUTES a borrow (`(c ? g1 : g2).m()`) is already reported there,
+    // at the computed expression; reporting again here would double-fire one
+    // column over. What is left is the direct-designation form -- the one the
+    // `global.method()` exemption was written for, and the one that reaches a
+    // non-const method with no other check covering it.
+    if (!isMutableGlobalMethodReceiver(Recv))
+      return;
+    SourceLocation Loc = Recv->IgnoreParenCasts()->getExprLoc();
+    if (Loc.isInvalid())
+      return;
+    for (LoanID L :
+         LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
+      // The mutation must denote the global OBJECT, not a subobject of it: a
+      // borrow of `g.buf` is a mutation of that member, already modeled.
+      if (!AP.getElements().empty())
+        continue;
+      const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
+      if (!isMutableOwnerGlobal(VD))
+        continue;
+      if (!ReportedMutableGlobalLocs.insert(Loc).second)
+        return;
+      SemaHelper->reportViewOnMutableGlobal(Loc, VD->getType(),
+                                            Recv->getSourceRange());
+      return;
+    }
   }
 
   void checkInvalidation(const InvalidateOriginFact *IOF) {
@@ -1586,10 +1660,18 @@ public:
   /// `global.method()` form (`g.mutate()`, `g.owner.append()`, `g_arr[i].m()`).
   /// The receiver must be a direct designation (variable / member / subscript /
   /// deref chain, no selecting or borrow-producing node) ROOTED at a mutable
-  /// global owner. A receiver that is a separate borrow of the global -- a local
-  /// view `sv` bound to `g`, where `sv.front()` reads the dangling buffer -- is
-  /// NOT exempt: its root is a local, not the global owner. Likewise a selecting
-  /// receiver (`(c ? g1 : g2).method()`) computes a borrow and is not exempt.
+  /// global owner. A receiver that is a separate borrow of the global -- a
+  /// local view `sv` bound to `g`, where `sv.front()` reads the dangling buffer
+  /// -- is NOT exempt: its root is a local, not the global owner. Likewise a
+  /// selecting receiver (`(c ? g1 : g2).method()`) computes a borrow and is not
+  /// exempt.
+  ///
+  /// A NON-CONST method is likewise not exempt, but that case never reaches
+  /// here: binding a mutable global owner to a non-const implicit object is a
+  /// mutable borrow of it, reported from the fact generator where the receiver
+  /// and its callee are both in hand (a plain non-const method on a user record
+  /// produces no UseFact for its receiver, so this loan-based path never runs
+  /// for it).
   bool isMutableGlobalMethodReceiver(const Expr *Use) {
     // Climb past value-preserving wrappers (implicit casts / parens /
     // materialized temporaries) that the front end inserts between the receiver
