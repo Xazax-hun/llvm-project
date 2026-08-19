@@ -1925,7 +1925,18 @@ public:
         // "Same instance" means the stored borrow points at the container or
         // into it: a borrow of `this->inner` is `$this.inner`, contained in
         // the container's `$this` rather than equal to it.
-        if (CAP.isPrefixOf(L->getAccessPath()))
+        //
+        // Or the two are SIBLING subobjects of one object. When the view being
+        // written is nested (`hdr.name = body`, with `hdr` a view member), the
+        // destination container is `$this.hdr` while the borrow is
+        // `$this.body`: neither is a prefix of the other, though both live in
+        // the same object and the store is just as self-referential as the
+        // direct `name = body` spelling, which was reported. divergesFrom is
+        // same-root-and-disjoint, which is precisely that relation -- and it is
+        // false across two different objects, so an unrelated `other.hdr.name =
+        // body` does not match.
+        if (CAP.isPrefixOf(L->getAccessPath()) ||
+            CAP.divergesFrom(L->getAccessPath()))
           SharesObject = true;
         if (isFieldBorrowOf(L, RD) || borrowsUnnamedMember(L))
           BorrowsMember = true; // borrows a member of it, named or not
