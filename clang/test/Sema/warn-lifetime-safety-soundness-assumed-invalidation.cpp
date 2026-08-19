@@ -339,3 +339,61 @@ void nonowner_array_silent() {
   mutate_ints(ints); // no-warning
   (void)r;
 }
+
+// A guard's destructor can mutate the owner it captured, and the analysis cannot see that
+// out-of-line body -- so destroying the guard is an assumed invalidation of the borrows it
+// carries on that owner. That was modelled only where a NAMED local's scope ends. A
+// temporary is destroyed by its full-expression cleanup instead, so forgetting to name the
+// guard silenced the check, though the two forms differ only in the name.
+struct [[gsl::Pointer]] Grower {
+  vector<int> *vec;
+  int tag = 0;
+  ~Grower();
+};
+
+void unnamed_temporary_guard() {
+  vector<int> v;
+  v.push_back(42);
+  // The report anchors at the borrow's CREATION, with the invalidating operation as a note.
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  (void)Grower{&v}.tag; // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// The byte-identical named local, which was always reported.
+void named_guard() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  { Grower g{&v}; } // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// A borrow used only DURING the guard's lifetime is not invalidated by it: the destructor
+// has not run yet.
+void used_before_the_guard_dies() {
+  vector<int> v;
+  v.push_back(42);
+  {
+    Grower g{&v};
+    int &r = v[0];
+    (void)r; // no-warning
+  }
+}
+
+// A guard that aliases only a const owner cannot mutate it.
+struct [[gsl::Pointer]] ConstGuard {
+  const vector<int> *vec;
+  int tag = 0;
+  ~ConstGuard();
+};
+
+void const_guard_temporary_silent() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  (void)ConstGuard{&v}.tag; // no-warning
+  (void)r;
+}

@@ -2106,14 +2106,60 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
   const FieldDecl *FD = MemberDtor.getFieldDecl();
   if (!FD)
     return;
-  QualType FDTy = FD->getType();
-  const CXXRecordDecl *RD = FDTy->getAsCXXRecordDecl();
-  if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
-      isGslOwnerType(FDTy) || !hasOrigins(FDTy))
-    return;
+  // A member is destroyed by its enclosing object's destructor, and its own destructor can
+  // read or mutate what it captured just as a local's can, so this is the same model. The
+  // member case is reached only while analyzing the enclosing destructor, which is why a
+  // guard held as a member of an object with no user-written destructor is still missed --
+  // see the sibling-subobject case, which needs member origins seeded there.
+  //
+  // A member's destruction has no expression of its own -- CFGMemberDtor carries only the
+  // field -- so the enclosing destructor's body is what a report can point at.
   if (OriginNode *Node = getOriginNode(*FD))
-    CurrentBlockFacts.push_back(
-        FactMgr.createFact<UseFact>(AC.getDecl()->getEndLoc(), Node));
+    handleDestructionOfBorrowHolder(FD->getType(), Node, AC.getBody(),
+                                    AC.getDecl()->getEndLoc());
+}
+
+/// Models the destruction of an object that may hold a borrow.
+///
+/// Shared by every way an object can be destroyed, because the hazard does not depend on
+/// how: a scope ending, a temporary's full-expression cleanup, or an enclosing object's
+/// destructor running for a member. Modelling it only for a named local meant an unnamed
+/// guard -- `(void)Grower{&v}.vec;` -- and a guard held as a MEMBER of another object were
+/// both silent, while the byte-identical named local was reported.
+///
+/// A non-trivial destructor may READ a borrow the object holds (a [[gsl::Pointer]] whose
+/// `~T()` dereferences its captured view), and the analysis is intra-procedural and cannot
+/// see that body -- so model the destruction as a use, keeping the borrow live to this
+/// point. Owners are excluded: destroying one frees its own storage, which the expiry
+/// already models, rather than dereferencing a borrow into another object.
+///
+/// It may also MUTATE the owner it captured -- `~Trigger() { o->grow(); }` reallocates --
+/// which the analysis equally cannot see. Treat that as an assumed invalidation of the
+/// borrows the object carries on its captured owner, so a view into that owner living past
+/// the guard is reported while one used only during the guard's lifetime is not. Gated on
+/// paramMayMutateOwner, the same test used for call arguments, so a guard aliasing only a
+/// const owner is not flagged. A gsl::Pointer is a leaf in the origin tree, so the captured
+/// borrow sits on the object's own origin; invalidate that and its whole pointee chain (the
+/// latter for a nested wrapper reaching the owner through a by-value gsl::Pointer member).
+void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
+                                                     OriginNode *Node,
+                                                     const Stmt *Trigger,
+                                                     SourceLocation Loc) {
+  const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
+      isGslOwnerType(Ty) || !hasOrigins(Ty))
+    return;
+  CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Loc, Node));
+  if (!paramMayMutateOwner(Ty))
+    return;
+  auto invalidate = [&](OriginID OID) {
+    CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
+        OID, Trigger, /*Assumed=*/true));
+  };
+  invalidate(Node->getOriginID());
+  for (OriginNode *Pointee = Node->getPointeeChild(); Pointee;
+       Pointee = Pointee->getPointeeChild())
+    invalidate(Pointee->getOriginID());
 }
 
 /// Collects the temporaries whose lifetime is extended to \p VD's scope.
@@ -2154,40 +2200,9 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   // modeled by the ExpireFact) rather than dereferencing a borrow into another
   // object. A trivial destructor cannot read the borrow.
   QualType VDTy = LifetimeEndsVD->getType();
-  if (const CXXRecordDecl *RD = VDTy->getAsCXXRecordDecl();
-      RD && RD->hasDefinition() && RD->hasNonTrivialDestructor() &&
-      !isGslOwnerType(VDTy) && hasOrigins(VDTy))
-    if (OriginNode *Node = getOriginNode(*LifetimeEndsVD)) {
-      CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
-          LifetimeEnds.getTriggerStmt()->getEndLoc(), Node));
-      // Soundness: a gsl::Pointer object that captured a mutable owner (e.g. an
-      // RAII guard `Trigger(MyOwner * [[clang::lifetime_capture_by(this)]])`
-      // whose `~Trigger() { o->grow(); }` reallocates it) may mutate/free that
-      // owner in its out-of-line destructor, which the intra-procedural analysis
-      // cannot see. Conservatively treat the destruction as an assumed
-      // invalidation of the borrows the object carries on its captured owner
-      // (its pointee chain), so a view into that owner that is live *past* the
-      // guard's scope is reported -- while a view used only during the guard's
-      // lifetime (before the destructor runs) is not. Gated on paramMayMutateOwner
-      // (the same "gsl::Pointer reaching a mutable owner" test used for call
-      // arguments), so a guard that aliases only a const owner is not flagged.
-      // The invalidating "operation" here is the destructor's trigger
-      // statement, not an expression -- hence InvalidateOriginFact carries a
-      // Stmt. A gsl::Pointer is a leaf in the origin tree, so the captured
-      // borrow sits on the object's OWN origin; invalidate it and its whole
-      // pointee chain (the latter for a nested wrapper reaching the owner
-      // through a by-value gsl::Pointer member).
-      if (paramMayMutateOwner(VDTy)) {
-        auto invalidate = [&](OriginID OID) {
-          CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-              OID, LifetimeEnds.getTriggerStmt(), /*Assumed=*/true));
-        };
-        invalidate(Node->getOriginID());
-        for (OriginNode *Pointee = Node->getPointeeChild(); Pointee;
-             Pointee = Pointee->getPointeeChild())
-          invalidate(Pointee->getOriginID());
-      }
-    }
+  if (OriginNode *Node = getOriginNode(*LifetimeEndsVD))
+    handleDestructionOfBorrowHolder(VDTy, Node, LifetimeEnds.getTriggerStmt(),
+                                    LifetimeEnds.getTriggerStmt()->getEndLoc());
   // Expire the origin when its variable's lifetime ends to ensure liveness
   // doesn't persist through loop back-edges.
   std::optional<OriginID> ExpiredOID;
@@ -2232,9 +2247,16 @@ void FactsGenerator::handleCleanupFunction(
 
 void FactsGenerator::handleFullExprCleanup(
     const CFGFullExprCleanup &FullExprCleanup) {
-  for (const auto *MTE : FullExprCleanup.getExpiringMTEs())
+  for (const auto *MTE : FullExprCleanup.getExpiringMTEs()) {
+    // A temporary's destructor runs here and can read or mutate what the object captured,
+    // exactly as a named local's can at scope exit. Emitting only the expiry left an
+    // unnamed RAII guard -- `(void)Grower{&v}.vec;` -- silent, while naming it reported.
+    if (OriginNode *Node = getOriginNode(*MTE))
+      handleDestructionOfBorrowHolder(MTE->getSubExpr()->getType(), Node, MTE,
+                                      FullExprCleanup.getCleanupLoc());
     CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
         AccessPath(MTE), FullExprCleanup.getCleanupLoc()));
+  }
 }
 
 void FactsGenerator::handleExitBlock() {

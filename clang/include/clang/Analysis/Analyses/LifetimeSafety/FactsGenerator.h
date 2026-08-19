@@ -137,6 +137,8 @@ private:
   void handleCXXCtorInitializer(const CXXCtorInitializer *CII);
 
   void handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds);
+  void handleDestructionOfBorrowHolder(QualType Ty, OriginNode *Node,
+                                       const Stmt *Trigger, SourceLocation Loc);
   /// Models a member's destructor, which runs after the enclosing destructor's
   /// body, as a use of that member.
   void handleMemberDtor(const CFGMemberDtor &MemberDtor);
