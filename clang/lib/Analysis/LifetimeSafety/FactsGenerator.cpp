@@ -1774,9 +1774,38 @@ void FactsGenerator::maybeReportUntrackedAggregateTemporary(
       continue;
     }
     // A DeclStmt parent means this aggregate is a declaration's initializer
-    // (`Box b{...};`), already reported at the VarDecl.
-    if (isa<DeclStmt>(P))
-      return;
+    // (`Box b{...};`) -- but only skip when the declaration really is reported.
+    // VisitDeclStmt asks the question of the DECLARED type, so a plain
+    // borrow-holding sub-aggregate nested inside a
+    // [[gsl::Pointer]]/[[gsl::Owner]] declaration (`View v{Raw{&owner}};`) is
+    // reported by neither: the outer type is annotated, and this skip assumed
+    // the declaration covered the inner one. The identical sub-aggregate in an
+    // escaping temporary (`return View{Raw{p}};`) was reported, so the two
+    // spellings disagreed.
+    if (const auto *DS = dyn_cast<DeclStmt>(P)) {
+      bool DeclIsReported = false;
+      auto &Cache = FactMgr.getUnknownOwnershipCache();
+      for (const Decl *D : DS->decls())
+        if (const auto *VD = dyn_cast<VarDecl>(D)) {
+          QualType VDType = VD->getType();
+          while (const ArrayType *AT = VDType->getAsArrayTypeUnsafe())
+            VDType = AT->getElementType();
+          // The same four questions VisitDeclStmt asks, in the same order; any
+          // of them reporting means the declaration covers this aggregate.
+          bool IsPointer = false;
+          if (isUnknownOwnershipType(VDType, Cache) ||
+              isGslOwnerOfIndirection(VDType, Cache) ||
+              isGslPointerOfIndirection(VDType, Cache) ||
+              !findNestedOwnerOrPointerOfIndirection(VDType, Cache, IsPointer)
+                   .isNull()) {
+            DeclIsReported = true;
+            break;
+          }
+        }
+      if (DeclIsReported)
+        return;
+      break;
+    }
     break;
   }
   // Mirror the 4-way classification used for local declarations (VisitDeclStmt)

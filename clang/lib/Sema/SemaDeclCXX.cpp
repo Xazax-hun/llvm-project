@@ -7213,6 +7213,18 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
     bool CheckCapture = !getDiagnostics().isIgnored(
         diag::warn_lifetime_safety_owner_captures_borrow, Record->getLocation());
     // Flag each public data member that can hold a borrow.
+    //
+    // The member's own type is not the whole question: a plain aggregate member
+    // that itself holds a borrow (`struct Raw { std::vector<int> *v; };` as a
+    // member of the owner) puts a borrow just as reachable one record deeper,
+    // and the owner is still opaque to the analysis. Such a member type is
+    // exactly what isUnknownOwnershipType recognizes -- a complete, unannotated
+    // record that transitively holds a borrow -- but annotating the ENCLOSING
+    // type [[gsl::Owner]] suppresses the unknown-ownership report that would
+    // otherwise fire where the member type is used, so nothing else covers it.
+    // Without this, wrapping the offending member in one plain struct silences
+    // the check that the direct member form reports.
+    llvm::DenseMap<const Type *, bool> BorrowFieldCache;
     auto CheckPublicBorrowFields = [&](const CXXRecordDecl *RD) {
       for (const FieldDecl *F : RD->fields()) {
         if (F->getAccess() != AS_public)
@@ -7221,7 +7233,8 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
         while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
           FT = AT->getElementType();
         if ((FT->isPointerType() && !FT->isFunctionPointerType()) ||
-            FT->isReferenceType() || lifetimes::isGslPointerType(FT))
+            FT->isReferenceType() || lifetimes::isGslPointerType(FT) ||
+            lifetimes::isUnknownOwnershipType(FT, BorrowFieldCache))
           Diag(F->getLocation(),
                diag::warn_lifetime_safety_owner_public_pointer)
               << F << F->getSourceRange();
