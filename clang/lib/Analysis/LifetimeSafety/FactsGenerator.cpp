@@ -598,8 +598,8 @@ void FactsGenerator::VisitDeclRefExpr(const DeclRefExpr *DRE) {
   }
 }
 
-void FactsGenerator::handleGlobalContainerOfIndirectionUse(
-    const DeclRefExpr *DRE, const VarDecl *VD) {
+void FactsGenerator::handleGlobalContainerOfIndirectionUse(const Expr *UseExpr,
+                                                           const VarDecl *VD) {
   // Report each offending global at most once per function.
   if (!FlaggedIndirectionGlobals.insert(VD).second)
     return;
@@ -629,8 +629,8 @@ void FactsGenerator::handleGlobalContainerOfIndirectionUse(
     ReportType = Nested;
   } else
     return; // Not a container of indirection; nothing to flag.
-  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-      Reason, cast<Expr>(DRE), ReportType));
+  CurrentBlockFacts.push_back(
+      FactMgr.createFact<UntrackedConstructFact>(Reason, UseExpr, ReportType));
 }
 
 void FactsGenerator::VisitCXXConstructExpr(const CXXConstructExpr *CCE) {
@@ -766,6 +766,28 @@ void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {
 }
 
 void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
+  // A STATIC data member accessed through an object (`r.slot`) is a use of the
+  // variable itself -- the base is evaluated and discarded. getOrCreateNode
+  // shares the variable's origins for this spelling, so all that is left is to
+  // do what VisitDeclRefExpr does for the qualified spelling: issue the loan on
+  // the variable's storage, and register the use. Without the loan a store of a
+  // local's address into the member escapes unreported, because the
+  // global-escape fact at exit needs a loan to carry.
+  if (auto *SVD = dyn_cast<VarDecl>(ME->getMemberDecl());
+      SVD && SVD->hasGlobalStorage()) {
+    handleUse(ME);
+    handleGlobalContainerOfIndirectionUse(ME, SVD);
+    if (doesDeclHaveStorage(SVD)) {
+      AccessPath Path(SVD);
+      const Loan *L = FactMgr.getLoanMgr().createLoan(Path, ME);
+      OriginNode *Node = getOriginNode(*ME);
+      assert(Node && "gl-value member of non-pointer type should have origins");
+      CurrentBlockFacts.push_back(
+          FactMgr.createFact<IssueFact>(L->getID(), Node->getOriginID()));
+    }
+    return;
+  }
+
   auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
   if (!FD)
     return;
@@ -3443,15 +3465,25 @@ void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
     return;
   // For DeclRefExpr: Remove the outer layer of origin which borrows from the
   // decl directly (e.g., when this is not a reference). This is a use of the
-  // underlying decl.
+  // underlying decl. A static data member reached as `obj.member` denotes that
+  // same variable (getOrCreateNode shares its origins), so it peels alike --
+  // otherwise reading a scalar one (`r.plain`) would register a use of its
+  // storage origin, which holds no loan, and report a spurious lost loan where
+  // the qualified spelling `R::plain` is correctly silent.
   //
   // Not when the value is bound to a reference parameter: there the outer origin
   // -- the borrow of the object itself -- is exactly what the callee receives, and
   // for an owner lvalue there is no r-value origin to peel to at all, so peeling
   // would drop the use entirely.
-  if (auto *DRE = dyn_cast<DeclRefExpr>(E);
-      DRE && !BoundToReference && !DRE->getDecl()->getType()->isReferenceType())
-    Node = getRValueOrigins(DRE, Node);
+  const ValueDecl *UsedDecl = nullptr;
+  if (auto *DRE = dyn_cast<DeclRefExpr>(E))
+    UsedDecl = DRE->getDecl();
+  else if (auto *ME = dyn_cast<MemberExpr>(E))
+    if (auto *Var = dyn_cast<VarDecl>(ME->getMemberDecl());
+        Var && Var->hasGlobalStorage())
+      UsedDecl = Var;
+  if (UsedDecl && !BoundToReference && !UsedDecl->getType()->isReferenceType())
+    Node = getRValueOrigins(E, Node);
   // Skip if there is no inner origin (e.g., when it is not a pointer type).
   if (!Node)
     return;

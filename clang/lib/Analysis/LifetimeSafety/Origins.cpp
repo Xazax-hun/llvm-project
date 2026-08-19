@@ -404,10 +404,21 @@ OriginNode *OriginManager::getOrCreateNode(const Expr *E) {
   const ValueDecl *ReferencedDecl = nullptr;
   if (auto *DRE = dyn_cast<DeclRefExpr>(E))
     ReferencedDecl = DRE->getDecl();
-  else if (auto *ME = dyn_cast<MemberExpr>(E))
+  else if (auto *ME = dyn_cast<MemberExpr>(E)) {
     if (auto *Field = dyn_cast<FieldDecl>(ME->getMemberDecl());
         Field && isThisExpr(ME->getBase()))
       ReferencedDecl = Field;
+    // A STATIC data member is a variable, not a subobject: `r.slot` and
+    // `R::slot` denote the very same object, and the base is evaluated and
+    // discarded. Only the qualified spelling is a DeclRefExpr, so without this
+    // the member spelling builds a fresh node disconnected from the variable --
+    // a store through it lands on a throwaway expression origin, and the
+    // global-escape fact keyed on the VarDecl is never emitted. Share the
+    // variable's origins so both spellings behave alike.
+    else if (auto *Var = dyn_cast<VarDecl>(ME->getMemberDecl());
+             Var && Var->hasGlobalStorage())
+      ReferencedDecl = Var;
+  }
   if (ReferencedDecl) {
     OriginNode *Head = nullptr;
     // For non-reference declarations (e.g., `int* p`), the expression is an

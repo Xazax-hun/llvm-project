@@ -863,6 +863,13 @@ private:
 
     if (const auto *DRE = dyn_cast<DeclRefExpr>(E))
       return getDiagSubjectDescription(DRE->getDecl());
+    // A static data member reached through an object (`r.slot`) names the same
+    // variable as the qualified spelling (`R::slot`); describe it the same way
+    // rather than falling back to the generic wording.
+    if (const auto *ME = dyn_cast<MemberExpr>(E))
+      if (const auto *Var = dyn_cast<VarDecl>(ME->getMemberDecl());
+          Var && Var->hasGlobalStorage())
+        return getDiagSubjectDescription(Var);
     // TODO: Handle other expression types.
     return "";
   }

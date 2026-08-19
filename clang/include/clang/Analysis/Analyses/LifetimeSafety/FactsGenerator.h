@@ -275,8 +275,10 @@ private:
   /// a type buried in a non-owner aggregate. The model bans these just like the
   /// local case (VisitDeclStmt); a global's declaration may live outside the
   /// analyzed region (e.g. a header), so the diagnostic is anchored at the use
-  /// site. Reported at most once per global per analyzed function.
-  void handleGlobalContainerOfIndirectionUse(const DeclRefExpr *DRE,
+  /// site. Reported at most once per global per analyzed function. `UseExpr` is
+  /// the DeclRefExpr or, for a static data member reached as `obj.member`, the
+  /// MemberExpr naming it.
+  void handleGlobalContainerOfIndirectionUse(const Expr *UseExpr,
                                              const VarDecl *VD);
 
   /// Walks the full subtree so origins on the pointee chain and on field
