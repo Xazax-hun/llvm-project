@@ -338,6 +338,9 @@ private:
   /// suppressed the unannotated-indirection backstop, so the real capture went
   /// unchecked. Keyed by parameter to de-duplicate.
   llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
+  /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into
+  /// the enclosing object, which the annotation does not describe.
+  llvm::DenseSet<const ParmVarDecl *> UndeclaredFieldCaptures;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// For a [[clang::lifetime_immortal]] function: the worst offending subject
   /// its return value borrows (0 = local/temporary, 1 = parameter, 2 = this);
@@ -668,6 +671,21 @@ public:
         if (isa<FieldEscapeFact>(OEF) && PVD->hasAttr<LifetimeCaptureByAttr>() &&
             !capturesThis(PVD))
           CaptureByFieldViolations.insert(PVD);
+        // '[[clang::lifetimebound]]' describes the RETURN VALUE and nothing else. A store
+        // of the parameter's borrow into a field of `this` is a second, undeclared
+        // relationship: the object now aliases the argument, and a caller reading only the
+        // declaration cannot tell it must keep the argument alive. The annotation also
+        // suppressed the unannotated-indirection backstop, so such a capture went
+        // unchecked entirely while the lifetimebound claim itself was satisfied -- the
+        // function really does return the parameter, truthfully.
+        //
+        // '[[clang::lifetime_capture_by(this)]]' is the annotation for it, and once
+        // written the capture is modeled and the dangling use is reported at the call
+        // site. A parameter that already names `this` is excluded: it declared the
+        // capture, and is validated elsewhere.
+        if (isa<FieldEscapeFact>(OEF) && PVD->hasAttr<LifetimeBoundAttr>() &&
+            !capturesThis(PVD))
+          UndeclaredFieldCaptures.insert(PVD);
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
       } else if (const auto *MD = AP.getAsPlaceholderThis())
         CheckImplicitThis(MD);
@@ -2346,6 +2364,8 @@ public:
       return;
     for (const ParmVarDecl *PVD : CaptureByFieldViolations)
       SemaHelper->reportCaptureByViolation(PVD);
+    for (const ParmVarDecl *PVD : UndeclaredFieldCaptures)
+      SemaHelper->reportUndeclaredFieldCapture(PVD);
   }
 
   // Bans [[clang::lifetime_capture_by(global)]] and

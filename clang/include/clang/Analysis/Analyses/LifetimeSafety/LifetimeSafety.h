@@ -268,6 +268,9 @@ public:
   // [[clang::lifetime_capture_by(this)]] (or [[clang::lifetimebound]]) to match
   // the body.
   virtual void reportCaptureByViolation(const ParmVarDecl *PVD) {}
+  /// A '[[clang::lifetimebound]]' parameter whose borrow is also captured into the
+  /// enclosing object -- a capture the declaration does not advertise.
+  virtual void reportUndeclaredFieldCapture(const ParmVarDecl *PVD) {}
 
   // Reports a parameter annotated [[clang::lifetime_capture_by(global)]] or
   // [[clang::lifetime_capture_by(unknown)]]. The safe programming model rejects

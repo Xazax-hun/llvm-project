@@ -421,6 +421,16 @@ public:
         << HasName << ParamName << Range;
   }
 
+  void reportUndeclaredFieldCapture(const ParmVarDecl *PVD) override {
+    const auto *Attr = PVD->getAttr<LifetimeBoundAttr>();
+    SourceLocation Loc = Attr ? Attr->getLocation() : PVD->getLocation();
+    SourceRange Range = Attr ? Attr->getRange() : PVD->getSourceRange();
+    StringRef ParamName = PVD->getName();
+    bool HasName = ParamName.size() > 0;
+    S.Diag(Loc, diag::warn_lifetime_safety_undeclared_field_capture)
+        << HasName << ParamName << Range;
+  }
+
   void reportImmortalViolation(const FunctionDecl *FD,
                                unsigned Subject) override {
     const auto *Attr = FD->getAttr<LifetimeImmortalAttr>();

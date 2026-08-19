@@ -11108,6 +11108,16 @@ def warn_lifetime_safety_lifetimebound_violation
     : Warning<"could not verify that the return value can be lifetime bound to %select{an unnamed parameter|'%1'|the implicit this parameter}0">,
       InGroup<LifetimeSafetyLifetimeboundViolation>,
       DefaultIgnore;
+def warn_lifetime_safety_undeclared_field_capture
+    : Warning<"'[[clang::lifetimebound]]' describes the RETURN VALUE, but the borrow "
+              "from %select{an unnamed parameter|'%1'}0 is also captured into this "
+              "object; a caller sees only the declaration, so it cannot tell the "
+              "argument must outlive the object. Annotate it "
+              "'[[clang::lifetime_capture_by(this)]]' -- on a type that holds a borrow, "
+              "so '[[gsl::Pointer]]' rather than '[[gsl::Owner]]' -- or store an owned "
+              "copy instead">,
+      InGroup<LifetimeSafetyCaptureByViolation>,
+      DefaultIgnore;
 def warn_lifetime_safety_capture_by_violation
     : Warning<"'[[clang::lifetime_capture_by]]' names a capturing entity other "
               "than 'this', but the borrow from %select{an unnamed parameter|"
