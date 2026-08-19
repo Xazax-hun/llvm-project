@@ -409,6 +409,17 @@ template <class T, unsigned long N> struct fixed_vector {
   unsigned long size() const;
 };
 
+// A non-template POLYMORPHIC library base that users derive from -- std::pmr::memory_resource
+// and std::streambuf are the real instances. A derived type reaches the library only as the
+// implicit object argument of a call to an inherited member: it appears in no template
+// argument, so a walk over those never sees it, and the conversion such a call inserts means
+// the receiver's reported type is this base rather than the derived type as written.
+struct polymorphic_base {
+  virtual ~polymorphic_base();
+  int run();
+  virtual int hook() = 0;
+};
+
 // Minimal stand-in for the template users most often specialize for their own types.
 // A user specialization of it is legal C++ and lands in namespace `std`, which is why
 // trust has to key on whether the LIBRARY wrote a declaration, not on its namespace.

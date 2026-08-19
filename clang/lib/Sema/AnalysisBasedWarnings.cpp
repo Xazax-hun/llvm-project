@@ -3789,6 +3789,41 @@ public:
     // is not knowable from here.
     if (!Callee->isConsteval() &&
         S.SourceMgr.isInSystemHeader(Callee->getLocation())) {
+      // The RECEIVER is handed to the library too, as the implicit object argument, and
+      // `CE->arguments()` does not include it. A user type deriving from a non-template
+      // polymorphic library base -- `std::pmr::memory_resource`, `std::streambuf` --
+      // reaches the library only that way: it appears in no template argument, so the
+      // chain never sees it, and the library member it is called through dispatches
+      // straight back into an unverified override.
+      //
+      // Asked of the type as WRITTEN, before the derived-to-base conversion that a call to
+      // an inherited member inserts. getObjectType() reports the base -- for the case
+      // above, `std::pmr::memory_resource` -- which is library code and answers "safe",
+      // which is precisely how the user type went unexamined.
+      //
+      // And asked only when that written type is the user's. A library receiver is the
+      // library calling into itself; the user code it can reach is in its template
+      // arguments, which the construction chain and the destruction rules already govern.
+      // Asking this of a library receiver instead would refuse `v.size()` on a
+      // `std::vector<Thing>` for `Thing` having an ordinary unannotated method.
+      if (const auto *MCE = dyn_cast<CXXMemberCallExpr>(CE)) {
+        QualType ObjTy =
+            MCE->getImplicitObjectArgument()->IgnoreImpCasts()->getType();
+        ObjTy = ObjTy.getNonReferenceType();
+        if (const auto *PT = ObjTy->getAs<PointerType>())
+          ObjTy = PT->getPointeeType();
+        const CXXRecordDecl *ObjRD = ObjTy->getAsCXXRecordDecl();
+        if (ObjRD && !lifetimes::isLibraryOwned(ObjRD) &&
+            !isDestructionOrderSafeType(ObjTy, ShutdownOps::Any)) {
+          if (firstReportAt(CE->getExprLoc()))
+            S.Diag(
+                CE->getExprLoc(),
+                diag::
+                    warn_lifetime_safety_destruction_order_unsafe_library_argument)
+                << Subject << SubjectKind << ObjTy << Callee;
+          return true;
+        }
+      }
       for (const Expr *Arg : CE->arguments()) {
         QualType ArgTy = Arg->IgnoreImplicit()->getType();
         // A lambda written inside this body needs no promise: its call operator is

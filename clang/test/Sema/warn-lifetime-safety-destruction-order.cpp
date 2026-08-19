@@ -1287,6 +1287,60 @@ struct [[clang::destruction_order_safe]] PromisesAllMembers {
 };
 
 //===----------------------------------------------------------------------===//
+// ...nor for what it is called ON.
+//===----------------------------------------------------------------------===//
+
+// The receiver is handed to the library as well, as the implicit object argument, which is
+// not among a call's arguments. A user type deriving from a non-template polymorphic library
+// base reaches the library only that way: it appears in no template argument, so the chain
+// never sees it, and the library member it is called through dispatches straight back into
+// an unverified override.
+//
+// The type has to be taken as WRITTEN. A call to an inherited member inserts a
+// derived-to-base conversion, so the receiver's reported type is the LIBRARY base -- which
+// is library code and answers "safe". That is exactly how the user type went unexamined.
+struct DerivesLibraryBase : std::polymorphic_base {
+  int hook() override { return (int)g_counter.n; }
+};
+struct [[clang::destruction_order_safe]] CallsThroughLibraryBase {
+  DerivesLibraryBase d;
+  ~CallsThroughLibraryBase() {
+    // expected-warning@+1 {{hands an object of type 'DerivesLibraryBase' to 'run'}}
+    sink = (char)d.run();
+  }
+};
+
+// Annotating the derived class covers its overrides, and is the escape hatch.
+struct [[clang::destruction_order_safe]] SafeDerived : std::polymorphic_base {
+  int hook() override { return 0; }
+};
+struct [[clang::destruction_order_safe]] CallsThroughSafeDerived {
+  SafeDerived d;
+  ~CallsThroughSafeDerived() {
+    sink = (char)d.run(); // no-warning
+  }
+};
+
+// A LIBRARY receiver is left alone: that is the library calling into itself, and the user
+// code it can reach lives in its template arguments, which the construction chain and the
+// destruction rules already govern. Asking this question of a library receiver instead would
+// refuse `v.size()` for an element type with an ordinary unannotated method.
+struct HasOrdinaryMethod {
+  int n = 0;
+  int describe() const { return n; }
+};
+struct [[clang::destruction_order_safe]] CallsOnLibraryReceiver {
+  vector<HasOrdinaryMethod> v;
+  vector<int> nums;
+  string text;
+  ~CallsOnLibraryReceiver() {
+    sink = (char)v.size();    // no-warning
+    nums.push_back(1);        // no-warning
+    text.clear();             // no-warning
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Trust follows who WROTE the code, not the namespace it is spelled in.
 //
 // Specializing a standard template for a program-defined type is legal, conforming
