@@ -397,3 +397,35 @@ void const_guard_temporary_silent() {
   (void)ConstGuard{&v}.tag; // no-warning
   (void)r;
 }
+
+// A temporary whose value is DISCARDED is never materialized, so it has no
+// MaterializeTemporaryExpr and its full-expression produces no cleanup element
+// -- only a CFGTemporaryDtor. Skipping that element left an unnamed guard
+// silent, though naming it or reading a member of it reported.
+void discarded_temporary_guard() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  Grower{&v}; // expected-note {{assumed to be invalidated by this operation}}
+  // expected-warning@-1 {{expression result unused}}
+  (void)r;
+}
+
+void discarded_temporary_guard_cast_to_void() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  (void)Grower{&v}; // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// The same discarded form on a guard that cannot mutate stays silent.
+void discarded_const_guard_silent() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  (void)ConstGuard{&v}; // no-warning
+  (void)r;
+}

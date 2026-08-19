@@ -147,6 +147,10 @@ private:
 
   void handleFullExprCleanup(const CFGFullExprCleanup &FullExprCleanup);
 
+  /// Models the destruction of a temporary whose value is discarded, which has
+  /// no MaterializeTemporaryExpr and so is not covered by handleFullExprCleanup.
+  void handleTemporaryDtor(const CFGTemporaryDtor &TemporaryDtor);
+
   /// Generates origin flows for a structured binding's holding expressions
   /// (e.g. `e[i]` / `e.field`), which are not visited by the CFG walk, so that
   /// references to the bindings -- which alias them -- are tracked. The holding

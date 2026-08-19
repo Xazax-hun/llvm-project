@@ -409,7 +409,9 @@ void FactsGenerator::run() {
       else if (std::optional<CFGFullExprCleanup> FullExprCleanup =
                    Element.getAs<CFGFullExprCleanup>()) {
         handleFullExprCleanup(*FullExprCleanup);
-      }
+      } else if (std::optional<CFGTemporaryDtor> TemporaryDtor =
+                     Element.getAs<CFGTemporaryDtor>())
+        handleTemporaryDtor(*TemporaryDtor);
     }
     if (Block == &Cfg.getExit())
       handleExitBlock();
@@ -2244,6 +2246,38 @@ void FactsGenerator::handleCleanupFunction(
   if (OriginNode *Node = getOriginNode(*VD))
     CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
         VD->getLocation(), Node));
+}
+
+void FactsGenerator::handleTemporaryDtor(
+    const CFGTemporaryDtor &TemporaryDtor) {
+  // A temporary whose value is DISCARDED is never materialized, so no
+  // MaterializeTemporaryExpr exists for it and handleFullExprCleanup below
+  // never sees it -- the CFG marks its destruction with a CFGTemporaryDtor
+  // instead. Its destructor still runs and can mutate what the object borrowed,
+  // so `Grower{&v};` left the caller's live borrows silently invalidated while
+  // every form that names the temporary or reads a member of it was reported.
+  const CXXBindTemporaryExpr *BTE = TemporaryDtor.getBindTemporaryExpr();
+  if (!BTE)
+    return;
+  // Only the discarded ones are this handler's to model. A materialized
+  // temporary is destroyed at the cleanup handleFullExprCleanup sees (or, when
+  // lifetime-extended, at handleLifetimeEnds), and one consumed as a
+  // subexpression -- a call argument above all -- is modelled where it is
+  // consumed. The CFG emits a CFGTemporaryDtor for those too, so handling them
+  // here would report the same invalidation twice. Parens, casts and the
+  // full-expression's cleanup wrapper sit between the CXXBindTemporaryExpr and
+  // whatever consumes it, so look through them: an Expr remains only if the
+  // value is actually used.
+  const Stmt *Consumer = AC.getParentMap().getParent(BTE);
+  while (isa_and_present<ParenExpr>(Consumer) ||
+         isa_and_present<CastExpr>(Consumer) ||
+         isa_and_present<ExprWithCleanups>(Consumer))
+    Consumer = AC.getParentMap().getParent(Consumer);
+  if (isa_and_present<Expr>(Consumer))
+    return;
+  if (OriginNode *Node = getOriginNode(*BTE))
+    handleDestructionOfBorrowHolder(BTE->getSubExpr()->getType(), Node, BTE,
+                                    BTE->getEndLoc());
 }
 
 void FactsGenerator::handleFullExprCleanup(
