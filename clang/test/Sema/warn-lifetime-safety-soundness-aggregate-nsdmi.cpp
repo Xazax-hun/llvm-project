@@ -79,6 +79,53 @@ void union_reaches_aggregate() {
 }
 
 //===----------------------------------------------------------------------===//
+// Every position that applies an initializer without a constructor.
+//===----------------------------------------------------------------------===//
+
+// CXXDefaultInitExpr::children() is empty, so the initializer's body enters the CFG only
+// where a walk descends into it explicitly -- and there were three such positions with no
+// descent. Each case below gets its own type so that its report is its own; the reports
+// anchor at the initializer, which is shared by every use of the type.
+
+// C++20 parenthesized aggregate initialization. `Agg x(1)` fills the members the caller left
+// out from their initializers exactly as `Agg x{1}` does, but had no case of its own and fell
+// to the generic child walk, which sees the CXXDefaultInitExpr and cannot reach its body.
+struct [[gsl::Pointer]] ForParenInit {
+  int a;
+  // expected-warning@+2 {{does not live long enough}}
+  // expected-note@+1 {{destroyed here}}
+  string_view v = make();
+};
+void paren_init() {
+  ForParenInit x(1);
+  sink = x.v.size() ? 1 : 0; // expected-note {{later used here}}
+}
+
+// The ARRAY FILLER is not among an initializer list's children: one initializer stands for
+// every element the caller did not write out.
+struct [[gsl::Pointer]] ForArrayFiller {
+  string_view v = make();
+};
+void array_filler() {
+  ForArrayFiller arr[2] = {};
+  // The borrow is reported against the array rather than as a scope violation -- an array
+  // element's loan is tracked per array, not per element -- but it is reported, which is
+  // what was missing.
+  // expected-warning@+1 {{cannot track local variable 'arr' here}}
+  sink = arr[0].v.size() ? 1 : 0;
+}
+
+// At NAMESPACE scope the sweep over dynamic initializers is the only entry point that reaches
+// the declaration at all, and it was not asking for the initializer's body -- while the
+// per-function path, which does ask, covered the same aggregate as a local.
+struct [[gsl::Pointer]] ForNamespaceScope {
+  // expected-warning@+1 {{escapes to the global variable 'g_aggregate' which will dangle}}
+  string_view v = make();
+};
+// expected-note@+1 {{this global dangles}}
+ForNamespaceScope g_aggregate{};
+
+//===----------------------------------------------------------------------===//
 // Negatives.
 //===----------------------------------------------------------------------===//
 

@@ -4379,6 +4379,13 @@ static void LifetimeSafetyFileVarInitAnalysis(
       AC.getCFGBuildOptions().AddInitializers = true;
       AC.getCFGBuildOptions().AddImplicitDtors = true;
       AC.getCFGBuildOptions().AddTemporaryDtors = true;
+      // A default member initializer's body enters the CFG only when asked for, and this
+      // sweep is the ONLY entry point that reaches a namespace-scope initializer or a
+      // default argument -- so omitting these left `Agg g{};` at namespace scope with the
+      // initializer's code in no CFG anywhere, while the same aggregate as a local was
+      // covered by the per-function path, which does ask.
+      AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
+      AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
       AC.getCFGBuildOptions().setAllAlwaysAdd();
       if (AC.getCFG())
         runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);

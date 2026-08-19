@@ -582,6 +582,10 @@ public:
 private:
   // Visitors to walk an AST and construct the CFG.
   CFGBlock *VisitInitListExpr(InitListExpr *ILE, AddStmtChoice asc);
+  CFGBlock *VisitCXXParenListInitExpr(CXXParenListInitExpr *PLIE,
+                                      AddStmtChoice asc);
+  CFGBlock *VisitAggregateDefaultInit(Stmt *S, CFGBlock *B);
+  CFGBlock *VisitAggregateDefaultInitsIn(Stmt *S, CFGBlock *B);
   CFGBlock *VisitAddrLabelExpr(AddrLabelExpr *A, AddStmtChoice asc);
   CFGBlock *VisitAttributedStmt(AttributedStmt *A, AddStmtChoice asc);
   CFGBlock *VisitBinaryOperator(BinaryOperator *B, AddStmtChoice asc);
@@ -2343,6 +2347,9 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc,
     case Stmt::InitListExprClass:
       return VisitInitListExpr(cast<InitListExpr>(S), asc);
 
+    case Stmt::CXXParenListInitExprClass:
+      return VisitCXXParenListInitExpr(cast<CXXParenListInitExpr>(S), asc);
+
     case Stmt::AttributedStmtClass:
       return VisitAttributedStmt(cast<AttributedStmt>(S), asc);
 
@@ -2589,19 +2596,84 @@ CFGBlock *CFGBuilder::VisitInitListExpr(InitListExpr *ILE, AddStmtChoice asc) {
   }
   CFGBlock *B = Block;
 
+  // The ARRAY FILLER is not among the children: one initializer stands for every element
+  // the caller did not write out. Visiting it once is both necessary -- otherwise
+  // `Agg a[2] = {}` puts nothing in the CFG -- and sufficient, since the CFG cannot hold
+  // one Expr several times anyway. Gated with the aggregate option so this does not change
+  // the CFG the other analyses see.
+  //
+  // Only the initializer bodies inside it, not the filler itself: the filler for an
+  // aggregate element is an IMPLICIT InitListExpr, and adding it to the CFG as a statement
+  // of its own reports an unmodeled expression with no source location to point at -- which
+  // can be neither located nor suppressed.
+  if (BuildOpts.AddCXXDefaultInitExprInAggregates)
+    B = VisitAggregateDefaultInitsIn(ILE->getArrayFiller(), B);
+
   reverse_children RChildren(ILE, *Context);
   for (Stmt *Child : RChildren) {
     if (!Child)
       continue;
     if (CFGBlock *R = Visit(Child))
       B = R;
-    if (BuildOpts.AddCXXDefaultInitExprInAggregates) {
-      if (auto *DIE = dyn_cast<CXXDefaultInitExpr>(Child))
-        if (Stmt *Child = DIE->getExpr())
-          if (CFGBlock *R = Visit(Child))
-            B = R;
-    }
+    B = VisitAggregateDefaultInit(Child, B);
   }
+  return B;
+}
+
+/// Visits the initializers of a parenthesized aggregate initialization.
+///
+/// `Agg a(1)` initializes an aggregate just as `Agg a{1}` does, and fills the members the
+/// caller left out from their default member initializers -- so it needs the same descent.
+/// Without a case of its own it fell to the generic child walk, which sees the
+/// CXXDefaultInitExpr but cannot get at its body.
+CFGBlock *CFGBuilder::VisitCXXParenListInitExpr(CXXParenListInitExpr *PLIE,
+                                                AddStmtChoice asc) {
+  if (asc.alwaysAdd(*this, PLIE)) {
+    autoCreateBlock();
+    appendStmt(Block, PLIE);
+  }
+  CFGBlock *B = Block;
+  for (Expr *Init : llvm::reverse(PLIE->getInitExprs())) {
+    if (!Init)
+      continue;
+    if (CFGBlock *R = Visit(Init))
+      B = R;
+    B = VisitAggregateDefaultInit(Init, B);
+  }
+  return B;
+}
+
+/// Visits the bodies of any default member initializers inside \p S, without adding \p S
+/// itself to the CFG. Used for the array filler, which is implicit and has nothing useful to
+/// anchor a diagnostic on.
+CFGBlock *CFGBuilder::VisitAggregateDefaultInitsIn(Stmt *S, CFGBlock *B) {
+  if (!S)
+    return B;
+  if (auto *DIE = dyn_cast<CXXDefaultInitExpr>(S)) {
+    if (Stmt *Body = DIE->getExpr())
+      if (CFGBlock *R = Visit(Body))
+        B = R;
+    return B;
+  }
+  reverse_children RChildren(S, *Context);
+  for (Stmt *Child : RChildren)
+    B = VisitAggregateDefaultInitsIn(Child, B);
+  return B;
+}
+
+/// Visits the body of a CXXDefaultInitExpr appearing in an aggregate initializer.
+///
+/// CXXDefaultInitExpr::children() is empty, so a default member initializer's body enters
+/// the CFG only where a walk descends into it explicitly. Reached through a constructor the
+/// initializer belongs to that constructor; through AGGREGATE initialization there is no
+/// constructor to carry it, so without this the code in it is in no CFG at all.
+CFGBlock *CFGBuilder::VisitAggregateDefaultInit(Stmt *S, CFGBlock *B) {
+  if (!BuildOpts.AddCXXDefaultInitExprInAggregates)
+    return B;
+  if (auto *DIE = dyn_cast_or_null<CXXDefaultInitExpr>(S))
+    if (Stmt *Body = DIE->getExpr())
+      if (CFGBlock *R = Visit(Body))
+        return R;
   return B;
 }
 
