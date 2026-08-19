@@ -3019,6 +3019,53 @@ static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
   return RD->getIdentifier() && Erasing.contains(RD->getName());
 }
 
+static bool isDestructionOrderSafeFunction(const FunctionDecl *FD);
+static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth);
+
+/// True if evaluating \p S runs code that is not known to be safe at shutdown.
+///
+/// Used to look inside a DEFAULT MEMBER INITIALIZER, which is code an implicit constructor
+/// runs and which no type names: a field's TYPE says nothing about it, so
+/// `struct Logger { int n = peek(); };` answered "safe" to every type-level question while
+/// constructing it called `peek`. That mattered wherever the construction itself is
+/// invisible -- inside a library container, where nothing is reported precisely.
+static bool exprRunsUncheckedCode(const Stmt *S, unsigned Depth) {
+  if (!S)
+    return false;
+  if (const auto *CE = dyn_cast<CallExpr>(S))
+    if (!isDestructionOrderSafeFunction(CE->getDirectCallee()))
+      return true;
+  if (const auto *CCE = dyn_cast<CXXConstructExpr>(S))
+    if (constructionRunsUncheckedCode(CCE->getType(), Depth + 1))
+      return true;
+  for (const Stmt *Child : S->children())
+    if (exprRunsUncheckedCode(Child, Depth))
+      return true;
+  return false;
+}
+
+/// True if evaluating \p S constructs a LIBRARY type that builds something unchecked.
+///
+/// The narrower question, for where the descent through implicit constructors is running:
+/// it already reports a call or a user construction inside a default member initializer by
+/// name, and only what a library type builds is invisible. Asking the broader question
+/// here would report the same construction twice, once coarsely.
+static bool exprHidesUncheckedCode(const Stmt *S, unsigned Depth) {
+  if (!S)
+    return false;
+  if (const auto *CCE = dyn_cast<CXXConstructExpr>(S)) {
+    QualType T = CCE->getType();
+    const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+    if (RD && lifetimes::isLibraryOwned(RD) &&
+        constructionRunsUncheckedCode(T, Depth + 1))
+      return true;
+  }
+  for (const Stmt *Child : S->children())
+    if (exprHidesUncheckedCode(Child, Depth))
+      return true;
+  return false;
+}
+
 /// True if constructing \p QT at shutdown runs a constructor that is user code and
 /// does not carry the destruction-order promise.
 ///
@@ -3072,9 +3119,14 @@ static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
   for (const CXXBaseSpecifier &B : RD->bases())
     if (constructionRunsUncheckedCode(B.getType(), Depth + 1))
       return true;
-  for (const FieldDecl *FD : RD->fields())
+  for (const FieldDecl *FD : RD->fields()) {
     if (constructionRunsUncheckedCode(FD->getType(), Depth + 1))
       return true;
+    // A default member initializer is code the generated constructor runs, and the
+    // field's type does not describe it.
+    if (exprRunsUncheckedCode(FD->getInClassInitializer(), Depth))
+      return true;
+  }
   return false;
 }
 
@@ -3105,9 +3157,14 @@ static bool constructionHidesUncheckedCode(QualType QT, unsigned Depth = 0) {
   for (const CXXBaseSpecifier &B : RD->bases())
     if (constructionHidesUncheckedCode(B.getType(), Depth + 1))
       return true;
-  for (const FieldDecl *FD : RD->fields())
+  for (const FieldDecl *FD : RD->fields()) {
     if (constructionHidesUncheckedCode(FD->getType(), Depth + 1))
       return true;
+    // ...and a container built by a default member initializer, whose elements the
+    // descent stops short of just as it does for a member of container type.
+    if (exprHidesUncheckedCode(FD->getInClassInitializer(), Depth))
+      return true;
+  }
   return false;
 }
 

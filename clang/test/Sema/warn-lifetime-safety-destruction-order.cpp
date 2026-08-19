@@ -918,6 +918,78 @@ struct [[clang::destruction_order_safe]] MakesSafeInherited {
 };
 
 //===----------------------------------------------------------------------===//
+// A DEFAULT MEMBER INITIALIZER is code no type describes.
+//===----------------------------------------------------------------------===//
+
+// The type-level construction question enumerated constructors, bases and fields, and a
+// field's TYPE says nothing about its in-class initializer -- which the generated
+// constructor runs. So `struct DmiPeeker { int n = peekGlobal(); };` answered "safe" to
+// every type-level rule while constructing it called `peekGlobal`, and that mattered
+// exactly where the construction is invisible: inside a library container, where nothing
+// is reported precisely and the element type's answer is all there is.
+[[clang::destruction_order_safe]] int safeCompute();
+int peekGlobal();
+
+struct DmiPeeker {
+  int n = peekGlobal();
+};
+struct [[clang::destruction_order_safe]] MakesDmiContainer {
+  vector<DmiPeeker> m;
+  ~MakesDmiContainer() {
+    // expected-warning@+1 {{calls 'emplace_back<>' on an object of type 'vector<DmiPeeker>', whose construction runs code that is not known to be safe}}
+    m.emplace_back();
+    // expected-warning@+1 {{creates a local of type 'vector<DmiPeeker>', whose construction runs code that is not known to be safe}}
+    vector<DmiPeeker> local;
+    (void)local;
+  }
+};
+
+// A container built BY an initializer is hidden the same way a container-typed member is:
+// the descent arrives at the container's own constructor and trusts it, so the elements
+// it builds appear nowhere. Reported against the enclosing type, which is what the reader
+// wrote.
+struct HoldsDmiContainer {
+  int n = (vector<Peeker>(), 0);
+};
+struct [[clang::destruction_order_safe]] MakesDmiHolder {
+  ~MakesDmiHolder() {
+    // expected-warning@+1 {{creates a local of type 'HoldsDmiContainer', whose construction runs code that is not known to be safe}}
+    HoldsDmiContainer h;
+    (void)h;
+  }
+};
+
+// Negatives. An initializer whose callee promises is safe, and so is every ordinary
+// initializer -- a literal, an arithmetic constant, and a library type built from one.
+// These are what make the rule usable: it must not charge for `std::string s = "hi";`.
+struct DmiSafe {
+  int n = safeCompute();
+};
+struct DmiOrdinary {
+  int a = 0;
+  int b = 41 + 1;
+  string s = "hi";
+  // A braced initializer list is itself an unmodeled construct under the soundness group,
+  // independently of anything here; recorded so this section's silence is about the
+  // destruction-order rule and not about that.
+  // soundness-warning@+2 {{this expression is not modeled by lifetime safety analysis}}
+  // soundness-warning@+1 {{cannot track this value here}}
+  vector<int> v = {1, 2, 3};
+  vector<string> names{};
+};
+struct [[clang::destruction_order_safe]] MakesSafeDmis {
+  ~MakesSafeDmis() {
+    vector<DmiSafe> a;
+    a.emplace_back(); // no-warning
+    vector<DmiOrdinary> b;
+    b.emplace_back(); // no-warning
+    // soundness-note@+1 {{in implicit default constructor for 'DmiOrdinary' first required here}}
+    DmiOrdinary c; // no destruction-order warning
+    (void)c;
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // A library callee is trusted for where it was written, not for what it is
 // parameterized by.
 //===----------------------------------------------------------------------===//
