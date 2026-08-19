@@ -93,3 +93,85 @@ void known_mutator_receiver_warns() {
   string_view v = s; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
   s.insert(0, v);    // expected-note {{assumed to be invalidated by this operation}}
 }
+
+//===----------------------------------------------------------------------===//
+// Assembling an AGGREGATE brings borrows together exactly as a call does.
+//===----------------------------------------------------------------------===//
+
+// A mutable handle to an owner and a view of that same owner may not exist at once, and
+// building an aggregate out of them combines them at one point just as passing them to a
+// function does. The question was asked only at calls, so the identical arguments were
+// reported through a constructor and a free function but not through braces -- which is how
+// a mutating member and a borrowing member could be assembled into one object silently, the
+// mutating one then reallocating what the other reads when it is destroyed first.
+struct [[gsl::Pointer]] Viewer {
+  string_view text;
+};
+struct [[gsl::Pointer]] Mutator {
+  string *buf;
+};
+
+void aggregate_init_warns() {
+  string s = "hello";
+  struct Both {
+    Viewer v;
+    Mutator m;
+  };
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  Both b{Viewer{s}, Mutator{&s}}; // expected-note {{assumed to be invalidated by this operation}}
+  (void)b;
+}
+
+// The controls, which were always reported: the same two arguments to a constructor and to
+// a free function.
+struct TakesBoth {
+  TakesBoth(Viewer v, Mutator m);
+};
+void takes_both(Viewer v, Mutator m);
+
+void constructor_warns() {
+  string s = "hello";
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  TakesBoth t{Viewer{s}, Mutator{&s}}; // expected-note {{assumed to be invalidated by this operation}}
+  (void)t;
+}
+
+void free_function_warns() {
+  string s = "hello";
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  takes_both(Viewer{s}, Mutator{&s}); // expected-note {{assumed to be invalidated by this operation}}
+}
+
+// Negatives: two views of the same owner alias nothing mutable, and a mutable handle to a
+// DIFFERENT owner cannot invalidate this view.
+void two_views_silent() {
+  string s = "hello";
+  struct TwoViews {
+    Viewer a;
+    Viewer b;
+  };
+  TwoViews t{Viewer{s}, Viewer{s}}; // no-warning
+  (void)t;
+}
+
+void unrelated_owner_silent() {
+  string s = "hello";
+  string other = "world";
+  struct Both {
+    Viewer v;
+    Mutator m;
+  };
+  Both b{Viewer{s}, Mutator{&other}}; // no-warning
+  (void)b;
+}
+
+// A union initializes one member, so there are no siblings to overlap with.
+void union_silent() {
+  string s = "hello";
+  union U {
+    Viewer v;
+    Mutator m;
+  };
+  U u{Viewer{s}}; // no-warning
+  (void)u;
+}

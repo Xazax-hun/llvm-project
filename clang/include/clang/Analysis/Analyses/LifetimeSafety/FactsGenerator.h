@@ -229,6 +229,10 @@ private:
   // mutate, and another that borrows it.
   void handleArgumentOverlap(const Expr *Call, const FunctionDecl *FD,
                              ArrayRef<const Expr *> Args);
+  void handleAggregateInitOverlap(const Expr *AggExpr,
+                                  ArrayRef<const Expr *> Inits);
+  void emitArgumentOverlap(const Expr *At, ArrayRef<const Expr *> Args,
+                           llvm::function_ref<bool(unsigned)> IsMutatingArg);
 
   // Detect a callable (lambda or std::function) being invoked -- directly or as
   // a call argument the callee may invoke -- whose value holds borrows of

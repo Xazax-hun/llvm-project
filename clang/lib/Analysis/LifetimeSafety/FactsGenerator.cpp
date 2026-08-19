@@ -1698,6 +1698,7 @@ void FactsGenerator::VisitInitListExpr(const InitListExpr *ILE) {
   llvm::SmallVector<const Expr *, 4> Inits(ILE->inits().begin(),
                                            ILE->inits().end());
   handleGslAggregateInit(ILE, Inits);
+  handleAggregateInitOverlap(ILE, Inits);
   // Soundness: a plain (non-gsl) aggregate that holds a borrow but whose
   // ownership is untracked. A local/member declaration of such a type is
   // reported at the declaration (VisitDeclStmt) and a call result at the call,
@@ -2664,7 +2665,44 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     return PVD && paramMayMutateOwner(PVD->getType());
   };
+  emitArgumentOverlap(Call, Args, IsMutatingArg);
+}
 
+/// Assembling an AGGREGATE brings several borrows together at one point exactly as a call
+/// does, so the same exclusivity question applies: one initializer that can mutate an owner
+/// alongside another that borrows into it must not be combined. Asking it only at calls left
+/// `Session s{Token{buf}, Trailer{&buf}}` silent while the identical arguments to a
+/// constructor or a free function were both reported -- and a mutating sibling could be
+/// assembled next to a borrowing one with nothing said.
+///
+/// Only what each argument is BOUND to differs: a call's binds to a parameter, an
+/// initializer to a field. Everything that follows from that -- which co-arguments carry an
+/// aliasing borrow, the pointee chain, the record being mutated -- is identical, so the two
+/// share it and supply only this predicate.
+void FactsGenerator::handleAggregateInitOverlap(
+    const Expr *AggExpr, ArrayRef<const Expr *> Inits) {
+  const CXXRecordDecl *RD = AggExpr->getType()->getAsCXXRecordDecl();
+  // A union initializes one member, so there are no siblings to overlap with.
+  if (!RD || RD->isUnion())
+    return;
+  // The initializers are in subobject order -- bases first, then fields -- so skip past the
+  // bases to align the two, mirroring handleGslAggregateInit. A base initializer has no
+  // field and cannot be the mutating one.
+  llvm::SmallVector<const FieldDecl *, 4> InitFields(RD->getNumBases(), nullptr);
+  llvm::append_range(InitFields, RD->fields());
+  auto IsMutatingInit = [&](unsigned I) -> bool {
+    return I < InitFields.size() && InitFields[I] &&
+           paramMayMutateOwner(InitFields[I]->getType());
+  };
+  emitArgumentOverlap(AggExpr, Inits, IsMutatingInit);
+}
+
+/// Pairs each argument that may mutate an owner with every other argument holding a borrow,
+/// and records one fact per mutating argument; the checker reports a pair when their loans
+/// actually alias.
+void FactsGenerator::emitArgumentOverlap(
+    const Expr *At, ArrayRef<const Expr *> Args,
+    llvm::function_ref<bool(unsigned)> IsMutatingArg) {
   for (unsigned M = 0; M < Args.size(); ++M) {
     if (!IsMutatingArg(M))
       continue;
@@ -2720,7 +2758,7 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
       MutTy = MutTy->getPointeeType();
     const CXXRecordDecl *MutatedRecord = MutTy->getAsCXXRecordDecl();
     CurrentBlockFacts.push_back(FactMgr.createFact<ArgOverlapFact>(
-        Call, FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(MutOrigins)),
+        At, FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(MutOrigins)),
         MutatedRecord,
         FactMgr.copyToFactStorage(llvm::ArrayRef<OriginID>(Borrows))));
   }
