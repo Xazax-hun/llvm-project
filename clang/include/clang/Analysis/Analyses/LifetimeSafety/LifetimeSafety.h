@@ -164,6 +164,12 @@ public:
   // assignment to a global variable
   virtual void reportNoescapeViolation(const ParmVarDecl *ParmWithNoescape,
                                        const VarDecl *EscapeGlobal) {}
+  // Reports misuse of [[clang::noescape]] when the parameter's borrow is stored
+  // into storage reached through ANOTHER parameter (`b.sv = s;`), leaving it in
+  // an object the caller owns. Distinct from the Expr overload above, whose
+  // note says the param was returned.
+  virtual void reportNoescapeStoreIntoParam(const ParmVarDecl *ParmWithNoescape,
+                                            const Expr *StoreExpr) {}
 
   // Reports misuse of [[clang::lifetimebound]] when parameter doesn't escape
   // through return.

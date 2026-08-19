@@ -535,6 +535,17 @@ public:
         << EscapeExpr->getSourceRange();
   }
 
+  void reportNoescapeStoreIntoParam(const ParmVarDecl *ParmWithNoescape,
+                                    const Expr *StoreExpr) override {
+    S.Diag(ParmWithNoescape->getBeginLoc(),
+           diag::warn_lifetime_safety_noescape_escapes)
+        << ParmWithNoescape->getSourceRange();
+
+    S.Diag(StoreExpr->getBeginLoc(),
+           diag::note_lifetime_safety_escapes_into_param_here)
+        << StoreExpr->getSourceRange();
+  }
+
   void reportNoescapeViolation(const ParmVarDecl *ParmWithNoescape,
                                const FieldDecl *EscapeField) override {
     S.Diag(ParmWithNoescape->getBeginLoc(),

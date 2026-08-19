@@ -313,6 +313,11 @@ private:
   llvm::DenseMap<LoanID, PendingWarning> FinalWarningsMap;
   llvm::DenseMap<AnnotationTarget, EscapingTarget> AnnotationWarningsMap;
   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
+  /// A noescape parameter whose borrow is stored into another parameter's
+  /// storage, mapped to the store expression. Kept apart from
+  /// NoescapeWarningsMap so the note can say where it came to rest rather than
+  /// "param returned here".
+  llvm::DenseMap<const ParmVarDecl *, const Expr *> NoescapeParamStoreMap;
   /// Borrows of the implicit object (`this`) or one of its fields that escape
   /// to global/static storage from a method. The global is caller-independent
   /// and outlives the call, but the borrowed object's lifetime is the caller's,
@@ -451,9 +456,10 @@ public:
         }
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
-        else if (const auto *FSF = F->getAs<FieldStoreFact>())
+        else if (const auto *FSF = F->getAs<FieldStoreFact>()) {
           checkSelfReferentialStore(FSF);
-        else if (const auto *AOF = F->getAs<ArgOverlapFact>())
+          checkNoescapeStoreIntoParam(FSF);
+        } else if (const auto *AOF = F->getAs<ArgOverlapFact>())
           checkArgumentOverlap(AOF);
     issuePendingWarnings();
     issueAssumedInvalidations();
@@ -1932,6 +1938,52 @@ public:
     }
   }
 
+  /// Soundness: a [[clang::noescape]] parameter's borrow stored into storage
+  /// reached through ANOTHER parameter (`static void adopt(Box &b, sv s
+  /// [[noescape]]) { b.sv = s; }`). The store leaves the borrow in an object
+  /// the caller owns, which is exactly what the annotation promises does not
+  /// happen.
+  ///
+  /// The `this` spelling of the same body is already reported: member origins
+  /// of the implicit object are seeded at entry, so the store lands on the
+  /// FIELD's origin and function exit emits a FieldEscapeFact the noescape
+  /// verifier consumes. A store through a parameter lands on a transient
+  /// member-access origin instead -- owned by no declaration -- so no escape
+  /// fact is emitted and nothing checked it, though the two bodies mean the
+  /// same thing.
+  ///
+  /// Loan-based: the container's loans say which object is stored into and the
+  /// stored value's loans say what is being parked there, so this does not
+  /// depend on the shape of either expression.
+  void checkNoescapeStoreIntoParam(const FieldStoreFact *FSF) {
+    if (!SemaHelper)
+      return;
+    LoanSet Container =
+        LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF);
+    // The destination must be reached through a PARAMETER. A store into `this`
+    // is already covered by the field-escape path, and a store into a local is
+    // no escape at all -- the local's expiry checks it.
+    const ParmVarDecl *Dest = nullptr;
+    for (LoanID CL : Container) {
+      const AccessPath &CAP = FactMgr.getLoanMgr().getLoan(CL)->getAccessPath();
+      if (const auto *PVD = CAP.getAsPlaceholderParam()) {
+        Dest = PVD;
+        break;
+      }
+    }
+    if (!Dest)
+      return;
+    // The stored value must carry a noescape parameter's own borrow.
+    for (LoanID SL : LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF)) {
+      const AccessPath &SAP = FactMgr.getLoanMgr().getLoan(SL)->getAccessPath();
+      const auto *Src = SAP.getAsPlaceholderParam();
+      if (!Src || Src == Dest || !Src->hasAttr<NoEscapeAttr>())
+        continue;
+      NoescapeParamStoreMap.try_emplace(Src, FSF->getStoreExpr());
+      return;
+    }
+  }
+
   /// Soundness check: overlapping (aliasing) call arguments. The call may mutate
   /// the argument behind `MutatingOrigin` (an owner passed by non-const
   /// reference/pointer, or a mutating method receiver) while `BorrowOrigin` is
@@ -2441,6 +2493,11 @@ public:
       else
         llvm_unreachable("Unhandled EscapingTarget type");
     }
+    for (auto [PVD, StoreExpr] : NoescapeParamStoreMap)
+      // An escape already reported through another route says the same thing
+      // once; the store note adds nothing there.
+      if (!NoescapeWarningsMap.contains(PVD))
+        SemaHelper->reportNoescapeStoreIntoParam(PVD, StoreExpr);
   }
 
   void reportThisEscapesToGlobal() {

@@ -11196,6 +11196,8 @@ def warn_lifetime_safety_cross_tu_this_suggestion
       DefaultIgnore;
 
 def note_lifetime_safety_suggestion_returned_here : Note<"param returned here">;
+def note_lifetime_safety_escapes_into_param_here
+    : Note<"escapes into an object the caller owns here">;
 
 def warn_lifetime_safety_noescape_escapes
     : Warning<"parameter is marked [[clang::noescape]] but escapes">,
