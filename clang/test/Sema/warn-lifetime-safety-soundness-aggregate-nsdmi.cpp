@@ -126,6 +126,46 @@ struct [[gsl::Pointer]] ForNamespaceScope {
 ForNamespaceScope g_aggregate{};
 
 //===----------------------------------------------------------------------===//
+// An initializer on an ANONYMOUS union or struct member.
+//===----------------------------------------------------------------------===//
+
+// A class's field list holds one unnamed field for an anonymous union or struct, and the
+// initializer belongs to a member inside it. The gate that decides whether a synthesized
+// constructor is worth analyzing asked the field list, so a class whose only initializer is
+// on such a member looked like a class with none and the analysis was skipped entirely.
+// Adding any named field -- even `int n = 0;` -- was enough to make the same hazard report.
+//
+// Asking the constructor what it INITIALIZES instead cannot miss an indirect member.
+struct InAnonUnion {
+  union {
+    // expected-warning@+2 {{escapes to the field 'v' which will dangle}}
+    // expected-note@+1 {{this field dangles}}
+    string_view v = make();
+    long other;
+  };
+};
+struct InAnonStruct {
+  struct {
+    // expected-warning@+2 {{escapes to the field 'v' which will dangle}}
+    // expected-note@+1 {{this field dangles}}
+    string_view v = make();
+  };
+};
+void anon_members() {
+  // expected-warning@+2 {{type 'InAnonUnion' can hold a borrow but is annotated neither}}
+  // expected-note@+1 {{in implicit default constructor for 'InAnonUnion' first required here}}
+  InAnonUnion a;
+  // expected-warning@+2 {{type 'InAnonStruct' can hold a borrow but is annotated neither}}
+  // expected-note@+1 {{in implicit default constructor for 'InAnonStruct' first required here}}
+  InAnonStruct b;
+  // Reading through the union member is separately refused, which is unrelated to whether
+  // the initializer was analyzed -- the reports above come from the constructor.
+  // expected-warning@+2 {{union member access is not modeled by lifetime safety analysis}}
+  // expected-warning@+1 {{cannot track local variable 'b' here}}
+  sink = (a.v.size() ? 1 : 0) + (b.v.size() ? 1 : 0);
+}
+
+//===----------------------------------------------------------------------===//
 // Negatives.
 //===----------------------------------------------------------------------===//
 

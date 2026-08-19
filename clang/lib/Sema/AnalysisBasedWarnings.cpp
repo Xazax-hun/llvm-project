@@ -4503,21 +4503,25 @@ void clang::sema::AnalysisBasedWarnings::
   if (S.hasUncompilableErrorOccurred())
     return;
 
-  // A synthesized constructor can only leave a field dangling through a default
-  // member initializer (NSDMI). A class with no in-class field initializer has
-  // nothing for the synthesized body to bind, so skip it -- this is sound (it
-  // cannot hide an NSDMI dangle) and keeps the common implicit constructor off
-  // the analysis path. We intentionally do not narrow further by member type:
-  // an NSDMI can bind a borrow nested inside an aggregate member too, so gating
-  // on the member type would risk a false negative.
+  // A synthesized constructor runs user code only through a default member initializer, so
+  // one that applies none has nothing to analyze; skipping it keeps the common implicit
+  // constructor off the analysis path. We intentionally do not narrow further by member
+  // type: an initializer can bind a borrow nested inside an aggregate member too, so
+  // gating on the member type would risk a false negative.
+  //
+  // Asked of what the constructor INITIALIZES, not of the class's fields. A class's field
+  // list holds one unnamed field for an anonymous union or struct, and the initializer
+  // belongs to a member inside that -- so a class whose only initializer is on such a
+  // member looked like a class with none, and the whole analysis was skipped. Adding any
+  // named field, even `int n = 0;`, was enough to make the same hazard report.
   if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(D)) {
-    bool HasInClassInit = false;
-    for (const FieldDecl *FD : Ctor->getParent()->fields())
-      if (FD->hasInClassInitializer()) {
-        HasInClassInit = true;
+    bool AppliesInClassInit = false;
+    for (const CXXCtorInitializer *Init : Ctor->inits())
+      if (Init->getInit() && isa<CXXDefaultInitExpr>(Init->getInit())) {
+        AppliesInClassInit = true;
         break;
       }
-    if (!HasInClassInit)
+    if (!AppliesInClassInit)
       return;
   }
 
