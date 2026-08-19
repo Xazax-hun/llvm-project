@@ -2319,11 +2319,26 @@ void FactsGenerator::handleTemporaryDtor(
   // full-expression's cleanup wrapper sit between the CXXBindTemporaryExpr and
   // whatever consumes it, so look through them: an Expr remains only if the
   // value is actually used.
-  const Stmt *Consumer = AC.getParentMap().getParent(BTE);
-  while (isa_and_present<ParenExpr>(Consumer) ||
-         isa_and_present<CastExpr>(Consumer) ||
-         isa_and_present<ExprWithCleanups>(Consumer))
-    Consumer = AC.getParentMap().getParent(Consumer);
+  //
+  // A comma operator is such a remaining Expr but does not consume the operand
+  // whose value it discards: `(Guard{&s}, 0)` discards the guard exactly as
+  // `Guard{&s};` does. Its LEFT operand is always discarded; its RIGHT operand
+  // becomes the comma's value, so whether that one is consumed depends in turn
+  // on what encloses the comma -- keep walking and let the same test decide.
+  // This covers every position a discarded guard can be written in: a comma
+  // statement, a for-increment, an `if`/`while`/`switch` condition.
+  const ParentMap &PM = AC.getParentMap();
+  const Stmt *Consumer = PM.getParent(BTE);
+  while (Consumer) {
+    // A comma's left operand is discarded outright; its right operand is
+    // discarded iff the comma itself is, which the next iteration decides.
+    if (const auto *BO = dyn_cast<BinaryOperator>(Consumer);
+        !isa<ParenExpr>(Consumer) && !isa<CastExpr>(Consumer) &&
+        !isa<ExprWithCleanups>(Consumer) &&
+        !(BO && BO->getOpcode() == BO_Comma))
+      break;
+    Consumer = PM.getParent(Consumer);
+  }
   if (isa_and_present<Expr>(Consumer))
     return;
   if (OriginNode *Node = getOriginNode(*BTE))
