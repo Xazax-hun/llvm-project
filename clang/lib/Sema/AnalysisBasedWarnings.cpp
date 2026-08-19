@@ -3020,7 +3020,18 @@ static bool isTypeErasingStdType(const CXXRecordDecl *RD) {
 }
 
 static bool isDestructionOrderSafeFunction(const FunctionDecl *FD);
-static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth);
+/// Records the record types already being explored by one of the type recursions below.
+///
+/// These walks follow bases, by-value members and template arguments, and that graph CAN
+/// cycle: `struct X : std::vector<X> {}` reaches X again through its own base's template
+/// argument. A depth limit was what kept them terminating, and a limit is answerable in
+/// neither direction -- returning the conservative answer at the boundary reports deeply
+/// nested code that is perfectly safe, and returning the permissive one reopens the hole.
+/// A revisit carries no new information: had the first visit decided the interesting
+/// answer, it would already have returned it.
+using SeenTypes = llvm::SmallPtrSet<const CXXRecordDecl *, 8>;
+
+static bool constructionRunsUncheckedCode(QualType QT, SeenTypes &Seen);
 
 /// True if evaluating \p S runs code that is not known to be safe at shutdown.
 ///
@@ -3029,17 +3040,17 @@ static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth);
 /// `struct Logger { int n = peek(); };` answered "safe" to every type-level question while
 /// constructing it called `peek`. That mattered wherever the construction itself is
 /// invisible -- inside a library container, where nothing is reported precisely.
-static bool exprRunsUncheckedCode(const Stmt *S, unsigned Depth) {
+static bool exprRunsUncheckedCode(const Stmt *S, SeenTypes &Seen) {
   if (!S)
     return false;
   if (const auto *CE = dyn_cast<CallExpr>(S))
     if (!isDestructionOrderSafeFunction(CE->getDirectCallee()))
       return true;
   if (const auto *CCE = dyn_cast<CXXConstructExpr>(S))
-    if (constructionRunsUncheckedCode(CCE->getType(), Depth + 1))
+    if (constructionRunsUncheckedCode(CCE->getType(), Seen))
       return true;
   for (const Stmt *Child : S->children())
-    if (exprRunsUncheckedCode(Child, Depth))
+    if (exprRunsUncheckedCode(Child, Seen))
       return true;
   return false;
 }
@@ -3050,18 +3061,20 @@ static bool exprRunsUncheckedCode(const Stmt *S, unsigned Depth) {
 /// it already reports a call or a user construction inside a default member initializer by
 /// name, and only what a library type builds is invisible. Asking the broader question
 /// here would report the same construction twice, once coarsely.
-static bool exprHidesUncheckedCode(const Stmt *S, unsigned Depth) {
+static bool exprHidesUncheckedCode(const Stmt *S) {
   if (!S)
     return false;
   if (const auto *CCE = dyn_cast<CXXConstructExpr>(S)) {
     QualType T = CCE->getType();
     const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-    if (RD && lifetimes::isLibraryOwned(RD) &&
-        constructionRunsUncheckedCode(T, Depth + 1))
-      return true;
+    if (RD && lifetimes::isLibraryOwned(RD)) {
+      SeenTypes Seen;
+      if (constructionRunsUncheckedCode(T, Seen))
+        return true;
+    }
   }
   for (const Stmt *Child : S->children())
-    if (exprHidesUncheckedCode(Child, Depth))
+    if (exprHidesUncheckedCode(Child))
       return true;
   return false;
 }
@@ -3077,15 +3090,15 @@ static bool exprHidesUncheckedCode(const Stmt *S, unsigned Depth) {
 /// Note every rule keyed on a type asks whether its DESTRUCTOR is safe, so a type with a
 /// trivial destructor and a hazardous constructor passes all of them -- and creating an
 /// object inside verified shutdown code runs its constructor there.
-static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
-  if (Depth > 8)
-    return true; // give up conservatively rather than recurse without bound
+static bool constructionRunsUncheckedCode(QualType QT, SeenTypes &Seen) {
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false; // no constructor of ours runs
+  if (!Seen.insert(RD).second)
+    return false; // already being explored on another path
   if (lifetimes::isLibraryOwned(RD)) {
     // A container CONSTRUCTS its elements, so this follows the template arguments
     // exactly as the destruction question does. What a type-erasing type constructs
@@ -3098,7 +3111,7 @@ static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
         if (A.getKind() == TemplateArgument::Pack)
           return llvm::any_of(A.pack_elements(), ArgRuns);
         if (A.getKind() == TemplateArgument::Type)
-          return constructionRunsUncheckedCode(A.getAsType(), Depth + 1);
+          return constructionRunsUncheckedCode(A.getAsType(), Seen);
         return false;
       };
       return llvm::any_of(CTSD->getTemplateArgs().asArray(), ArgRuns);
@@ -3117,17 +3130,22 @@ static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
   // Otherwise only generated constructors run, which run the bases' and members'
   // constructors and the default member initializers.
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (constructionRunsUncheckedCode(B.getType(), Depth + 1))
+    if (constructionRunsUncheckedCode(B.getType(), Seen))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
-    if (constructionRunsUncheckedCode(FD->getType(), Depth + 1))
+    if (constructionRunsUncheckedCode(FD->getType(), Seen))
       return true;
     // A default member initializer is code the generated constructor runs, and the
     // field's type does not describe it.
-    if (exprRunsUncheckedCode(FD->getInClassInitializer(), Depth))
+    if (exprRunsUncheckedCode(FD->getInClassInitializer(), Seen))
       return true;
   }
   return false;
+}
+
+static bool constructionRunsUncheckedCode(QualType QT) {
+  SeenTypes Seen;
+  return constructionRunsUncheckedCode(QT, Seen);
 }
 
 /// True if creating \p QT runs unchecked construction that NO node in the body names.
@@ -3143,29 +3161,34 @@ static bool constructionRunsUncheckedCode(QualType QT, unsigned Depth = 0) {
 /// library type that builds something unchecked. It cannot simply call the chain on each
 /// subobject: that would report the coarse type-level answer for a plain user member and
 /// lose the precise one.
-static bool constructionHidesUncheckedCode(QualType QT, unsigned Depth = 0) {
-  if (Depth > 8)
-    return true; // conservative: at this depth the precise report may not reach it
+static bool constructionHidesUncheckedCode(QualType QT, SeenTypes &Seen) {
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
+  if (!Seen.insert(RD).second)
+    return false; // already being explored on another path
   if (lifetimes::isLibraryOwned(RD))
-    return constructionRunsUncheckedCode(QT, Depth);
+    return constructionRunsUncheckedCode(QT);
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (constructionHidesUncheckedCode(B.getType(), Depth + 1))
+    if (constructionHidesUncheckedCode(B.getType(), Seen))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
-    if (constructionHidesUncheckedCode(FD->getType(), Depth + 1))
+    if (constructionHidesUncheckedCode(FD->getType(), Seen))
       return true;
     // ...and a container built by a default member initializer, whose elements the
     // descent stops short of just as it does for a member of container type.
-    if (exprHidesUncheckedCode(FD->getInClassInitializer(), Depth))
+    if (exprHidesUncheckedCode(FD->getInClassInitializer()))
       return true;
   }
   return false;
+}
+
+static bool constructionHidesUncheckedCode(QualType QT) {
+  SeenTypes Seen;
+  return constructionHidesUncheckedCode(QT, Seen);
 }
 
 /// True if \p RD (or a base) declares a class-specific deallocation function that
@@ -3335,7 +3358,9 @@ enum class ShutdownOps {
   Any,
 };
 
-static bool isDestructionOrderSafeType(QualType QT, unsigned Depth = 0,
+static bool isDestructionOrderSafeType(QualType QT, SeenTypes &Seen,
+                                       ShutdownOps Ops);
+static bool isDestructionOrderSafeType(QualType QT,
                                        ShutdownOps Ops = ShutdownOps::Destroy);
 
 /// True if \p RD is `std::initializer_list`.
@@ -3401,10 +3426,8 @@ static bool holdsUnsafeInitializerList(QualType QT) {
   return holdsUnsafeInitializerList(QT, Seen);
 }
 
-static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
+static bool isDestructionOrderSafeType(QualType QT, SeenTypes &Seen,
                                        ShutdownOps Ops) {
-  if (Depth > 8)
-    return false; // give up rather than recurse without bound
   QT = QT.getNonReferenceType();
   while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
     QT = AT->getElementType();
@@ -3421,6 +3444,8 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
   // holding one -- is trivially destructible.
   if (holdsUnsafeInitializerList(QT))
     return false;
+  if (RD && !Seen.insert(RD).second)
+    return true; // already being explored on another path
   if (Ops == ShutdownOps::Destroy && QT.isDestructedType() == QualType::DK_none)
     return true; // nothing runs at shutdown
   if (!RD)
@@ -3456,7 +3481,7 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
           // the library does to an element at shutdown is destroy it.
           return (Ops == ShutdownOps::Any ||
                   !hasUncheckedLibraryHook(A.getAsType())) &&
-                 isDestructionOrderSafeType(A.getAsType(), Depth + 1, Ops);
+                 isDestructionOrderSafeType(A.getAsType(), Seen, Ops);
         return true;
       };
       if (!llvm::all_of(CTSD->getTemplateArgs().asArray(), ArgIsSafe))
@@ -3495,12 +3520,17 @@ static bool isDestructionOrderSafeType(QualType QT, unsigned Depth,
       return false;
   }
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (!isDestructionOrderSafeType(B.getType(), Depth + 1, Ops))
+    if (!isDestructionOrderSafeType(B.getType(), Seen, Ops))
       return false;
   for (const FieldDecl *FD : RD->fields())
-    if (!isDestructionOrderSafeType(FD->getType(), Depth + 1, Ops))
+    if (!isDestructionOrderSafeType(FD->getType(), Seen, Ops))
       return false;
   return true;
+}
+
+static bool isDestructionOrderSafeType(QualType QT, ShutdownOps Ops) {
+  SeenTypes Seen;
+  return isDestructionOrderSafeType(QT, Seen, Ops);
 }
 
 /// True if \p FD may be called from a verified destructor.
@@ -3768,7 +3798,7 @@ public:
             ArgTy.getNonReferenceType()->getAsCXXRecordDecl();
         if (ArgRD && ArgRD->isLambda() && ArgRD->getDeclContext() == Subject)
           continue;
-        if (isDestructionOrderSafeType(ArgTy, /*Depth=*/0, ShutdownOps::Any))
+        if (isDestructionOrderSafeType(ArgTy, ShutdownOps::Any))
           continue;
         if (firstReportAt(Arg->getExprLoc()))
           S.Diag(Arg->getExprLoc(),

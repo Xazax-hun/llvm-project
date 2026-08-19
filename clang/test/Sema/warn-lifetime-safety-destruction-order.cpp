@@ -990,6 +990,80 @@ struct [[clang::destruction_order_safe]] MakesSafeDmis {
 };
 
 //===----------------------------------------------------------------------===//
+// These walks have no depth limit, and cannot have one.
+//===----------------------------------------------------------------------===//
+
+// A limit is answerable in neither direction. Returning the conservative answer at the
+// boundary reports deeply nested code that is perfectly safe; returning the permissive one
+// reopens the hole the walk exists to close. And the graph these walks follow -- bases,
+// by-value members and template arguments -- CAN cycle, so a limit was what kept them
+// terminating. A visited set replaces it: a revisit carries no new information, because a
+// first visit that decided the interesting answer would already have returned it.
+
+struct DeepInt0 {
+  int v = 0;
+};
+struct DeepInt1 { DeepInt0 a; };
+struct DeepInt2 { DeepInt1 a; };
+struct DeepInt3 { DeepInt2 a; };
+struct DeepInt4 { DeepInt3 a; };
+struct DeepInt5 { DeepInt4 a; };
+struct DeepInt6 { DeepInt5 a; };
+struct DeepInt7 { DeepInt6 a; };
+struct DeepInt8 { DeepInt7 a; };
+struct DeepInt9 { DeepInt8 a; };
+struct DeepInt10 { DeepInt9 a; };
+struct DeepInt11 { DeepInt10 a; };
+
+struct DeepHaz0 {
+  Peeker p;
+};
+struct DeepHaz1 { DeepHaz0 a; };
+struct DeepHaz2 { DeepHaz1 a; };
+struct DeepHaz3 { DeepHaz2 a; };
+struct DeepHaz4 { DeepHaz3 a; };
+struct DeepHaz5 { DeepHaz4 a; };
+struct DeepHaz6 { DeepHaz5 a; };
+struct DeepHaz7 { DeepHaz6 a; };
+struct DeepHaz8 { DeepHaz7 a; };
+struct DeepHaz9 { DeepHaz8 a; };
+struct DeepHaz10 { DeepHaz9 a; };
+struct DeepHaz11 { DeepHaz10 a; };
+
+struct [[clang::destruction_order_safe]] MakesDeepTypes {
+  ~MakesDeepTypes() {
+    // Eleven levels of plain ints: nothing here runs any code at all.
+    DeepInt11 safe; // no-warning
+    // The same depth with a hazard at the bottom still reports -- there is no cliff in
+    // either direction, at any depth.
+    // expected-warning@+1 {{creates a local of type 'vector<DeepHaz11>', whose construction runs code that is not known to be safe}}
+    vector<DeepHaz11> hazardous;
+    // expected-warning@+1 {{calls 'size' on an object of type 'const std::vector<DeepHaz11>', whose construction runs code that is not known to be safe}}
+    sink = (char)(sizeof(safe) + (hazardous.size() ? 1 : 0));
+  }
+};
+
+// Eleven levels of library containers at static storage duration: safe, since what each
+// destroys is ultimately an `int`.
+vector<vector<vector<vector<vector<vector<vector<vector<vector<vector<vector<int>>>>>>>>>>> g_deep_nested; // no-warning
+
+// A type that is a template argument of its own base closes a cycle no by-value member
+// graph can. That this file still finishes analyzing is the assertion: with a depth limit
+// it was the limit that stopped the walk, and removing one without a visited set would not
+// terminate.
+//
+// The answer itself is "safe", and that is what a cycle guard should say: revisiting a type
+// already being explored adds no information, and any other branch that does find unsafety
+// still wins. Nothing else about this type is unsafe -- so there is nothing to report.
+struct CyclicBase : vector<CyclicBase> {};
+struct [[clang::destruction_order_safe]] MakesCyclic {
+  ~MakesCyclic() {
+    CyclicBase c; // no-warning
+    sink = (char)(sizeof(c) ? 1 : 0);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // A library callee is trusted for where it was written, not for what it is
 // parameterized by.
 //===----------------------------------------------------------------------===//
