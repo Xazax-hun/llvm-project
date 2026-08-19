@@ -914,14 +914,25 @@ public:
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
       // Only the caller-visible inputs matter. Placeholder roots are exactly
       // those: they denote storage from the caller's scope.
-      const ParmVarDecl *Parm = AP.getAsPlaceholderParam();
-      if (!Parm && !AP.getAsPlaceholderThis())
+      const ValueDecl *Input = AP.getAsPlaceholderParam();
+      // A borrow-holding MEMBER of `this` is caller-visible too: what it points
+      // to belongs to the caller, not to this call, so reaching through one to
+      // invalidate is as visible as invalidating a parameter. Such a member's
+      // origin is seeded at entry with an Uninitialized loan rooted at its
+      // FieldDecl rather than with a $this placeholder, so keying only on the
+      // placeholders let a view free what it borrows -- a [[gsl::Pointer]] whose
+      // `[[clang::lifetime_non_invalidating]] void touch() { p->nuke(); }`
+      // verified clean, and the promise then hid the resulting use-after-free at
+      // every call site.
+      if (!Input)
+        Input = dyn_cast_if_present<FieldDecl>(AP.getAsUninitialized());
+      if (!Input && !AP.getAsPlaceholderThis())
         continue;
       if (!ReportedNonInvalidating.insert(MD).second)
         return; // one report per method is enough
       const Stmt *S = IOF->getInvalidationStmt();
       SemaHelper->reportNonInvalidatingViolation(
-          MD, Parm, S ? S->getBeginLoc() : SourceLocation());
+          MD, Input, S ? S->getBeginLoc() : SourceLocation());
       return;
     }
   }

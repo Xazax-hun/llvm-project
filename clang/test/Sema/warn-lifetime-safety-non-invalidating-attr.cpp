@@ -190,3 +190,42 @@ struct [[gsl::Owner]] Plain {
 struct [[gsl::Owner]] PlainDerived : Plain {
   int &at(int i) [[clang::lifetimebound]] override { return v[i]; }
 };
+
+//===----------------------------------------------------------------------===//
+// Invalidating what a borrow-holding MEMBER points to.
+//===----------------------------------------------------------------------===//
+
+// A view's members are borrows of caller-visible objects, so reaching through
+// one to invalidate is as caller-visible as invalidating a parameter. The
+// member's origin is seeded with an Uninitialized loan rooted at the FieldDecl
+// rather than with a $this placeholder, so keying the check only on the
+// placeholders let a view free what it borrows while verifying clean -- and the
+// promise then suppressed the assumed-invalidation at every call site.
+struct [[gsl::Owner]] Arena {
+  vector<int> v;
+  void nuke();
+};
+
+struct [[gsl::Pointer]] Handle {
+  Arena *p;
+  // expected-warning@+1 {{invalidates the object borrowed by member 'p', which it promises not to invalidate}}
+  [[clang::lifetime_non_invalidating]] void touch() {
+    p->nuke(); // expected-note {{invalidated here}}
+  }
+};
+
+// Negative: reading through the member keeps the promise.
+struct [[gsl::Pointer]] ReadingHandle {
+  Arena *p;
+  [[clang::lifetime_non_invalidating]] int peek() { return p->v[0]; }
+};
+
+// Negative: a local the call owns dies with the call, so no caller borrow can
+// point into it.
+struct [[gsl::Pointer]] LocalMutating {
+  Arena *p;
+  [[clang::lifetime_non_invalidating]] void churn() {
+    vector<int> local;
+    local.push_back(1);
+  }
+};

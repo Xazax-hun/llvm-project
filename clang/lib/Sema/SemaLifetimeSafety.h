@@ -439,14 +439,15 @@ public:
   }
 
   void reportNonInvalidatingViolation(const CXXMethodDecl *MD,
-                                      const ParmVarDecl *Parm,
+                                      const ValueDecl *Input,
                                       SourceLocation Loc) override {
     // Anchor at the attribute: that is the claim being contradicted, and it is
     // where the author must act. Point at the invalidating operation too.
     const auto *Attr = MD->getAttr<LifetimeNonInvalidatingAttr>();
     SourceLocation AttrLoc = Attr ? Attr->getLocation() : MD->getLocation();
+    unsigned Subject = !Input ? 0 : (isa<FieldDecl>(Input) ? 2 : 1);
     S.Diag(AttrLoc, diag::warn_lifetime_safety_non_invalidating_violation)
-        << (Parm ? 1 : 0) << Parm;
+        << Subject << Input;
     if (Loc.isValid())
       S.Diag(Loc, diag::note_lifetime_safety_invalidated_here);
   }

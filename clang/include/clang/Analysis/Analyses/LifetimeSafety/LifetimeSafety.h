@@ -182,10 +182,11 @@ public:
                                        unsigned Subject) {}
 
   // Reports a [[clang::lifetime_non_invalidating]] method whose body invalidates
-  // one of the function's inputs. `Parm` is the offending parameter, or null
-  // when the invalidated input is the implicit object parameter.
+  // one of the function's inputs. `Input` is the offending parameter, or the
+  // borrow-holding field whose pointee was invalidated, or null when the
+  // invalidated input is the implicit object parameter.
   virtual void reportNonInvalidatingViolation(const CXXMethodDecl *MD,
-                                              const ParmVarDecl *Parm,
+                                              const ValueDecl *Input,
                                               SourceLocation Loc) {}
 
   // Reports a member function definition that has [[clang::lifetimebound]] on

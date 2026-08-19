@@ -11139,7 +11139,8 @@ def warn_lifetime_safety_immortal_violation
 
 def warn_lifetime_safety_non_invalidating_violation
     : Warning<"'[[clang::lifetime_non_invalidating]]' method invalidates "
-              "%select{the implicit this parameter|parameter %1}0, which it "
+              "%select{the implicit this parameter|parameter %1|the object "
+              "borrowed by member %1}0, which it "
               "promises not to invalidate; the promise suppresses this "
               "operation at every call site, so a borrow the caller took "
               "beforehand is left silently dangling">,
