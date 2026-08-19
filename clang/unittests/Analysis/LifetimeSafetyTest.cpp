@@ -1179,7 +1179,10 @@ TEST_F(LifetimeAnalysisTest, LifetimeboundTemplateFunctionReturnRef) {
     }
   )");
   EXPECT_THAT(Origin("v1"), HasLoansTo({"a"}, "p1"));
-  EXPECT_THAT(Origin("v2"), HasLoansTo({}, "p2"));
+  // `Identity(v1)` returns a reference through a path the analysis does not model, so
+  // `v2` carries the Unknown-loan sentinel rather than an empty set -- deliberately, so
+  // that the borrow cannot be silently dropped at a join.
+  EXPECT_THAT(Origin("v2"), HasLoansTo({"Unknown"}, "p2"));
   EXPECT_THAT(Origin("v3"), HasLoansTo({"v2"}, "p2"));
 }
 
@@ -1204,8 +1207,11 @@ TEST_F(LifetimeAnalysisTest, LifetimeboundTemplateFunctionReturnVal) {
 
   EXPECT_THAT(Origin("v2"), HasLoansTo({"b"}, "p2"));
   EXPECT_THAT(Origin("v3"), HasLoansTo({"v2"}, "p2"));
-  // View temporary on RHS is lifetime-extended.
-  EXPECT_THAT(Origin("v4"), HasLoansTo({}, "p2"));
+  // The View temporary on the RHS is lifetime-extended by binding to `v4`, and its
+  // storage is a borrow root: `v4` holds a loan to the temporary, which expires with
+  // `v4`'s scope. It used to hold nothing at all, which is what let a use after that
+  // scope go unreported.
+  EXPECT_THAT(Origin("v4"), HasLoanToATemporary("p2"));
 }
 
 TEST_F(LifetimeAnalysisTest, LifetimeboundConversionOperator) {

@@ -1863,12 +1863,21 @@ void FactsGenerator::VisitMaterializeTemporaryExpr(
   OriginNode *RValMTENode = getRValueOrigins(MTE, MTENode);
   flow(RValMTENode, SubExprNode, /*Kill=*/true);
   OriginID OuterMTEID = MTENode->getOriginID();
-  if (MTE->getStorageDuration() == SD_FullExpression) {
-    // Issue a loan to MTE for the storage location represented by MTE.
-    const Loan *L = createLoan(FactMgr, MTE);
-    CurrentBlockFacts.push_back(
-        FactMgr.createFact<IssueFact>(L->getID(), OuterMTEID));
-  }
+  // A temporary's storage is a borrow root whatever its duration. Issuing the loan only
+  // for a full-expression temporary left a reference bound to a lifetime-extended one
+  // holding an EMPTY origin -- so no expiry could ever fire for it, and the `lost-loan`
+  // sentinel, which needs the origin to be entirely empty, was masked by any co-resident
+  // real loan. A conditional with a tracked borrow in its other arm was enough to hide a
+  // use-after-free completely.
+  //
+  // Where each kind expires: a full-expression temporary at the cleanup the CFG marks
+  // (handleFullExprCleanup); one extended by binding to a local reference with that
+  // reference's scope (handleLifetimeEnds, which finds it from the initializer); one
+  // extended to static or thread duration never, within this function -- its storage
+  // outlives every use here, which is exactly what the loan should say.
+  const Loan *L = createLoan(FactMgr, MTE);
+  CurrentBlockFacts.push_back(
+      FactMgr.createFact<IssueFact>(L->getID(), OuterMTEID));
 }
 
 void FactsGenerator::VisitLambdaExpr(const LambdaExpr *LE) {
@@ -2107,6 +2116,30 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
         FactMgr.createFact<UseFact>(AC.getDecl()->getEndLoc(), Node));
 }
 
+/// Collects the temporaries whose lifetime is extended to \p VD's scope.
+///
+/// Derived from the initializer rather than remembered when the temporary was visited, so
+/// it does not depend on the order the CFG's blocks happen to be walked in.
+static void collectExtendedTemporaries(
+    const VarDecl *VD,
+    llvm::SmallVectorImpl<const MaterializeTemporaryExpr *> &Out) {
+  const Expr *Init = VD->getInit();
+  if (!Init)
+    return;
+  llvm::SmallVector<const Stmt *, 8> Worklist{Init};
+  while (!Worklist.empty()) {
+    const Stmt *S = Worklist.pop_back_val();
+    if (!S)
+      continue;
+    if (const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(S))
+      if (MTE->getStorageDuration() == SD_Automatic &&
+          MTE->getExtendingDecl() == VD)
+        Out.push_back(MTE);
+    for (const Stmt *Child : S->children())
+      Worklist.push_back(Child);
+  }
+}
+
 void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   const VarDecl *LifetimeEndsVD = LifetimeEnds.getVarDecl();
   if (!LifetimeEndsVD)
@@ -2168,6 +2201,14 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
       AccessPath(LifetimeEndsVD), LifetimeEnds.getTriggerStmt()->getEndLoc(),
       ExpiredOID));
+  // A temporary lifetime-extended by binding to this variable dies here too, and its
+  // storage is a borrow root in its own right -- the variable's own AccessPath above
+  // describes the reference, not the object it was bound to.
+  llvm::SmallVector<const MaterializeTemporaryExpr *, 2> Extended;
+  collectExtendedTemporaries(LifetimeEndsVD, Extended);
+  for (const MaterializeTemporaryExpr *MTE : Extended)
+    CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
+        AccessPath(MTE), LifetimeEnds.getTriggerStmt()->getEndLoc()));
 }
 
 void FactsGenerator::handleCleanupFunction(

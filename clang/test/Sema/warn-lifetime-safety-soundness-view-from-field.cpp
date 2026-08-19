@@ -182,25 +182,31 @@ int arrayOfOwnersField() {
 
 // A borrow of an OWNER field requires the field to have stable storage. When the
 // base object is a temporary (`Holder{}.s`), the field access is an xvalue: the
-// owner subobject lives only as long as the temporary, and a lifetime-extended-
-// temporary reference does not give it borrowable storage. The borrow must NOT be
-// laundered into a tracked field-rooted loan (which would never expire); it stays
-// lost, surfacing as -Wlifetime-safety-lost-loan -- matching `const string& r =
-// string(...)` bound directly to a temporary.
+// owner subobject lives only as long as the temporary. The borrow must NOT be
+// laundered into a tracked FIELD-rooted loan, which would never expire.
+//
+// It is rooted at the temporary instead, which does expire -- with the reference that
+// extended it -- so this is reported precisely as a returned borrow of a temporary
+// rather than falling through to the -Wlifetime-safety-lost-loan sentinel, which is
+// where it used to land while the extended temporary had no loan at all.
 struct TempHolder {
   string s;
 };
 string_view viewOfTempSubobjectField() {
+  // The report anchors at the borrow's CREATION, with the return as a note.
+  // expected-warning@+1 {{stack memory associated with local temporary object is returned}}
   const string &r = TempHolder{}.s;
-  return r; // expected-warning {{lifetime safety cannot track}}
+  return r; // expected-note {{returned here}}
 }
 
 struct OuterTemp {
   TempHolder in;
 };
 string_view viewOfNestedTempSubobjectField() {
+  // The report anchors at the borrow's CREATION, with the return as a note.
+  // expected-warning@+1 {{stack memory associated with local temporary object is returned}}
   const string &r = OuterTemp{}.in.s;
-  return r; // expected-warning {{lifetime safety cannot track}}
+  return r; // expected-note {{returned here}}
 }
 
 // Negative: a field of a STABLE local object still gets a tracked field loan, so
