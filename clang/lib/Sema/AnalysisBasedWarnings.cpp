@@ -3656,8 +3656,9 @@ class DestructionOrderSafeBodyChecker : public DynamicRecursiveASTVisitor {
   /// is not dependent is reached twice, from two distinct AST nodes that share one
   /// source location.
   llvm::SmallPtrSet<const void *, 8> ReportedLocs;
-  /// Implicit or defaulted constructors already descended into, so a class that
-  /// reaches itself cannot loop.
+  /// Implicit or defaulted constructors already descended into FOR THE CURRENT
+  /// construction site, so a class that reaches itself cannot loop and no work inside one
+  /// site is repeated. Cleared when a fresh site's descent begins -- see checkConstruction.
   llvm::SmallPtrSet<const Decl *, 8> DescendedCtors;
   /// While descending through an implicit or defaulted constructor, the location of
   /// the construction the user actually wrote. Reports anchor there rather than at
@@ -3893,13 +3894,25 @@ public:
             << Subject << SubjectKind << Ctor;
       return;
     }
-    // Guard the descent only: a report is deduplicated by location instead, so a
-    // constructor reached from two places is still reported at each of them.
-    if (!DescendedCtors.insert(Ctor->getCanonicalDecl()).second)
-      return;
     SourceLocation SavedAnchor = DescentLoc;
-    if (!DescentLoc.isValid())
+    if (!DescentLoc.isValid()) {
+      // A fresh descent, for a construction the reader actually wrote. The memo below is
+      // scoped to one such site: within a site it stops a class that reaches itself from
+      // looping, and stops a repeated member type being walked twice, but it must not
+      // outlive the site.
+      //
+      // Remembering it for the whole body meant a constructor reached from two places was
+      // examined only at the first -- `W w1; W w2;` reported just `w1` -- and, worse, that
+      // a narrow `#pragma clang diagnostic ignored` region around the first construction
+      // silenced every later construction of that type in the same body, since the
+      // suppressed visit still populated the memo.
       DescentLoc = Loc;
+      DescendedCtors.clear();
+    }
+    if (!DescendedCtors.insert(Ctor->getCanonicalDecl()).second) {
+      DescentLoc = SavedAnchor;
+      return;
+    }
     // A default member initializer, which runs even when nothing else does.
     for (const FieldDecl *FD : Ctor->getParent()->fields())
       if (const Expr *Init = FD->getInClassInitializer())

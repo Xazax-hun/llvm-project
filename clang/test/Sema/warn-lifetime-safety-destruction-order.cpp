@@ -918,6 +918,43 @@ struct [[clang::destruction_order_safe]] MakesSafeInherited {
 };
 
 //===----------------------------------------------------------------------===//
+// The descent memo is scoped to one construction site.
+//===----------------------------------------------------------------------===//
+
+// Descending through an implicit constructor is guarded so that a class reaching itself
+// cannot loop, and so that a repeated member type is not walked twice. That guard used to
+// last for the whole body, which made a construction reached from two places examined only
+// at the first -- and, worse, made a suppressed visit still populate it, so a narrow
+// opt-out around one construction silenced every later construction of the same type.
+struct WrapsPeekerTwice {
+  Peeker p;
+};
+struct [[clang::destruction_order_safe]] MakesTwoOfTheSameType {
+  ~MakesTwoOfTheSameType() {
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    WrapsPeekerTwice first;
+    // Reported here too: two sites are two locations.
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    WrapsPeekerTwice second;
+    sink = (char)(first.p.c + second.p.c);
+  }
+};
+
+// An opt-out region must not reach past itself. The suppressed construction records nothing,
+// so the one after it is still examined.
+struct [[clang::destruction_order_safe]] OptsOutOfTheFirst {
+  ~OptsOutOfTheFirst() {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-destruction-order"
+    WrapsPeekerTwice suppressed; // no-warning: inside the opt-out
+#pragma clang diagnostic pop
+    // expected-warning@+1 {{is 'destruction_order_safe' but calls 'Peeker', which is not}}
+    WrapsPeekerTwice reported;
+    sink = (char)(suppressed.p.c + reported.p.c);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // A DEFAULT MEMBER INITIALIZER is code no type describes.
 //===----------------------------------------------------------------------===//
 
