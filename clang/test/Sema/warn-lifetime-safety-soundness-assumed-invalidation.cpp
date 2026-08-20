@@ -429,3 +429,27 @@ void discarded_const_guard_silent() {
   (void)ConstGuard{&v}; // no-warning
   (void)r;
 }
+
+// An ARRAY of guards destroys every element, so the element type decides the
+// hazard exactly as for a single guard. The array type has no CXXRecordDecl, so
+// testing it directly bailed out of the whole check and an array of guards was
+// silent while the byte-identical scalar reported. The origin tree already shares
+// one origin across an array's elements, so peeling the dimensions is all that is
+// needed.
+void array_of_guards() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  { Grower arr[1] = {Grower{&v}}; (void)arr; } // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// An array of guards that cannot mutate stays silent.
+void array_of_const_guards() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  { ConstGuard arr[1] = {ConstGuard{&v}}; (void)arr; } // no-warning
+  (void)r;
+}

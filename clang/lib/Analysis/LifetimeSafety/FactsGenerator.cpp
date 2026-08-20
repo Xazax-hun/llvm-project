@@ -2199,6 +2199,13 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
                                                      OriginNode *Node,
                                                      const Stmt *Trigger,
                                                      SourceLocation Loc) {
+  // Peel array dimensions. An array of guards destroys every element, and the
+  // origin tree already shares one origin across the elements -- so the element
+  // type is what decides the hazard, exactly as for a single guard. Without this
+  // the array type has no CXXRecordDecl and the whole check bailed out, so
+  // `Grower arr[1] = {Grower{&v}};` destroyed a guard with the caller's borrows
+  // live and reported nothing, while the scalar `Grower g{&v};` reported.
+  Ty = arrayElementType(Ty);
   const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
       isGslOwnerType(Ty) || !hasOrigins(Ty))
