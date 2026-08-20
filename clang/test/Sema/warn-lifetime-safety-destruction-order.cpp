@@ -1672,3 +1672,41 @@ struct [[clang::destruction_order_safe]] CallsOuterLambda {
     sink = peek_global(true); // expected-warning {{calls 'operator()', which is not}}
   }
 };
+
+//===----------------------------------------------------------------------===//
+// A STATIC data member reached through an object (`this->text`) names the same
+// variable as the qualified `Reader::text`, but is a MemberExpr rather than a
+// DeclRefExpr -- so the walk never saw it, and a destructor could read a static
+// object at shutdown with the promise unverified. Both the qualified and the
+// unqualified spellings are DeclRefExprs and were reported; only `this->` slipped.
+//===----------------------------------------------------------------------===//
+
+struct [[clang::destruction_order_safe]] ReadsStaticQualified {
+  static const std::string text;
+  // expected-warning@+1 {{references 'text', an object of static storage duration with a non-trivial destructor}}
+  ~ReadsStaticQualified() { sink = (int)ReadsStaticQualified::text.data()[0]; }
+};
+
+struct [[clang::destruction_order_safe]] ReadsStaticUnqualified {
+  static const std::string text;
+  // expected-warning@+1 {{references 'text', an object of static storage duration with a non-trivial destructor}}
+  ~ReadsStaticUnqualified() { sink = (int)text.data()[0]; }
+};
+
+struct [[clang::destruction_order_safe]] ReadsStaticThroughThis {
+  static const std::string text;
+  // expected-warning@+1 {{references 'text', an object of static storage duration with a non-trivial destructor}}
+  ~ReadsStaticThroughThis() { sink = (int)this->text.data()[0]; }
+};
+
+// Negatives: an ordinary member dies with the object, and a trivially
+// destructible static member has nothing that runs for it.
+struct [[clang::destruction_order_safe]] ReadsOwnMember {
+  std::string own;
+  ~ReadsOwnMember() { sink = (int)this->own.data()[0]; } // no-warning
+};
+
+struct [[clang::destruction_order_safe]] ReadsTrivialStatic {
+  static const int n;
+  ~ReadsTrivialStatic() { sink = this->n; } // no-warning
+};

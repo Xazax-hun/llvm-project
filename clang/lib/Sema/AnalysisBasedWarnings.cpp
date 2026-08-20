@@ -3702,20 +3702,36 @@ public:
   bool TraverseStaticAssertDecl(StaticAssertDecl *) override { return true; }
 
   bool VisitDeclRefExpr(DeclRefExpr *DRE) override {
-    const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+    reportIfStaticStorage(dyn_cast<VarDecl>(DRE->getDecl()), DRE->getExprLoc());
+    return true;
+  }
+
+  /// A STATIC data member reached through an object (`this->text`) names the same
+  /// variable as the qualified `Reader::text`, but is a MemberExpr rather than a
+  /// DeclRefExpr -- so the walk never saw it, and a destructor could read a
+  /// static object at shutdown with the promise unverified. Both qualified and
+  /// unqualified spellings are DeclRefExprs and were reported; only the
+  /// `this->` one slipped.
+  bool VisitMemberExpr(MemberExpr *ME) override {
+    reportIfStaticStorage(dyn_cast<VarDecl>(ME->getMemberDecl()),
+                          ME->getExprLoc());
+    return true;
+  }
+
+  /// Reports a reference to an object of static storage duration that is actually
+  /// destroyed, whatever expression spelled it.
+  void reportIfStaticStorage(const VarDecl *VD, SourceLocation Loc) {
     if (!VD || !VD->hasGlobalStorage())
-      return true;
+      return;
     // Referencing a trivially destructible object of static storage duration is
     // fine: nothing runs for it, so its storage outlives every destructor. Only
     // an object that is actually destroyed can be observed after the fact.
     if (VD->getType().isDestructedType() == QualType::DK_none)
-      return true;
-    if (!firstReportAt(DRE->getExprLoc()))
-      return true;
-    S.Diag(DRE->getExprLoc(),
-           diag::warn_lifetime_safety_destruction_order_global_ref)
+      return;
+    if (!firstReportAt(Loc))
+      return;
+    S.Diag(Loc, diag::warn_lifetime_safety_destruction_order_global_ref)
         << Subject << SubjectKind << VD;
-    return true;
   }
 
   bool VisitCallExpr(CallExpr *CE) override {
