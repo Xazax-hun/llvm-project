@@ -518,6 +518,7 @@ enables only the high-confidence subset of these checks.
     *   ``-Wlifetime-safety-use-after-scope-moved``: Same as ``-Wlifetime-safety-use-after-scope`` but for cases where the variable may have been moved from before its destruction.
     *   ``-Wlifetime-safety-return-stack-addr-moved``: Same as ``-Wlifetime-safety-return-stack-addr`` but for cases where the variable may have been moved from.
     *   ``-Wlifetime-safety-dangling-field-moved``: Same as ``-Wlifetime-safety-dangling-field`` but for cases where the variable may have been moved from.
+    *   ``-Wlifetime-safety-dangling-global-moved``: Same as ``-Wlifetime-safety-dangling-global`` but for cases where the variable may have been moved from.
     *   ``-Wlifetime-safety-invalidation``: Warns when a pointer, reference, iterator or view is used after an operation that may invalidate it, such as container mutation or explicit destruction/deallocation (e.g., ``std::unique_ptr::reset``, ``std::destroy_at``, a ``delete`` expression, or a ``free`` / ``realloc`` / ``reallocf`` / ``cfree`` / ``::operator delete`` / ``__builtin_operator_delete`` call) (Experimental).
 
 *   ``-Wlifetime-safety-suggestions``: Enables suggestions to add ``[[clang::lifetimebound]]`` to function parameters and ``this`` parameters.
