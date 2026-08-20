@@ -2056,21 +2056,30 @@ public:
         if (!HasPreciseAnchor && !BorrowsThis)
           continue;
         bool Aliases;
-        if (BorrowsThis) {
+        if (BorrowsThis && BAP.getElements().empty()) {
           // A borrow of the whole object: only a mutation of that object (or of
           // a base subobject of it) aliases it. Deciding this by loan identity
           // would over-match disjoint fields, whose loans widen to the same
           // `$this` root.
           Aliases = thisBorrowAliasesMutationOf(BorrowsThis, MutatedRecord);
         } else {
+          // Otherwise the borrow names specific storage -- including a
+          // `$this`-rooted path with elements (`$this.items.*`), which the
+          // coarse record test above threw away. That is the observer shape:
+          // `items[0]->unregister(items)` borrows `$this.items.*.*` as the
+          // receiver while passing `$this.items` mutably, and `Registry` is
+          // neither the mutated `vector` nor derived from it, so the record
+          // test said no. The path comparison says yes and stays precise: a
+          // disjoint sibling `$this.other` diverges rather than matching.
+          //
           // The borrow aliases the mutated argument if it borrows the same
           // storage, OR a SUBOBJECT of it: mutating an object (`a` / the
           // receiver `this`) may reallocate any owner field it (transitively)
           // contains, dangling a field-rooted borrow into it. So `f(a, a.b)` /
           // `obj.m(this->buf)` overlap, while disjoint subobjects (`f(a.b,
-          // a.c)`) do not -- `c` is not a member of `b`'s type. (Field loans are
-          // instance-insensitive: the same accepted over-approximation as the
-          // invalidation check.)
+          // a.c)`) do not -- `c` is not a member of `b`'s type. (Field loans
+          // are instance-insensitive: the same accepted over-approximation as
+          // the invalidation check.)
           Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
           for (LoanID ML : Mutating) {
             if (Aliases)

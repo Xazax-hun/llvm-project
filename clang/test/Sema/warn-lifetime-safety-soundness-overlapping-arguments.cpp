@@ -175,3 +175,40 @@ void union_silent() {
   U u{Viewer{s}}; // no-warning
   (void)u;
 }
+
+//===----------------------------------------------------------------------===//
+// Observer self-unregistration: the receiver is a borrow INTO the container that
+// is also passed mutably, so the callee's mutation destroys the object whose
+// method is running.
+//
+// A `$this`-rooted borrow was decided by a coarse record-identity test -- does the
+// borrowed object's class equal, or derive from, the mutated argument's record.
+// Here the borrow is `$this.items.*.*` (the receiver) and the mutation is
+// `$this.items`, and `Registry` is neither the mutated `vector` nor derived from
+// it, so that test said no. The coarse test is only needed for a borrow of the
+// WHOLE object, where every field's loan shares the same `$this` root and a path
+// comparison would match them all; a `$this`-rooted path with elements names
+// specific storage, so the precise comparison decides it and stays precise.
+//===----------------------------------------------------------------------===//
+
+struct Observer {
+  std::string name;
+  void unregister(vector<std::unique_ptr<Observer>> &reg [[clang::noescape]]);
+};
+
+struct Subject {
+  vector<std::unique_ptr<Observer>> observers;
+  vector<std::unique_ptr<Observer>> others;
+
+  void fire() {
+    // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+    observers[0]->unregister(observers); // expected-note {{assumed to be invalidated by this operation}}
+  }
+
+  // A DISJOINT sibling container is not the storage the receiver borrows, so the
+  // path comparison diverges and this stays silent -- which is what the coarse
+  // record test was protecting against.
+  void fire_disjoint() {
+    observers[0]->unregister(others); // no-warning
+  }
+};
