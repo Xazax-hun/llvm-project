@@ -2763,7 +2763,25 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
       return isGslOwnerType(RecvTy) || recordHasGslOwnerField(RecvTy);
     }
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
-    return PVD && paramMayMutateOwner(PVD->getType());
+    if (!PVD)
+      return false;
+    if (paramMayMutateOwner(PVD->getType()))
+      return true;
+    // The parameter's STATIC type does not always reveal the owner the callee
+    // can reallocate. Upcasting the argument to an abstract interface erases it
+    // -- `IResettable` declares no data members, so nothing looks mutable,
+    // while a virtual call on it dispatches into the derived object and
+    // reallocates a std::string there. Passing the derived type instead was
+    // reported, so one upcast silenced the same bug.
+    //
+    // So any non-const pointer/reference to a class counts here. That costs
+    // nothing in precision: this only decides whether to EMIT the overlap fact,
+    // and the checker confirms the hazard from the loans the two arguments
+    // actually carry, reporting only when they genuinely alias. This mirrors
+    // the loan-confirmed arm the assumed-invalidation path already uses for
+    // exactly this shape (OwnerLoanGate::DenotedOwner).
+    return paramCanMutateThrough(PVD->getType()) &&
+           PVD->getType()->getPointeeType()->getAsCXXRecordDecl() != nullptr;
   };
   emitArgumentOverlap(Call, Args, IsMutatingArg);
 }
