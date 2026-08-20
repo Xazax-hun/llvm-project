@@ -3169,7 +3169,9 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       // argument) so a capture into a base-subobject view is keyed on the
       // derived class's fields too.
       if (CapturingArgIdx == LifetimeCaptureByAttr::This) {
-        if (OriginNode *Recv = getOriginNode(*Args[0]->IgnoreImpCasts()))
+        // Same notion as the capture destination above, so the two cannot
+        // disagree about which object the receiver designates.
+        if (OriginNode *Recv = getOriginNode(*peelDerivedToBase(Args[0])))
           CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
               Args[I], CapturedOriginNode->getOriginID(), Recv->getOriginID()));
         // The capture is an escape *out of the analyzed function* only when the
