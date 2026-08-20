@@ -1555,6 +1555,24 @@ void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
     return;
   }
   if (BO->isCompoundAssignmentOp()) {
+    // A compound assignment reads AND writes its left operand, and both happen
+    // AFTER the right operand is evaluated -- so if the RHS invalidates what
+    // the LHS borrows, the write goes through a dangling borrow. The LHS's own
+    // use was registered when it was evaluated, which is before the RHS, so
+    // nothing kept the borrow live across the invalidation:
+    //
+    //   int *p = &v[0];
+    //   p[0] += v.emplace_back(5);   // emplace_back reallocates, then p[0] is
+    //   written
+    //
+    // The plain-assignment spelling reported this, but only because C++17
+    // sequences its RHS before its LHS, putting the LHS use after the
+    // invalidation by luck of the ordering. Register the read-modify-write
+    // here, at the compound assignment's own program point, so both spellings
+    // behave alike.
+    if (OriginNode *L = getOriginNode(*BO->getLHS()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(BO->getLHS(), L));
+    handleUse(BO->getRHS());
     // A pointer compound additive assignment (`p += n` / `p -= n`) keeps the
     // pointer aimed into the same allocation, so its result (an lvalue
     // referring to the LHS) carries the LHS pointer's loans. Propagate them so
