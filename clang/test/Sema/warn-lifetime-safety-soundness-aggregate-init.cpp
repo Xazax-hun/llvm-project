@@ -15,42 +15,46 @@ struct [[gsl::Pointer]] View {
 };
 
 struct [[gsl::Pointer]] Holder {
-  View v; // expected-note 4 {{this field dangles}}
+  // The reads below (`v.p[0]`) register a use of the member's borrow, so these
+  // are reported as a use-after-scope / use-after-free at the read rather than
+  // only as "escapes to a field that will dangle": the analysis can now name the
+  // borrow, the destruction, and the later use.
+  View v;
 
   // Braced aggregate init storing a borrow of a local into the member view,
   // then using the view after the local dies.
   char braced() {
     {
       char local[64];
-      v = View{local, 64}; // expected-warning {{escapes to the field 'v' which will dangle}}
-    }
-    return v.p[0];
+      v = View{local, 64}; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return v.p[0]; // expected-note {{later used here}}
   }
 
   // Designated initializer form.
   char designated() {
     {
       char local[64];
-      v = View{.p = local, .n = 64}; // expected-warning {{escapes to the field 'v' which will dangle}}
-    }
-    return v.p[0];
+      v = View{.p = local, .n = 64}; // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return v.p[0]; // expected-note {{later used here}}
   }
 
   // C++20 parenthesized aggregate init form.
   char paren() {
     {
       char local[64];
-      v = View(local, 64); // expected-warning {{escapes to the field 'v' which will dangle}}
-    }
-    return v.p[0];
+      v = View(local, 64); // expected-warning {{local variable 'local' does not live long enough}}
+    } // expected-note {{destroyed here}}
+    return v.p[0]; // expected-note {{later used here}}
   }
 
-  // Heap source freed through the member: invalidation.
+  // Heap source freed through the member: now a use-after-free at the read.
   char heap() {
-    const char *h = new char('A'); // expected-warning {{is later invalidated}}
+    const char *h = new char('A'); // expected-warning {{allocated object does not live long enough}}
     v = View{h, 1};
     delete h;      // expected-note {{freed here}}
-    return v.p[0];
+    return v.p[0]; // expected-note {{later used here}}
   }
 };
 

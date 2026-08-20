@@ -2011,6 +2011,31 @@ void FactsGenerator::VisitArraySubscriptExpr(const ArraySubscriptExpr *ASE) {
   assert(Src && "Base of array subscript should have origins");
   CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
       Dst->getOriginID(), Src->getOriginID(), /*Kill=*/true));
+  // Subscripting reads the BASE in order to follow it, exactly as a dereference
+  // does -- including for a write through the subscript (`p[i] = x`), where the
+  // element is overwritten but `p` itself is still read. Registering that read
+  // here, at the subscript's own program point, is what puts it after the
+  // index: the index can invalidate what the base borrows, and then the base is
+  // used anyway.
+  //
+  //   int *p = new int(7);
+  //   sink = p[(delete p, 0)];   // the index frees p, then p is read
+  //
+  // Nothing modelled a use of the base at all, so the borrow was not live at
+  // the deallocation and this went unreported -- while the dereference spelling
+  // `*(delete p, p)` was caught.
+  //
+  // Recorded as an IMPLICIT use. The read is part of the subscript rather than
+  // a use the author wrote separately, and the base carries the same loans as
+  // the object already being reported, so an explicit use would double-report
+  // every ordinary `sv.data()[0]` under the lost-loan and borrow-from-global
+  // checks (both of which skip implicit uses). Expiry, invalidation and
+  // use-after-free all have an implicit-use reporting path, which is what this
+  // needs.
+  if (OriginNode *BaseNode =
+          getRValueOrigins(ASE->getBase(), getOriginNode(*ASE->getBase())))
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<UseFact>(ASE->getExprLoc(), BaseNode));
 }
 
 bool FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
