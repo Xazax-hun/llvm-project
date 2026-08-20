@@ -453,3 +453,37 @@ void array_of_const_guards() {
   { ConstGuard arr[1] = {ConstGuard{&v}}; (void)arr; } // no-warning
   (void)r;
 }
+
+// Destroying a LAMBDA closure runs every capture's destructor, so an init-capture
+// of a guard reallocates the borrowed owner when the closure dies. A closure is
+// neither a pointer/reference nor a gsl::Pointer, so the mutation test said no;
+// it is also exempt from the unknown-ownership ban (a lambda value is modeled
+// directly) and carries no annotation, so nothing else covered it -- while the
+// same guard held by an annotated wrapper, or by a plain struct, was reported.
+void guard_captured_by_lambda() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  { auto f = [g = Grower{&v}] {}; (void)f; } // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// A by-value capture of an OWNER is a copy, so destroying it invalidates no borrow
+// of the original.
+void owner_captured_by_value() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  { auto f = [w = v] {}; (void)f; } // no-warning
+  (void)r;
+}
+
+// A capture that cannot mutate stays silent too.
+void const_guard_captured_by_lambda() {
+  vector<int> v;
+  v.push_back(42);
+  int &r = v[0];
+  { auto f = [g = ConstGuard{&v}] {}; (void)f; } // no-warning
+  (void)r;
+}

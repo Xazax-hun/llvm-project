@@ -2175,26 +2175,57 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
 
 /// Models the destruction of an object that may hold a borrow.
 ///
-/// Shared by every way an object can be destroyed, because the hazard does not depend on
-/// how: a scope ending, a temporary's full-expression cleanup, or an enclosing object's
-/// destructor running for a member. Modelling it only for a named local meant an unnamed
-/// guard -- `(void)Grower{&v}.vec;` -- and a guard held as a MEMBER of another object were
-/// both silent, while the byte-identical named local was reported.
+/// Shared by every way an object can be destroyed, because the hazard does not
+/// depend on how: a scope ending, a temporary's full-expression cleanup, or an
+/// enclosing object's destructor running for a member. Modelling it only for a
+/// named local meant an unnamed guard -- `(void)Grower{&v}.vec;` -- and a guard
+/// held as a MEMBER of another object were both silent, while the
+/// byte-identical named local was reported.
 ///
-/// A non-trivial destructor may READ a borrow the object holds (a [[gsl::Pointer]] whose
-/// `~T()` dereferences its captured view), and the analysis is intra-procedural and cannot
-/// see that body -- so model the destruction as a use, keeping the borrow live to this
-/// point. Owners are excluded: destroying one frees its own storage, which the expiry
-/// already models, rather than dereferencing a borrow into another object.
+/// A non-trivial destructor may READ a borrow the object holds (a
+/// [[gsl::Pointer]] whose
+/// `~T()` dereferences its captured view), and the analysis is intra-procedural
+/// and cannot see that body -- so model the destruction as a use, keeping the
+/// borrow live to this point. Owners are excluded: destroying one frees its own
+/// storage, which the expiry already models, rather than dereferencing a borrow
+/// into another object.
 ///
-/// It may also MUTATE the owner it captured -- `~Trigger() { o->grow(); }` reallocates --
-/// which the analysis equally cannot see. Treat that as an assumed invalidation of the
-/// borrows the object carries on its captured owner, so a view into that owner living past
-/// the guard is reported while one used only during the guard's lifetime is not. Gated on
-/// paramMayMutateOwner, the same test used for call arguments, so a guard aliasing only a
-/// const owner is not flagged. A gsl::Pointer is a leaf in the origin tree, so the captured
-/// borrow sits on the object's own origin; invalidate that and its whole pointee chain (the
-/// latter for a nested wrapper reaching the owner through a by-value gsl::Pointer member).
+/// It may also MUTATE the owner it captured -- `~Trigger() { o->grow(); }`
+/// reallocates -- which the analysis equally cannot see. Treat that as an
+/// assumed invalidation of the borrows the object carries on its captured
+/// owner, so a view into that owner living past the guard is reported while one
+/// used only during the guard's lifetime is not. Gated on paramMayMutateOwner,
+/// the same test used for call arguments, so a guard aliasing only a const
+/// owner is not flagged. A gsl::Pointer is a leaf in the origin tree, so the
+/// captured borrow sits on the object's own origin; invalidate that and its
+/// whole pointee chain (the latter for a nested wrapper reaching the owner
+/// through a by-value gsl::Pointer member). Returns true if destroying an
+/// object of type `PT` runs a destructor that may reallocate an owner the
+/// object only ALIASES, so borrows into that owner die with it.
+/// `paramMayMutateOwner` answers this for a pointer/reference and for a
+/// gsl::Pointer wrapper; a LAMBDA closure is neither, yet destroying one runs
+/// every capture's destructor -- so an init-capture of a guard
+/// (`[g = Grower{&v}]{}`) reallocates the borrowed owner when the closure dies.
+/// A closure is exempt from the unknown-ownership ban (a lambda value is
+/// modeled directly), and it carries no annotation, so nothing else covered it
+/// while the same guard held by an annotated wrapper or a plain struct was
+/// reported.
+///
+/// Asking `paramMayMutateOwner` of each capture is what keeps a by-value
+/// capture of an OWNER silent: that capture is a copy, and destroying a copy
+/// invalidates no borrow of the original.
+static bool destructionMayMutateAliasedOwner(QualType PT) {
+  if (paramMayMutateOwner(PT))
+    return true;
+  const CXXRecordDecl *RD = PT->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition() || !RD->isLambda())
+    return false;
+  for (const FieldDecl *F : RD->fields())
+    if (paramMayMutateOwner(arrayElementType(F->getType())))
+      return true;
+  return false;
+}
+
 void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
                                                      OriginNode *Node,
                                                      const Stmt *Trigger,
@@ -2211,7 +2242,7 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
       isGslOwnerType(Ty) || !hasOrigins(Ty))
     return;
   CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Loc, Node));
-  if (!paramMayMutateOwner(Ty))
+  if (!destructionMayMutateAliasedOwner(Ty))
     return;
   auto invalidate = [&](OriginID OID) {
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
