@@ -2362,6 +2362,13 @@ def warn_lifetime_safety_override_of_non_invalidating : Warning<
   "invalidate anything, so a borrow the caller took beforehand would be left "
   "silently dangling by this override">,
   InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
+def warn_lifetime_safety_non_invalidating_unverifiable : Warning<
+  "'[[clang::lifetime_non_invalidating]]' on this %select{defaulted|declared}0 "
+  "method cannot be verified: the promise suppresses invalidation at every call "
+  "site, but there is no body in this translation unit to check it against, and "
+  "the type owns reallocatable storage this method may free -- leaving a "
+  "caller's borrow silently dangling. Write the body here, or drop the attribute">,
+  InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
 def warn_lifetime_safety_unsafe_static_destruction : Warning<
   "%select{variable|static data member|lifetime-extended temporary}0 of static "
   "storage duration has type %1, "

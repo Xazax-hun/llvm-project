@@ -229,3 +229,70 @@ struct [[gsl::Pointer]] LocalMutating {
     local.push_back(1);
   }
 };
+
+//===----------------------------------------------------------------------===//
+// The promise is refused where no body exists to verify it against. The
+// attribute suppresses invalidation at every call site, so an unverifiable
+// promise is a lie the analysis cannot catch any other way.
+//===----------------------------------------------------------------------===//
+
+// A defaulted copy-assignment of an owner-holding type: the implicit body
+// assigns the owner member, freeing the buffer a caller's borrow points at.
+struct [[gsl::Owner]] DefaultedAssign {
+  vector<int> v;
+  [[clang::lifetime_non_invalidating]] DefaultedAssign &
+  operator=(const DefaultedAssign &) = default; // expected-warning {{cannot be verified}}
+};
+
+struct [[gsl::Owner]] DefaultedMove {
+  vector<int> v;
+  [[clang::lifetime_non_invalidating]] DefaultedMove &
+  operator=(DefaultedMove &&) = default; // expected-warning {{cannot be verified}}
+};
+
+struct [[gsl::Owner]] DefaultedDtor {
+  vector<int> v;
+  // expected-warning@+1 {{cannot be verified}}
+  [[clang::lifetime_non_invalidating]] ~DefaultedDtor() = default;
+};
+
+// Defaulted OUT OF LINE: the in-class declaration looks ordinary, so the
+// definition is what has to be asked.
+struct [[gsl::Owner]] DefaultedOutOfLine {
+  vector<int> v;
+  [[clang::lifetime_non_invalidating]] DefaultedOutOfLine &
+  operator=(const DefaultedOutOfLine &); // expected-warning {{cannot be verified}}
+};
+DefaultedOutOfLine &
+DefaultedOutOfLine::operator=(const DefaultedOutOfLine &) = default;
+
+// Declared here, defined in ANOTHER translation unit: nothing to verify.
+struct [[gsl::Owner]] DefinedElsewhere {
+  vector<int> v;
+  // expected-warning@+1 {{cannot be verified}}
+  [[clang::lifetime_non_invalidating]] void grow();
+};
+
+// Negatives.
+
+// A const method cannot reallocate, so the promise holds trivially -- even with
+// no body here to check.
+struct [[gsl::Owner]] ConstDeclaredOnly {
+  vector<int> v;
+  [[clang::lifetime_non_invalidating]] bool empty() const; // no-warning
+};
+
+// A type owning nothing reallocatable has nothing to free.
+struct [[gsl::Owner]] NoOwnerMember {
+  int n;
+  [[clang::lifetime_non_invalidating]] NoOwnerMember &
+  operator=(const NoOwnerMember &) = default; // no-warning
+};
+
+// A real body written out of line is perfectly verifiable -- and is verified:
+// this one is truthful, so it stays clean.
+struct [[gsl::Owner]] TruthfulOutOfLine {
+  vector<int> v;
+  [[clang::lifetime_non_invalidating]] void touch(); // no-warning
+};
+void TruthfulOutOfLine::touch() {}

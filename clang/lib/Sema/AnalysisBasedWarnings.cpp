@@ -4063,6 +4063,67 @@ public:
 };
 } // namespace
 
+/// Refuses a '[[clang::lifetime_non_invalidating]]' promise the body verifier
+/// can never check.
+///
+/// The attribute suppresses the assumed-invalidation fact at every call site,
+/// so nothing but that verifier stands between an untrue promise and a silently
+/// dangling borrow in the caller -- and the verifier walks a BODY. A method
+/// with no body in this translation unit is therefore accepted for free. A
+/// defaulted copy/move assignment of a type that owns reallocatable storage is
+/// exactly such a lie: its implicit body assigns the owner member, freeing the
+/// old buffer a caller's borrow may point at. Deleting the attribute makes the
+/// same TU report the invalidation, which is the shape worth refusing -- an
+/// annotation that REMOVES a diagnostic and verifies nothing in exchange.
+///
+/// A const method cannot reallocate, and a type owning nothing reallocatable
+/// has nothing to free; both keep the promise trivially and are left alone.
+/// Runs at TU end rather than on class completion because a body written out of
+/// line is perfectly verifiable, and at class completion it has not been parsed
+/// yet.
+static void
+LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
+                                              TranslationUnitDecl *TU) {
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  if (Diags.isIgnored(diag::warn_lifetime_safety_non_invalidating_unverifiable,
+                      SourceLocation()))
+    return;
+  llvm::TimeTraceScope TimeProfile("LifetimeSafetyNonInvalidatingAvailability");
+
+  struct Walker : DynamicRecursiveASTVisitor {
+    Sema &S;
+    explicit Walker(Sema &S) : S(S) {
+      ShouldVisitTemplateInstantiations = true;
+      ShouldVisitImplicitCode = false;
+    }
+
+    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
+      if (RD != RD->getDefinition() || RD->isDependentType())
+        return true;
+      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+      if (!lifetimes::recordContainsMutableOwner(RD, Visited))
+        return true;
+      for (const CXXMethodDecl *M : RD->methods()) {
+        if (!M->hasAttr<LifetimeNonInvalidatingAttr>() || M->isConst())
+          continue;
+        // A body anywhere in this TU is what the verifier needs. Ask the
+        // DEFINITION, not this declaration: `= default` written out of line
+        // leaves the in-class declaration looking like an ordinary one, and a
+        // defaulted method is "defined" while having no body to walk.
+        const FunctionDecl *Def = nullptr;
+        if (M->isDefined(Def) && Def && !Def->isDefaulted())
+          continue;
+        S.Diag(M->getLocation(),
+               diag::warn_lifetime_safety_non_invalidating_unverifiable)
+            << ((Def && Def->isDefaulted()) || M->isDefaulted() ? 0 : 1)
+            << M->getSourceRange();
+      }
+      return true;
+    }
+  };
+  Walker(S).TraverseDecl(TU);
+}
+
 /// Enforces static destruction order safety across the TU.
 ///
 /// Two rules, checked together because the second is what makes the first
@@ -4472,6 +4533,7 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
   if (S.getLangOpts().CPlusPlus) {
     LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
     LifetimeSafetyDestructionOrderAnalysis(S, TU);
+    LifetimeSafetyNonInvalidatingBodyAvailability(S, TU);
   }
 }
 
