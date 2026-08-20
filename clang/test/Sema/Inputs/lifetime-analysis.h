@@ -115,6 +115,7 @@ struct vector {
 	vector(InputIterator first, InputIterator __last);
 
   T& operator[](unsigned);
+  const T& operator[](unsigned) const;
 
   T &  at(int n) &;
   T && at(int n) &&;
@@ -272,8 +273,12 @@ struct unique_ptr {
   void reset();
   ~unique_ptr();
   T* release();
-  T &operator*();
-  T *operator->();
+  // const-qualified, as in libc++: `const` applies to the unique_ptr, not to
+  // what it owns, so a const unique_ptr still hands out mutable access to its
+  // pointee. Modelling these as non-const made a const unique_ptr
+  // undereferenceable and hid that distinction.
+  T &operator*() const;
+  T *operator->() const;
   T *get() const;
 };
 

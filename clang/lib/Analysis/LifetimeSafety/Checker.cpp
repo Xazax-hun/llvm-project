@@ -1568,7 +1568,8 @@ public:
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
-      if (GlobalTy.isConstQualified()) {
+      if (GlobalTy.isConstQualified() &&
+          !constStillExposesMutableOwner(GlobalTy)) {
         // A const global owner cannot be mutated, so it has no aliasing hazard.
         // But its buffer is still freed by its (non-trivial) destructor at
         // static destruction, and the destruction order across translation units
@@ -1723,14 +1724,29 @@ public:
     return nullptr;
   }
 
-  /// True if `VD` is a non-const global/static variable that is, or transitively
+  /// True if `const` on an object of type `GlobalTy` does NOT protect the owner
+  /// reachable through it, so the object is still a mutable-owner global.
+  ///
+  /// `const` applies to the object, not to what it owns through an indirection.
+  /// `const std::unique_ptr<std::vector<int>>` still hands out a non-const
+  /// `std::vector<int>*` from its const `operator->`, so `g->push_back(7)`
+  /// compiles and reallocates the vector a caller may hold a borrow into --
+  /// while `const std::vector<int>` genuinely cannot be mutated. Treating the
+  /// two alike let one `const` silence the rule for every owning smart pointer.
+  bool constStillExposesMutableOwner(QualType GlobalTy) {
+    return pointsToMutableOwner(GlobalTy);
+  }
+
+  /// True if `VD` is a global/static variable that is, or transitively
   /// contains, a mutable owner -- the subject of the borrow-from-mutable-global
-  /// rule (array dimensions peeled; a const element/object is excluded).
+  /// rule (array dimensions peeled). A `const` object is excluded only when
+  /// `const` really does protect what it owns (see
+  /// constStillExposesMutableOwner).
   bool isMutableOwnerGlobal(const VarDecl *VD) {
     if (!VD || !VD->hasGlobalStorage())
       return false;
     QualType GlobalTy = AST.getBaseElementType(VD->getType());
-    if (GlobalTy.isConstQualified())
+    if (GlobalTy.isConstQualified() && !constStillExposesMutableOwner(GlobalTy))
       return false;
     if (isGslOwnerType(GlobalTy))
       return true;
