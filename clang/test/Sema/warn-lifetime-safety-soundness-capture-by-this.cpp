@@ -34,3 +34,51 @@ void captured_outlives_use() {
   const char *p = l.last.data(); // no-warning
   (void)p;
 }
+
+//===----------------------------------------------------------------------===//
+// A capture destination has to name the object that will hold the borrow. An
+// inherited method is called on the derived object through an implicit
+// derived-to-base conversion, whose own origin is a fresh node disconnected from
+// that object -- so the captured borrow flowed into a throwaway origin and the
+// object never received it. The identical call on a `Base` object was reported,
+// so the conversion alone decided whether the capture was modelled.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer]] CapBase {
+  string_view sv;
+  void set(string_view s [[clang::lifetime_capture_by(this)]]) { sv = s; }
+};
+
+struct [[gsl::Pointer]] CapDerived : CapBase {};
+
+volatile char csink;
+
+// The control: a Base receiver needs no conversion, and was always reported.
+void capture_into_base() {
+  CapBase b{};
+  {
+    string t;
+    b.set(t); // expected-warning {{local variable 't' does not live long enough}}
+  }            // expected-note {{destroyed here}}
+  csink = b.sv.data()[0]; // expected-note {{later used here}}
+}
+
+// The same call on a derived object, reached through the implicit conversion.
+void capture_into_derived_through_base() {
+  CapDerived d{};
+  {
+    string t;
+    d.set(t); // expected-warning {{local variable 't' does not live long enough}}
+  }            // expected-note {{destroyed here}}
+  csink = d.sv.data()[0]; // expected-note {{later used here}}
+}
+
+// A captured borrow that OUTLIVES the object is not a dangle.
+void capture_outlives_object() {
+  string keep;
+  {
+    CapDerived d{};
+    d.set(keep); // no-warning
+    csink = d.sv.data()[0];
+  }
+}

@@ -3079,6 +3079,28 @@ void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
   });
 }
 
+/// Peels implicit derived-to-base conversions (through parens) from a capturer
+/// expression, recovering the most-derived object.
+///
+/// A capture destination has to name the object that will hold the borrow. A
+/// method inherited from a base is called on the derived object through an
+/// implicit derived-to-base conversion, and the conversion's own origin is a
+/// fresh node disconnected from the derived object -- so the captured borrow
+/// flowed into a throwaway origin and the object never received it.
+/// `d.set(tmp)` on an inherited `set` was silent where the identical call on a
+/// `Base` object was reported. Only these conversions are peeled: any other
+/// cast may genuinely change what the expression designates.
+static const Expr *peelDerivedToBase(const Expr *E) {
+  while (true) {
+    E = E->IgnoreParens();
+    const auto *ICE = dyn_cast<ImplicitCastExpr>(E);
+    if (!ICE || (ICE->getCastKind() != CK_DerivedToBase &&
+                 ICE->getCastKind() != CK_UncheckedDerivedToBase))
+      return E;
+    E = ICE->getSubExpr();
+  }
+}
+
 void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
                                              ArrayRef<const Expr *> Args) {
   if (Args.empty())
@@ -3122,6 +3144,10 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       const Expr *CapturedByArg = Args[CapturingArgIdx];
       assert(CapturedByArg && "Capturer expression must be valid");
 
+      // Name the most-derived object: an inherited method is called through an
+      // implicit derived-to-base conversion whose own origin is disconnected
+      // from the object, so capturing into it dropped the borrow.
+      CapturedByArg = peelDerivedToBase(CapturedByArg);
       OriginNode *CapturingOriginNode = getOriginNode(*CapturedByArg);
       OriginNode *Dest = getRValueOrigins(CapturedByArg, CapturingOriginNode);
       if (!Dest)
