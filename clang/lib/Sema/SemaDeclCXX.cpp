@@ -7356,48 +7356,6 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
     }
   }
 
-  // Lifetime safety (safe programming model): the analysis models only a single
-  // level of indirection. A data member whose type is a multi-level indirection
-  // -- a pointer/reference to a pointer/reference/view (e.g. `T**`, `T*&`, or a
-  // reference to a [[gsl::Pointer]]) -- cannot be represented: a borrow flowing
-  // through such a member lands on a level the object's origin tree does not
-  // track, so it is dropped and a later read dangles silently. This mirrors the
-  // single-indirection rule already enforced for locals, parameters, and return
-  // types (checkMultiLevelIndirection); apply it to fields too, at the record's
-  // definition.
-  //
-  // Restricted to a [[gsl::Owner]]/[[gsl::Pointer]] record (a tracked "leaf"
-  // whose fields are not individually modeled, so a depth-2 member is a silent
-  // drop), and excluding the standard library: a plain record with such a member
-  // is already rejected as unknown-ownership at its use, a std container of
-  // indirection is rejected at the type level (owner-/pointer-of-indirection),
-  // and a lambda's by-reference capture of an indirection is reported as a
-  // capture (its unnamed field must not be flagged here).
-  if (!Record->isInvalidDecl() && !Record->isDependentType() &&
-      !Record->isLambda() && !lifetimes::isInStlNamespace(Record) &&
-      (lifetimes::isGslPointerType(Context.getCanonicalTagType(Record)) ||
-       lifetimes::isGslOwnerType(Record)) &&
-      !getDiagnostics().isIgnored(
-          diag::warn_lifetime_safety_multilevel_indirection,
-          Record->getLocation())) {
-    for (const FieldDecl *F : Record->fields()) {
-      QualType FT = F->getType();
-      // Peel C-array dimensions: an array shares a single origin across its
-      // elements, so `T* arr[N]` has the indirection depth of `T*`.
-      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-        FT = AT->getElementType();
-      if (lifetimes::getIndirectionDepth(FT, Context) > 1) {
-        std::string Subject = "field '";
-        llvm::raw_string_ostream OS(Subject);
-        F->getDeclName().print(OS, getPrintingPolicy());
-        OS << "'";
-        Diag(F->getLocation(),
-             diag::warn_lifetime_safety_multilevel_indirection)
-            << Subject << F->getSourceRange();
-      }
-    }
-  }
-
   if (Record->getIdentifier()) {
     // C++ [class.mem]p13:
     //   If T is the name of a class, then each of the following shall have a

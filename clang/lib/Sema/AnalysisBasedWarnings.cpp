@@ -4063,6 +4063,87 @@ public:
 };
 } // namespace
 
+/// Enforces the single-indirection rule on DATA MEMBERS.
+///
+/// The analysis models one level of indirection. A member whose type is a
+/// multi-level indirection -- a pointer/reference to a pointer/reference/view
+/// (`T**`, `T*&`, or a reference to a [[gsl::Pointer]]) -- cannot be
+/// represented: a borrow flowing through it lands on a level the object's
+/// origin tree does not track, so it is dropped and a later read dangles
+/// silently. This mirrors the rule already enforced for locals, parameters and
+/// return types.
+///
+/// Runs at TU end rather than on class completion because measuring the depth
+/// requires the MEMBER's referent type to be complete. `struct Fwd; struct
+/// [[gsl::Pointer]] H { Fwd &f; }; struct Fwd { std::string_view sv; };`
+/// measures H's depth while Fwd is still incomplete: Fwd contributes no fields
+/// yet, so `Fwd &` looks like depth 1 instead of 2 and the member is accepted.
+/// Defining Fwd first reported it, so the declaration order alone decided
+/// whether the rule applied.
+///
+/// A referent that is never completed in this TU still measures as depth 1 and
+/// is accepted. That is not a hole: the multi-level path cannot be spelled
+/// without completing the type, so the TU that can actually express the hazard
+/// is one where the referent IS complete -- and this walk fires there. Refusing
+/// the opaque-handle idiom outright would only add noise.
+///
+/// Restricted to a [[gsl::Owner]]/[[gsl::Pointer]] record (a tracked leaf whose
+/// fields are not individually modeled, so a depth-2 member is a silent drop),
+/// and excluding the standard library: a plain record with such a member is
+/// already rejected as unknown-ownership at its use, a std container of
+/// indirection is rejected at the type level, and a lambda's by-reference
+/// capture is reported as a capture (its unnamed field must not be flagged
+/// here).
+static void LifetimeSafetyMemberIndirectionDepth(Sema &S,
+                                                 TranslationUnitDecl *TU) {
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  if (Diags.isIgnored(diag::warn_lifetime_safety_multilevel_indirection,
+                      SourceLocation()))
+    return;
+  llvm::TimeTraceScope TimeProfile("LifetimeSafetyMemberIndirectionDepth");
+
+  struct Walker : DynamicRecursiveASTVisitor {
+    Sema &S;
+    explicit Walker(Sema &S) : S(S) {
+      ShouldVisitTemplateInstantiations = true;
+      ShouldVisitImplicitCode = false;
+    }
+
+    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
+      if (RD != RD->getDefinition() || RD->isDependentType() ||
+          RD->isInvalidDecl() || RD->isLambda() ||
+          lifetimes::isInStlNamespace(RD))
+        return true;
+      ASTContext &Ctx = S.getASTContext();
+      if (!lifetimes::isGslPointerType(Ctx.getCanonicalTagType(RD)) &&
+          !lifetimes::isGslOwnerType(RD))
+        return true;
+      if (S.getDiagnostics().isIgnored(
+              diag::warn_lifetime_safety_multilevel_indirection,
+              RD->getLocation()))
+        return true;
+      for (const FieldDecl *F : RD->fields()) {
+        QualType FT = F->getType();
+        // Peel C-array dimensions: an array shares a single origin across its
+        // elements, so `T* arr[N]` has the indirection depth of `T*`.
+        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+          FT = AT->getElementType();
+        if (lifetimes::getIndirectionDepth(FT, Ctx) <= 1)
+          continue;
+        std::string Subject = "field '";
+        llvm::raw_string_ostream OS(Subject);
+        F->getDeclName().print(OS, S.getPrintingPolicy());
+        OS << "'";
+        S.Diag(F->getLocation(),
+               diag::warn_lifetime_safety_multilevel_indirection)
+            << Subject << F->getSourceRange();
+      }
+      return true;
+    }
+  };
+  Walker(S).TraverseDecl(TU);
+}
+
 /// Refuses a '[[clang::lifetime_non_invalidating]]' promise the body verifier
 /// can never check.
 ///
@@ -4534,6 +4615,7 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
     LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
     LifetimeSafetyDestructionOrderAnalysis(S, TU);
     LifetimeSafetyNonInvalidatingBodyAvailability(S, TU);
+    LifetimeSafetyMemberIndirectionDepth(S, TU);
   }
 }
 
