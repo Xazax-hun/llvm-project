@@ -2038,32 +2038,58 @@ void FactsGenerator::VisitArraySubscriptExpr(const ArraySubscriptExpr *ASE) {
         FactMgr.createFact<UseFact>(ASE->getExprLoc(), BaseNode));
 }
 
+/// Which placement argument the allocation function's result may point into, or
+/// -1 when the result is fresh storage.
+///
+/// Deciding this from the SIGNATURE -- "the parameter after the size is
+/// `void*`, so this must be the non-allocating form" -- is a guess about the
+/// body, and it guesses wrong both ways. A custom allocation function returning
+/// a `char*` buffer it was handed IS placement and was treated as a fresh
+/// allocation, so freeing the buffer left the placed object's borrow dangling
+/// with nothing reported. An allocation function that takes a `void*` and
+/// genuinely allocates
+/// (`return ::operator new(n);` -- an allocator wrapper) is NOT placement, and
+/// was reported as a use-after-free that ASan says does not exist.
+///
+/// '[[clang::lifetimebound]]' states exactly the relationship placement needs
+/// -- the result may point into this parameter -- so a user-written allocation
+/// function is read from its annotation, and the existing lifetimebound body
+/// verifier keeps that annotation honest. The library's standard non-allocating
+/// form carries no annotation, so it is still recognized by its signature; that
+/// is a fixed, known declaration rather than a guess about arbitrary code.
+static int placementArgResultPointsInto(const FunctionDecl *OperatorNew) {
+  if (!OperatorNew || OperatorNew->getNumParams() <= 1)
+    return -1;
+  // Parameter 0 is the size; placement parameters follow.
+  for (unsigned I = 1, N = OperatorNew->getNumParams(); I != N; ++I)
+    if (OperatorNew->getParamDecl(I)->hasAttr<LifetimeBoundAttr>())
+      return static_cast<int>(I - 1);
+  // The RESERVED global `::operator new(size_t, void*)` -- the standard
+  // non-allocating form, which [new.delete.placement] specifies to return its
+  // second argument. It carries no annotation, and recognizing it by signature
+  // is not a guess: that exact signature is reserved, so it means this wherever
+  // it is declared (freestanding code and tests declare it themselves rather
+  // than including <new>). Restricted to a non-member with exactly those two
+  // parameters -- a class-specific `operator new` taking a `void*`, or a global
+  // one with extra parameters, says nothing about whether it returns that
+  // pointer and must come from the annotation instead.
+  if (!isa<CXXMethodDecl>(OperatorNew) && OperatorNew->getNumParams() == 2 &&
+      OperatorNew->getParamDecl(1)->getType()->isVoidPointerType())
+    return 0;
+  return -1;
+}
+
 bool FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
                                         OriginNode *NewNode) {
-  // Model the standard non-allocating placement-new form, whose allocation
-  // function takes the storage as a `void*` parameter (the first parameter
-  // after the size) and returns it. Extra placement arguments (tag types,
-  // allocator state, etc.) may follow -- e.g. `new (buf, Tag{}) T` -- but the
-  // first placement argument is still the storage buffer, so forward its loan
-  // regardless of how many placement arguments there are. An allocating
-  // placement form (e.g. `new (std::nothrow) T`, whose first placement
-  // parameter is not `void*`) genuinely allocates fresh storage and is handled
-  // by the caller.
   if (NE->getNumPlacementArgs() < 1)
     return false;
-
-  const FunctionDecl *OperatorNew = NE->getOperatorNew();
-  if (OperatorNew->getNumParams() <= 1)
-    return false;
-
-  const auto *Arg =
-      OperatorNew->getParamDecl(1)->getType()->getAs<PointerType>();
-  if (!Arg || !Arg->isVoidPointerType())
+  int Which = placementArgResultPointsInto(NE->getOperatorNew());
+  if (Which < 0 || static_cast<unsigned>(Which) >= NE->getNumPlacementArgs())
     return false;
 
   // Use the placement argument before the implicit conversion to void*, so
   // inner origins are still available.
-  const Expr *PlacementArg = NE->getPlacementArg(0);
+  const Expr *PlacementArg = NE->getPlacementArg(Which);
   if (const auto *ICE = dyn_cast<ImplicitCastExpr>(PlacementArg);
       ICE && ICE->getCastKind() == CK_BitCast &&
       PlacementArg->getType()->isVoidPointerType())
@@ -2088,11 +2114,33 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
   // heap-allocation loan. (A single non-void* placement arg, e.g. nothrow, is
   // left with no loan here so a later use trips the lost-loan backstop, the
   // prior behavior.)
-  if (!handlePlacementNew(NE, NewNode) && NE->getNumPlacementArgs() != 1) {
+  bool IsPlacement = handlePlacementNew(NE, NewNode);
+  if (!IsPlacement && NE->getNumPlacementArgs() != 1) {
     const Loan *L = createLoan(FactMgr, NE);
     CurrentBlockFacts.push_back(
         FactMgr.createFact<IssueFact>(L->getID(), NewNode->getOriginID()));
   }
+  // Soundness: the loan above says the result is FRESH storage, which is only
+  // true if the allocation function does not hand back a pointer it was given.
+  // For a user-written allocation function that is what
+  // '[[clang::lifetimebound]]' declares, so an UNANNOTATED pointer/reference
+  // placement parameter leaves the question open -- and answering it "fresh"
+  // silently drops the borrow, which is exactly the custom-placement bypass
+  // with the annotation removed. Route the placement arguments through the same
+  // unannotated-indirection check a normal call gets; the operator-new call is
+  // modelled here rather than by handleFunctionCall, so nothing else asks.
+  if (!IsPlacement)
+    if (const FunctionDecl *OperatorNew = NE->getOperatorNew();
+        OperatorNew &&
+        !OperatorNew->getASTContext().getSourceManager().isInSystemHeader(
+            OperatorNew->getLocation())) {
+      llvm::SmallVector<const Expr *, 4> PlacementArgs(
+          NE->placement_arguments().begin(), NE->placement_arguments().end());
+      // The allocation function's parameter 0 is the size, which has no
+      // argument here; prepend a null so index i lines up with parameter i.
+      PlacementArgs.insert(PlacementArgs.begin(), nullptr);
+      handleUnannotatedIndirectionArgs(OperatorNew, PlacementArgs);
+    }
 
   NewNode = NewNode->getPointeeChild();
 
