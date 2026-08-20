@@ -3,6 +3,7 @@
 #include "Inputs/lifetime-analysis.h"
 
 using std::vector;
+using std::function;
 
 // The analysis conservatively assumes that operations it cannot prove leave an
 // owner unchanged invalidate borrows into that owner: non-const member calls,
@@ -486,4 +487,46 @@ void const_guard_captured_by_lambda() {
   int &r = v[0];
   { auto f = [g = ConstGuard{&v}] {}; (void)f; } // no-warning
   (void)r;
+}
+
+// A guard holding a TYPE-ERASED callable. What the callable captured is invisible
+// behind the wrapper's interface, so invoking it -- which is what the destructor
+// does -- may reallocate storage the caller borrows, with nothing in the type
+// saying so. The other callable shapes are covered elsewhere: a lambda held
+// directly exposes its captures as fields, a function pointer is refused as an
+// indirect call, and a capturing lambda in a plain struct is refused as
+// unknown-ownership. A type-erased wrapper inside an ANNOTATED record had neither.
+struct [[gsl::Owner]] OwnerWithCallable {
+  std::function<void()> f;
+  ~OwnerWithCallable();
+};
+
+struct [[gsl::Pointer]] ViewWithCallable {
+  std::function<void()> f;
+  ~ViewWithCallable();
+};
+
+void owner_holding_callable() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  { OwnerWithCallable g{[&v] { v.push_back(1); }}; } // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+void view_holding_callable() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  { ViewWithCallable g{[&v] { v.push_back(1); }}; } // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// No outstanding borrow: destroying the guard reports nothing.
+void callable_guard_without_borrow() {
+  vector<int> v;
+  v.push_back(42);
+  { OwnerWithCallable g{[&v] { v.push_back(1); }}; } // no-warning
 }

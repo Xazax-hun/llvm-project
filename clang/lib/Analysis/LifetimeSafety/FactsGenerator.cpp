@@ -2216,6 +2216,33 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
                                     AC.getDecl()->getEndLoc());
 }
 
+/// Returns true if `PT` is, or holds, a TYPE-ERASED callable (std::function and
+/// friends). What such a callable captured is invisible: a by-reference capture
+/// of an owner is erased behind the wrapper's interface, so invoking it --
+/// which is what a guard's destructor does -- may reallocate storage the caller
+/// holds a borrow into, with nothing in the type saying so.
+///
+/// The other callable shapes are covered elsewhere: a lambda held directly
+/// exposes its captures as fields, a function pointer is refused as an indirect
+/// call, and a capturing lambda in a plain struct is refused as
+/// unknown-ownership. A type-erased wrapper inside an ANNOTATED record had
+/// neither -- the annotation says the record is modeled, and the wrapper hides
+/// the capture.
+static bool holdsTypeErasedCallable(QualType PT) {
+  const CXXRecordDecl *RD = PT.getNonReferenceType()->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (isStdCallableWrapperType(RD))
+    return true;
+  for (const FieldDecl *F : RD->fields()) {
+    const CXXRecordDecl *FRD =
+        arrayElementType(F->getType())->getAsCXXRecordDecl();
+    if (FRD && FRD->hasDefinition() && isStdCallableWrapperType(FRD))
+      return true;
+  }
+  return false;
+}
+
 /// Models the destruction of an object that may hold a borrow.
 ///
 /// Shared by every way an object can be destroyed, because the hazard does not
@@ -2258,7 +2285,7 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
 /// capture of an OWNER silent: that capture is a copy, and destroying a copy
 /// invalidates no borrow of the original.
 static bool destructionMayMutateAliasedOwner(QualType PT) {
-  if (paramMayMutateOwner(PT))
+  if (paramMayMutateOwner(PT) || holdsTypeErasedCallable(PT))
     return true;
   const CXXRecordDecl *RD = PT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition() || !RD->isLambda())
@@ -2281,8 +2308,11 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
   // live and reported nothing, while the scalar `Grower g{&v};` reported.
   Ty = arrayElementType(Ty);
   const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
+  // Destroying an OWNER frees what it owns, which is its job rather than an
+  // aliasing hazard -- unless it holds a type-erased callable, whose captures
+  // are invisible and may reference storage the caller borrows.
   if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
-      isGslOwnerType(Ty) || !hasOrigins(Ty))
+      (isGslOwnerType(Ty) && !holdsTypeErasedCallable(Ty)) || !hasOrigins(Ty))
     return;
   CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Loc, Node));
   if (!destructionMayMutateAliasedOwner(Ty))
