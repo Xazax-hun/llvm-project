@@ -142,3 +142,60 @@ void plain_comma_silent() {
   (void)(1, 2); // no-warning
   (void)r;
 }
+
+//===----------------------------------------------------------------------===//
+// A conditional operator SELECTS an arm rather than consuming it, so each arm is
+// discarded exactly when the conditional is. `__builtin_choose_expr` and
+// `_Generic` select at compile time, which is the same relationship.
+//===----------------------------------------------------------------------===//
+
+void discarded_conditional(bool c) {
+  vector<int> v;
+  v.push_back(42);
+  // Both arms are destroyed, so both are reported.
+  // expected-warning@+1 2 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  c ? Grower{&v} : Grower{&v}; // expected-note 2 {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+void discarded_binary_conditional() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  (void)(false ?: Grower{&v}.tag); // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+void discarded_choose_expr() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  __builtin_choose_expr(1, Grower{&v}, Grower{&v}); // expected-note {{assumed to be invalidated by this operation}}
+  // __builtin_choose_expr evaluates only the selected arm, so only one guard exists.
+  (void)r;
+}
+
+void discarded_generic_selection() {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  int k = 0;
+  _Generic(k, int: Grower{&v}); // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+}
+
+// A temporary CONSUMED through a conditional is modelled where the call consumes
+// it, so it must still be reported exactly once.
+void consumed_through_conditional(bool c) {
+  vector<int> v;
+  v.push_back(42);
+  // expected-warning@+1 {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int &r = v[0];
+  int x = take(c ? Grower{&v} : Grower{&v}); // expected-note {{assumed to be invalidated by this operation}}
+  (void)r;
+  (void)x;
+}

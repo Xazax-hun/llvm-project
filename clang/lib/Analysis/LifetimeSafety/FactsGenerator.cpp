@@ -2317,36 +2317,42 @@ void FactsGenerator::handleTemporaryDtor(
   const CXXBindTemporaryExpr *BTE = TemporaryDtor.getBindTemporaryExpr();
   if (!BTE)
     return;
-  // Only the discarded ones are this handler's to model. A materialized
-  // temporary is destroyed at the cleanup handleFullExprCleanup sees (or, when
-  // lifetime-extended, at handleLifetimeEnds), and one consumed as a
-  // subexpression -- a call argument above all -- is modelled where it is
-  // consumed. The CFG emits a CFGTemporaryDtor for those too, so handling them
-  // here would report the same invalidation twice. Parens, casts and the
-  // full-expression's cleanup wrapper sit between the CXXBindTemporaryExpr and
-  // whatever consumes it, so look through them: an Expr remains only if the
-  // value is actually used.
+  // Which temporaries are this handler's to model is decided by asking who ELSE
+  // already models this one, and modelling it otherwise. Enumerating the
+  // contexts that DISCARD a value was the fragile part: an unrecognized parent
+  // was assumed to consume the value, so every missing entry -- a comma, a
+  // conditional,
+  // `__builtin_choose_expr`, `_Generic` -- was a silent miss. With the default
+  // inverted, a missing entry costs a duplicate diagnostic instead of a dropped
+  // one, which is the right way round for a soundness check.
   //
-  // A comma operator is such a remaining Expr but does not consume the operand
-  // whose value it discards: `(Guard{&s}, 0)` discards the guard exactly as
-  // `Guard{&s};` does. Its LEFT operand is always discarded; its RIGHT operand
-  // becomes the comma's value, so whether that one is consumed depends in turn
-  // on what encloses the comma -- keep walking and let the same test decide.
-  // This covers every position a discarded guard can be written in: a comma
-  // statement, a for-increment, an `if`/`while`/`switch` condition.
+  // Climb the wrappers whose operand shares their own fate: parens, casts and
+  // the full-expression cleanup forward the value; a comma discards its left
+  // operand; a conditional, `__builtin_choose_expr` and `_Generic` SELECT an
+  // arm rather than consume it. Whatever stops the climb is what consumes the
+  // temporary.
+  auto SharesOperandFate = [](const Stmt *P) {
+    if (isa<ParenExpr>(P) || isa<CastExpr>(P) || isa<ExprWithCleanups>(P) ||
+        isa<AbstractConditionalOperator>(P) || isa<ChooseExpr>(P) ||
+        isa<GenericSelectionExpr>(P))
+      return true;
+    const auto *BO = dyn_cast<BinaryOperator>(P);
+    return BO && BO->getOpcode() == BO_Comma;
+  };
   const ParentMap &PM = AC.getParentMap();
   const Stmt *Consumer = PM.getParent(BTE);
-  while (Consumer) {
-    // A comma's left operand is discarded outright; its right operand is
-    // discarded iff the comma itself is, which the next iteration decides.
-    if (const auto *BO = dyn_cast<BinaryOperator>(Consumer);
-        !isa<ParenExpr>(Consumer) && !isa<CastExpr>(Consumer) &&
-        !isa<ExprWithCleanups>(Consumer) &&
-        !(BO && BO->getOpcode() == BO_Comma))
-      break;
+  while (isa_and_present<Expr>(Consumer) && SharesOperandFate(Consumer))
     Consumer = PM.getParent(Consumer);
-  }
-  if (isa_and_present<Expr>(Consumer))
+  // A MATERIALIZED temporary is destroyed at the cleanup handleFullExprCleanup
+  // sees, or at the extending variable's scope exit. That is a property of the
+  // temporary rather than of its syntactic position.
+  if (isa_and_present<MaterializeTemporaryExpr>(Consumer))
+    return;
+  // A temporary handed to a CALL is modelled where the call consumes it: a
+  // mutating gsl::Pointer argument already yields an assumed invalidation
+  // there, so modelling the destructor here too would report one hazard twice.
+  if (isa_and_present<CallExpr>(Consumer) ||
+      isa_and_present<CXXConstructExpr>(Consumer))
     return;
   if (OriginNode *Node = getOriginNode(*BTE))
     handleDestructionOfBorrowHolder(BTE->getSubExpr()->getType(), Node, BTE,
