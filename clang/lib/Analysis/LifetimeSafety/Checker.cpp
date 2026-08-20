@@ -2384,8 +2384,27 @@ public:
               SemaHelper->reportInvalidatedGlobal(InvalidatedField,
                                                   GlobalEscape->getGlobal(),
                                                   Warning.InvalidatedByExpr);
-          } else if (isa<ReturnEscapeFact>(OEF)) {
-            // FIXME: Diagnose invalidated return escapes separately.
+          } else if (const auto *RetEscape = dyn_cast<ReturnEscapeFact>(OEF)) {
+            // The borrow is invalidated and then RETURNED, so the caller
+            // receives a dangling borrow. This arm was unimplemented, which is
+            // what made the invalidation detectable but unreported: the loan is
+            // held across the invalidation only by the return escape whenever
+            // the borrow is READ before the invalidating call and deposited
+            // into the returned value after it -- `return base + (v.reserve(n),
+            // 0);`. Spelling the same thing as two statements keeps a Use alive
+            // across the call instead, which reported through the branch above.
+            if (IssueExpr)
+              SemaHelper->reportInvalidatedReturn(IssueExpr,
+                                                  RetEscape->getReturnExpr(),
+                                                  Warning.InvalidatedByExpr);
+            else if (InvalidatedPVD)
+              SemaHelper->reportInvalidatedReturn(InvalidatedPVD,
+                                                  RetEscape->getReturnExpr(),
+                                                  Warning.InvalidatedByExpr);
+            else if (InvalidatedField)
+              SemaHelper->reportInvalidatedReturn(InvalidatedField,
+                                                  RetEscape->getReturnExpr(),
+                                                  Warning.InvalidatedByExpr);
           } else
             llvm_unreachable("Unhandled OriginEscapesFact type");
         } else if (const auto *RetEscape = dyn_cast<ReturnEscapeFact>(OEF))

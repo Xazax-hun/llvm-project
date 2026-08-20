@@ -48,6 +48,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_intra_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_invalidated_field,
       diag::warn_lifetime_safety_invalidated_global,
+      diag::warn_lifetime_safety_invalidated_return,
       diag::warn_lifetime_safety_cross_tu_param_suggestion,
       diag::warn_lifetime_safety_intra_tu_param_suggestion,
       diag::warn_lifetime_safety_cross_tu_this_suggestion,
@@ -365,6 +366,27 @@ public:
     S.Diag(DanglingGlobal->getLocation(),
            diag::note_lifetime_safety_dangling_global_here)
         << DanglingGlobal->getEndLoc();
+  }
+
+  void reportInvalidatedReturn(const Expr *IssueExpr, const Expr *ReturnExpr,
+                               const Expr *InvalidationExpr) override {
+    emitInvalidatedReturn(IssueExpr->getExprLoc(), IssueExpr->getSourceRange(),
+                          /*Subject=*/0, ReturnExpr, InvalidationExpr);
+  }
+
+  void reportInvalidatedReturn(const ParmVarDecl *PVD, const Expr *ReturnExpr,
+                               const Expr *InvalidationExpr) override {
+    emitInvalidatedReturn(PVD->getSourceRange().getBegin(),
+                          PVD->getSourceRange(), /*Subject=*/1, ReturnExpr,
+                          InvalidationExpr);
+  }
+
+  void reportInvalidatedReturn(const FieldDecl *HoldingField,
+                               const Expr *ReturnExpr,
+                               const Expr *InvalidationExpr) override {
+    emitInvalidatedReturn(HoldingField->getLocation(),
+                          HoldingField->getSourceRange(), /*Subject=*/2,
+                          ReturnExpr, InvalidationExpr);
   }
 
   void suggestLifetimeboundToParmVar(WarningScope Scope,
@@ -843,6 +865,24 @@ private:
           0, S.getSourceManager(), S.getLangOpts());
     }
     return {InsertionPoint, " [[clang::lifetimebound]]"};
+  }
+
+  /// Shared body of the reportInvalidatedReturn overloads: the borrow was
+  /// invalidated and then handed to the caller, so the report names the borrow,
+  /// the operation that invalidated it, and the return that leaks it.
+  void emitInvalidatedReturn(SourceLocation Loc, SourceRange Range,
+                             unsigned Subject, const Expr *ReturnExpr,
+                             const Expr *InvalidationExpr) {
+    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
+                                ? diag::note_lifetime_safety_freed_here
+                                : diag::note_lifetime_safety_invalidated_here;
+    S.Diag(Loc, diag::warn_lifetime_safety_invalidated_return)
+        << Subject << Range;
+    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
+        << InvalidationExpr->getSourceRange();
+    if (ReturnExpr)
+      S.Diag(ReturnExpr->getExprLoc(), diag::note_lifetime_safety_returned_here)
+          << ReturnExpr->getSourceRange();
   }
 
   std::string getDiagSubjectDescription(const ValueDecl *VD) {

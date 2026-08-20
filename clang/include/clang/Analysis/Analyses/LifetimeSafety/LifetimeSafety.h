@@ -145,6 +145,19 @@ public:
   virtual void reportInvalidatedGlobal(const FieldDecl *HoldingField,
                                        const VarDecl *Global,
                                        const Expr *InvalidationExpr) {}
+  // Reports a borrow that is RETURNED after being invalidated: the caller
+  // receives a dangling borrow. `ReturnExpr` anchors the "returned here" note.
+  // The three overloads mirror the field/global ones: an anchor of the borrow's
+  // own, a parameter placeholder, or the member a seeded loan came through.
+  virtual void reportInvalidatedReturn(const Expr *IssueExpr,
+                                       const Expr *ReturnExpr,
+                                       const Expr *InvalidationExpr) {}
+  virtual void reportInvalidatedReturn(const ParmVarDecl *PVD,
+                                       const Expr *ReturnExpr,
+                                       const Expr *InvalidationExpr) {}
+  virtual void reportInvalidatedReturn(const FieldDecl *HoldingField,
+                                       const Expr *ReturnExpr,
+                                       const Expr *InvalidationExpr) {}
 
   using EscapingTarget =
       llvm::PointerUnion<const Expr *, const FieldDecl *, const VarDecl *>;

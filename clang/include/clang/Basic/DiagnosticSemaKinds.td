@@ -11089,6 +11089,10 @@ def warn_lifetime_safety_invalidated_global
     : Warning<"%select{object whose reference|parameter which|borrow held by this member which}0 escapes to global or static storage is later invalidated">,
       InGroup<LifetimeSafetyInvalidation>,
       DefaultIgnore;
+def warn_lifetime_safety_invalidated_return
+    : Warning<"%select{object whose reference|parameter which|borrow held by this member which}0 is returned is invalidated before the function returns; the caller receives a dangling borrow">,
+      InGroup<LifetimeSafetyInvalidation>,
+      DefaultIgnore;
 
 def warn_lifetime_safety_dangling_field
     : Warning<"stack memory associated with %0 escapes to the %1 which will dangle">,
