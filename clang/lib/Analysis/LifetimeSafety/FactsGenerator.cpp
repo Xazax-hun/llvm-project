@@ -1427,6 +1427,21 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
       // class's fields.
       const Expr *Base = ME_LHS->getBase()->IgnoreImpCasts();
       if (OriginNode *Container = getOriginNode(*Base)) {
+        // For an ARROW access the container is what the base points AT: `n->d`
+        // stores into `*n`, not into the pointer variable `n`. A pointer
+        // variable has storage of its own, so its lvalue origin carries a loan
+        // naming that variable while the caller's object -- the parameter
+        // placeholder -- lives on the POINTEE origin. Using the pointer's own
+        // origin made the store look like it targeted the local pointer, so a
+        // noescape borrow stored through `n->d` escaped unreported while the
+        // same store through a reference (`n.d`, where a reference has no
+        // storage and its lvalue origin IS the object's) was caught.
+        //
+        // `this` is excluded: the model already gives it the OBJECT's origin,
+        // not a pointer's, so descending there would go a level too deep.
+        if (ME_LHS->isArrow() && !isa<CXXThisExpr>(Base->IgnoreParenImpCasts()))
+          if (OriginNode *Pointee = Container->getPointeeChild())
+            Container = Pointee;
         CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
             ME_LHS, RHSNode->getOriginID(), Container->getOriginID()));
         // See through anonymous struct/union members: for `v.p` where `p` lives
