@@ -411,6 +411,9 @@ void FactsGenerator::run() {
       else if (std::optional<CFGMemberDtor> MemberDtor =
                    Element.getAs<CFGMemberDtor>())
         handleMemberDtor(*MemberDtor);
+      else if (std::optional<CFGBaseDtor> BaseDtor =
+                   Element.getAs<CFGBaseDtor>())
+        handleBaseDtor(*BaseDtor);
       else if (std::optional<CFGFullExprCleanup> FullExprCleanup =
                    Element.getAs<CFGFullExprCleanup>()) {
         handleFullExprCleanup(*FullExprCleanup);
@@ -2288,6 +2291,44 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
   if (OriginNode *Node = getOriginNode(*FD))
     handleDestructionOfBorrowHolder(FD->getType(), Node, AC.getBody(),
                                     AC.getDecl()->getEndLoc());
+}
+
+/// Collects the fields \p RD declares, and those its own bases declare.
+static void
+collectFieldsIncludingBases(const CXXRecordDecl *RD,
+                            llvm::SmallPtrSetImpl<const CXXRecordDecl *> &Seen,
+                            llvm::SmallVectorImpl<const FieldDecl *> &Out) {
+  if (!RD || !RD->hasDefinition() ||
+      !Seen.insert(RD->getCanonicalDecl()).second)
+    return;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    collectFieldsIncludingBases(B.getType()->getAsCXXRecordDecl(), Seen, Out);
+  llvm::append_range(Out, RD->fields());
+}
+
+void FactsGenerator::handleBaseDtor(const CFGBaseDtor &BaseDtor) {
+  const CXXBaseSpecifier *BS = BaseDtor.getBaseSpecifier();
+  if (!BS)
+    return;
+  // A BASE subobject outlives the derived destructor's BODY: its destructor
+  // runs after the body returns, and it can read the base's own members. So a
+  // borrow stored into an inherited member during the body is still held here
+  // -- which is why "a field does not outlive a destructor" (see
+  // handleExitBlock) is not the whole story, and why dropping this element lost
+  // the hazard entirely.
+  //
+  // The origin model has no node for a base subobject, but the base's FIELDS
+  // have origins, and those are exactly what its destructor can reach. Use
+  // them, so a local whose borrow was stored into an inherited member is still
+  // live here and its expiry is reported.
+  llvm::SmallPtrSet<const CXXRecordDecl *, 4> Seen;
+  llvm::SmallVector<const FieldDecl *, 4> Fields;
+  collectFieldsIncludingBases(BS->getType()->getAsCXXRecordDecl(), Seen,
+                              Fields);
+  for (const FieldDecl *FD : Fields)
+    if (OriginNode *Node = getOriginNode(*FD))
+      CurrentBlockFacts.push_back(
+          FactMgr.createFact<UseFact>(AC.getDecl()->getEndLoc(), Node));
 }
 
 /// Returns true if `PT` is, or holds, a TYPE-ERASED callable (std::function and

@@ -143,6 +143,7 @@ private:
   /// Models a member's destructor, which runs after the enclosing destructor's
   /// body, as a use of that member.
   void handleMemberDtor(const CFGMemberDtor &MemberDtor);
+  void handleBaseDtor(const CFGBaseDtor &BaseDtor);
 
   void handleCleanupFunction(const CFGCleanupFunction &CleanupFunction);
 
