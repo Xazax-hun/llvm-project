@@ -1516,12 +1516,29 @@ bool CFGBuilder::alwaysAdd(const Stmt *stmt) {
 // FIXME: Add support for dependent-sized array types in C++?
 // Does it even make sense to build a CFG for an uninstantiated template?
 static const VariableArrayType *FindVA(const Type *t) {
-  while (const ArrayType *vt = dyn_cast<ArrayType>(t)) {
-    if (const VariableArrayType *vat = dyn_cast<VariableArrayType>(vt))
-      if (vat->getSizeExpr())
-        return vat;
+  while (t) {
+    if (const ArrayType *vt = dyn_cast<ArrayType>(t)) {
+      if (const VariableArrayType *vat = dyn_cast<VariableArrayType>(vt))
+        if (vat->getSizeExpr())
+          return vat;
 
-    t = vt->getElementType().getTypePtr();
+      t = vt->getElementType().getTypePtr();
+      continue;
+    }
+    // A typedef or alias OWNS its size expression: the type declaration is what
+    // evaluates it, and that declaration is processed on its own. Finding it
+    // again through a use of the name would put the expression in the CFG twice
+    // and model an evaluation that never happens.
+    if (isa<TypedefType>(t) || isa<UsingType>(t))
+      return nullptr;
+    // Any other sugar -- `__typeof__(char[n])` and friends -- spells the array
+    // out in this declaration, so the size expression is evaluated here.
+    // Casting the sugar node itself finds nothing, which left the expression,
+    // and any side effect in it, out of the CFG entirely.
+    QualType Desugared = t->getLocallyUnqualifiedSingleStepDesugaredType();
+    if (Desugared.getTypePtr() == t)
+      return nullptr;
+    t = Desugared.getTypePtr();
   }
 
   return nullptr;
