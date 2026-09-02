@@ -296,3 +296,42 @@ struct [[gsl::Owner]] TruthfulOutOfLine {
   [[clang::lifetime_non_invalidating]] void touch(); // no-warning
 };
 void TruthfulOutOfLine::touch() {}
+
+// A member function TEMPLATE makes the same promise, and it is honored at every
+// call site the same way, so it owes the same body. Being written as a template
+// used to excuse it: the availability check enumerated RD->methods(), which does
+// not list a FunctionTemplateDecl, so a promise with no local body to check went
+// unrefused while every call site still trusted it.
+struct [[gsl::Owner]] TemplateDeclaredOnly {
+  vector<int> v;
+  // expected-warning@+2 {{cannot be verified}}
+  template <class T>
+  [[clang::lifetime_non_invalidating]] void grow(T);
+};
+
+// The body being present is what the check asks for -- a template body written
+// out of line satisfies it, and is then verified like any other body.
+struct [[gsl::Owner]] TemplateViolatingOutOfLine {
+  vector<int> v;
+  // expected-warning@+2 {{invalidates the implicit this parameter, which it promises not to invalidate}}
+  template <class T>
+  [[clang::lifetime_non_invalidating]] void grow(T);
+};
+template <class T> void TemplateViolatingOutOfLine::grow(T) {
+  v.push_back(1); // expected-note {{invalidated here}}
+}
+template void TemplateViolatingOutOfLine::grow<int>(int); // expected-note {{in instantiation of function template specialization}}
+
+// Truthful template body: stays clean.
+struct [[gsl::Owner]] TruthfulTemplate {
+  vector<int> v;
+  template <class T>
+  [[clang::lifetime_non_invalidating]] void touch(T) {} // no-warning
+};
+
+// A const member template has nothing to promise, as with a const method.
+struct [[gsl::Owner]] ConstTemplateDeclaredOnly {
+  vector<int> v;
+  template <class T>
+  [[clang::lifetime_non_invalidating]] bool empty(T) const; // no-warning
+};

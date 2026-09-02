@@ -4200,21 +4200,24 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
       llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
       if (!lifetimes::recordContainsMutableOwner(RD, Visited))
         return true;
-      for (const CXXMethodDecl *M : RD->methods()) {
+      // Member TEMPLATES make the promise too, and are honored at every call
+      // site the same way, so they owe the same body. RD->methods() does not
+      // list them; forEachMemberFunction does.
+      forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
         if (!M->hasAttr<LifetimeNonInvalidatingAttr>() || M->isConst())
-          continue;
+          return;
         // A body anywhere in this TU is what the verifier needs. Ask the
         // DEFINITION, not this declaration: `= default` written out of line
         // leaves the in-class declaration looking like an ordinary one, and a
         // defaulted method is "defined" while having no body to walk.
         const FunctionDecl *Def = nullptr;
         if (M->isDefined(Def) && Def && !Def->isDefaulted())
-          continue;
+          return;
         S.Diag(M->getLocation(),
                diag::warn_lifetime_safety_non_invalidating_unverifiable)
             << ((Def && Def->isDefaulted()) || M->isDefaulted() ? 0 : 1)
             << M->getSourceRange();
-      }
+      });
       return true;
     }
   };
