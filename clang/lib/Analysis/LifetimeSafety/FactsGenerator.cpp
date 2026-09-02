@@ -1332,22 +1332,28 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   }
 
   if (!LHSNode) {
-    // The destination could not be routed to a tracked storage origin. This
-    // happens for an lvalue that selects/forwards among several objects -- a
-    // conditional `(c ? p : q) = ...`, a comma `(f(), p) = ...`, or those
-    // wrapped in `*&(...)`/casts -- whose origin is a transient merge that a
-    // store cannot propagate back to the real objects (the same one-way-merge
-    // limitation as the array-of-pointers case). Rather than enumerate every
-    // such spelling, conservatively flag any unroutable store whose destination
-    // TYPE holds a borrow (a pointer/view): a borrow stored here is dropped, and
-    // (masked by a pre-existing concrete loan on the real object) a later
-    // dangling use could be missed. Gate on the type, not hasOrigins(Expr) --
-    // the latter is true for every glvalue, so it would flag a plain
-    // `cells[i] = ' '` char store through operator[].
+    // The destination is not a single statically-known origin. That happens for
+    // an lvalue that selects or forwards among several objects -- a conditional
+    // `(c ? p : q) = ...`, a comma `(f(), p) = ...`, a derived-to-base
+    // conversion of a receiver, or those wrapped in `*&(...)`/casts.
+    //
+    // Which storage such an lvalue designates is exactly what its OWN loans
+    // say, and those are only known after loan propagation -- so the routing is
+    // deferred to a DynamicStoreFact rather than decided here. The checker
+    // refuses the store if those loans turn out not to name resolvable storage,
+    // which is what the blanket refusal used to do for every spelling.
+    //
+    // Gated on the destination TYPE holding a borrow (a pointer/view), not on
+    // hasOrigins(Expr): the latter is true of every glvalue, so it would also
+    // cover a plain `cells[i] = ' '` char store through operator[].
     if (hasOrigins(LHSExpr->getType()))
-      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
-          UntrackedConstructReason::UnsupportedStoreDestination,
-          cast<Expr>(LHSExpr)));
+      if (OriginNode *DestLV = getOriginNode(*LHSExpr))
+        // Same r-value peel the routed path below applies to the stored value.
+        if (OriginNode *Src =
+                getRValueOrigins(RHSExpr, getOriginNode(*RHSExpr)))
+          CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+              DestLV->getOriginID(), Src->getOriginID(), cast<Expr>(LHSExpr),
+              /*RefuseIfUnresolved=*/true));
     return;
   }
   OriginNode *RHSNode = getOriginNode(*RHSExpr);
@@ -3159,6 +3165,20 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
           Dest->getOriginID(), CapturedOriginNode->getOriginID(),
           /*KillDest=*/false));
+      // Additionally route the capture by the loans the capturer's LVALUE
+      // holds. Those name the object that will hold the borrow, whatever
+      // expression designated it -- so an inherited method's receiver, which
+      // arrives as a derived-to-base conversion whose own origin is a
+      // disconnected copy, deposits into the object rather than into the copy.
+      // Additive: the flow above is unchanged, and merge semantics make a
+      // duplicate deposit into the same origin harmless. Routing-only, so an
+      // unresolvable capturer is not refused -- that would invent a diagnostic
+      // this path never emitted.
+      if (CapturingOriginNode)
+        CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+            CapturingOriginNode->getOriginID(),
+            CapturedOriginNode->getOriginID(), Args[I],
+            /*RefuseIfUnresolved=*/false));
 
       // Soundness: capturing the argument into the receiver object (`this`) is a
       // store into that object. If the argument borrows a member of the

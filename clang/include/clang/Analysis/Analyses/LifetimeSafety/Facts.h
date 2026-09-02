@@ -72,6 +72,13 @@ public:
     /// other borrows it. Used by the checker to detect overlapping (aliasing)
     /// arguments. Carries no dataflow state.
     ArgumentOverlap,
+    /// A store whose DESTINATION is not a single statically-known origin: the
+    /// left-hand side is an lvalue that selects or forwards among several
+    /// objects (`(c ? p : q) = r`, a derived-to-base conversion of a receiver).
+    /// Which storage it designates is exactly what that lvalue's own loans say,
+    /// and those are only known once loan propagation has run -- so the routing
+    /// is done by this fact's transfer rather than chosen when facts are built.
+    DynamicStore,
   };
 
 private:
@@ -684,6 +691,54 @@ public:
 /// object, so the checker can flag a self-referential object: one where the
 /// stored value borrows the same object that holds the member (they share an
 /// object-identity loan). Carries no dataflow state.
+/// A store routed by the loans its destination lvalue holds.
+///
+/// `handleAssignment` normally finds one destination origin from the shape of
+/// the left-hand side. When the lvalue selects among several objects there is
+/// no such single origin, and the destinations are named by the loans the
+/// lvalue carries -- information that belongs to loan propagation, not to fact
+/// generation. This fact defers the decision: its transfer reads those loans
+/// and merges the stored value into each destination.
+///
+/// Always MERGES, never kills: with several possible destinations the analysis
+/// cannot tell which one was written, so a destination's previous loans must
+/// survive. (Same rule the shared array element-origin already uses.)
+class DynamicStoreFact : public Fact {
+  /// The left-hand side lvalue's own origin. Its loans name the storage
+  /// written.
+  OriginID DestLValueOrigin;
+  /// The origin of the value being stored.
+  OriginID SrcOrigin;
+  /// The assignment, for diagnostics.
+  const Expr *StoreExpr;
+  /// Whether an unresolvable destination must be REFUSED. True where this fact
+  /// replaced a blanket refusal (an assignment through a selecting lvalue), so
+  /// the refusal has to survive whatever the routing cannot resolve. False
+  /// where the routing is purely additive on top of a store that is already
+  /// modelled another way (a lifetime_capture_by flow), where refusing would
+  /// invent a diagnostic the analysis never used to emit.
+  bool RefuseIfUnresolved;
+
+public:
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::DynamicStore;
+  }
+
+  DynamicStoreFact(OriginID DestLValueOrigin, OriginID SrcOrigin,
+                   const Expr *StoreExpr, bool RefuseIfUnresolved)
+      : Fact(Kind::DynamicStore), DestLValueOrigin(DestLValueOrigin),
+        SrcOrigin(SrcOrigin), StoreExpr(StoreExpr),
+        RefuseIfUnresolved(RefuseIfUnresolved) {}
+
+  OriginID getDestLValueOrigin() const { return DestLValueOrigin; }
+  OriginID getSrcOrigin() const { return SrcOrigin; }
+  const Expr *getStoreExpr() const { return StoreExpr; }
+  bool refuseIfUnresolved() const { return RefuseIfUnresolved; }
+
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &OM) const override;
+};
+
 class FieldStoreFact : public Fact {
   /// The destination member expression (`obj.field`), for diagnostics.
   const Expr *StoreExpr;

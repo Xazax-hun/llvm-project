@@ -2,11 +2,17 @@
 
 // An assignment whose destination lvalue selects/forwards among several objects
 // -- a conditional `(c ? p : q) = ...`, a comma `(f(), p) = ...`, the GNU
-// `(p ?: q) = ...`, or those wrapped in `*&(...)`/casts -- produces a transient
-// merged origin that a store cannot be routed back through. Rather than
-// enumerate every spelling, any such unroutable store whose destination TYPE
-// holds a borrow (a pointer/view) is conservatively rejected. A store whose
-// destination is not borrow-holding (an int/char element) is unaffected.
+// `(p ?: q) = ...`, or those wrapped in `*&(...)`/casts -- has no single
+// statically-known destination origin, and used to be rejected wholesale.
+//
+// The destinations are now taken from the loans that lvalue itself holds, which
+// name each candidate object, so these stores are TRACKED (merging into every
+// candidate, since which one was written is unknown). The rejection remains for
+// a destination whose loans do not resolve to storage -- see
+// `unresolved_subobject` at the end.
+//
+// Storing a non-dangling value is therefore silent now; the companion soundness
+// checks live in warn-lifetime-safety-soundness-selecting-lvalue-store.cpp.
 
 int g;
 int side();
@@ -14,25 +20,25 @@ int side();
 // Conditional pointer lvalue store -- rejected (robust to the spelling).
 void cond(bool c) {
   int *p = &g, *q = &g;
-  (c ? p : q) = &g; // expected-warning {{assignment through this expression is not modeled by lifetime safety analysis}}
+  (c ? p : q) = &g; // no-warning: routed to p and q
 }
 
 // `*&(...)` wrapper around the conditional -- also rejected (no enumeration).
 void deref_addrof(bool c) {
   int *p = &g, *q = &g;
-  (*&(c ? p : q)) = &g; // expected-warning {{assignment through this expression is not modeled}} expected-warning {{uses more than one level of indirection}}
+  (*&(c ? p : q)) = &g; // expected-warning {{uses more than one level of indirection}}
 }
 
 // Comma lvalue store -- rejected.
 void comma() {
   int *p = &g;
-  (side(), p) = &g; // expected-warning {{assignment through this expression is not modeled}}
+  (side(), p) = &g; // no-warning: routed
 }
 
 // GNU binary conditional lvalue store -- rejected.
 void gnu_cond() {
   int *p = &g, *q = &g;
-  (p ?: q) = &g; // expected-warning {{assignment through this expression is not modeled}}
+  (p ?: q) = &g; // no-warning: routed
 }
 
 // Negative: the same conditional with a NON-borrow (int) destination is fine.
@@ -68,5 +74,11 @@ struct [[gsl::Pointer]] View {
 void cond_view_base(View a [[clang::noescape]], View b [[clang::noescape]],
                     bool c) {
   int local = 0;
+  // Still refused: the destination is a MEMBER of a selecting base, so the loans
+  // name a subobject path with no origin of its own to store into.
   (c ? a : b).p = &local; // expected-warning {{assignment through this expression is not modeled}}
 }
+
+// The rejection survives where the routing cannot resolve a destination: see
+// `cond_view_base` above, whose loans name a subobject path with no origin of its
+// own to store into, so a borrow deposited there would still be dropped.

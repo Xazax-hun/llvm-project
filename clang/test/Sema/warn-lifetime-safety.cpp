@@ -3559,24 +3559,26 @@ void test_reference_to_view() {
   (void)v;            // expected-note {{later used here}} 
 }
 
-// FIXME: Add special handling for multi-level pointers and lvalue expressions which are not DeclRefExpr.
+// A capturer that is not a DeclRefExpr (`&ptr`, or a dereferenced parameter) is
+// resolved from the loans that lvalue holds, which name the object regardless of
+// how it was spelled -- so these no longer need special handling per spelling.
 void set2(MyObj** res, const MyObj& in [[clang::lifetime_capture_by(res)]]);
 
 void test_pointer_to_pointer() {
   MyObj *ptr = nullptr;
   {
     MyObj local;
-    set2(&ptr, local);
-  }
-  (void)ptr;
+    set2(&ptr, local); // expected-warning {{local variable 'local' does not live long enough}}
+  } // expected-note {{destroyed here}}
+  (void)ptr; // expected-note {{later used here}}
 }
 
 void test_pointer_to_pointer_2(MyObj **ptr) {
   {
     MyObj local;
-    set2(ptr, local);
-  }
-  (void)ptr;
+    set2(ptr, local); // expected-warning {{local variable 'local' does not live long enough}}
+  } // expected-note {{destroyed here}}
+  (void)ptr; // expected-note {{later used here}}
 }
 
 void set3(MyObj*& res, const MyObj& in [[clang::lifetime_capture_by(res)]]);

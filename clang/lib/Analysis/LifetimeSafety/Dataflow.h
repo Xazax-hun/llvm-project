@@ -190,6 +190,8 @@ private:
       return D->transfer(In, *F->getAs<FieldStoreFact>());
     case Fact::Kind::ArgumentOverlap:
       return D->transfer(In, *F->getAs<ArgOverlapFact>());
+    case Fact::Kind::DynamicStore:
+      return D->transfer(In, *F->getAs<DynamicStoreFact>());
     }
     llvm_unreachable("Unknown fact kind");
   }
@@ -208,6 +210,7 @@ public:
   Lattice transfer(Lattice In, const UntrackedConstructFact &) { return In; }
   Lattice transfer(Lattice In, const FieldStoreFact &) { return In; }
   Lattice transfer(Lattice In, const ArgOverlapFact &) { return In; }
+  Lattice transfer(Lattice In, const DynamicStoreFact &) { return In; }
 };
 } // namespace clang::lifetimes::internal
 #endif // LLVM_CLANG_ANALYSIS_ANALYSES_LIFETIMESAFETY_DATAFLOW_H

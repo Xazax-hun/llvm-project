@@ -199,6 +199,15 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   OS << ")\n";
 }
 
+void DynamicStoreFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                            const OriginManager &OM) const {
+  OS << "DynamicStore (Into loans of: ";
+  OM.dump(getDestLValueOrigin(), OS);
+  OS << ", Stored: ";
+  OM.dump(getSrcOrigin(), OS);
+  OS << ")\n";
+}
+
 void FieldStoreFact::dump(llvm::raw_ostream &OS, const LoanManager &,
                           const OriginManager &OM) const {
   OS << "FieldStore (Stored: ";

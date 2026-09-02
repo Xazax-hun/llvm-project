@@ -461,6 +461,8 @@ public:
           checkNoescapeStoreIntoParam(FSF);
         } else if (const auto *AOF = F->getAs<ArgOverlapFact>())
           checkArgumentOverlap(AOF);
+        else if (const auto *DSF = F->getAs<DynamicStoreFact>())
+          checkDynamicStore(DSF);
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
@@ -2009,6 +2011,50 @@ public:
       NoescapeParamStoreMap.try_emplace(Src, FSF->getStoreExpr());
       return;
     }
+  }
+
+  /// Soundness: a store whose destination lvalue selects among several objects
+  /// is routed by the loans that lvalue holds (see DynamicStoreFact). This
+  /// confirms the routing actually reached storage; whatever it could not
+  /// resolve is refused, exactly as every such store was refused before the
+  /// routing existed.
+  ///
+  /// Unresolvable means: the lvalue holds no loans at all (it designates
+  /// nothing the analysis tracks), or it holds a loan naming something with no
+  /// origin to store into -- a subobject path, an Unknown borrow from an
+  /// unmodelled expression, or a caller-scope placeholder. A borrow stored
+  /// through any of those is dropped, and a pre-existing concrete loan on the
+  /// real object would mask the loss, so the store must be reported rather than
+  /// assumed harmless.
+  void checkDynamicStore(const DynamicStoreFact *DSF) {
+    if (!SemaHelper || !DSF->refuseIfUnresolved())
+      return;
+    LoanSet DestLoans =
+        LoanPropagation.getLoans(DSF->getDestLValueOrigin(), DSF);
+    const auto &DeclOrigins = FactMgr.getOriginMgr().getDeclOriginLists();
+    bool AnyUnresolved = DestLoans.isEmpty();
+    for (LoanID LID : DestLoans) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      if (!AP.getElements().empty()) {
+        AnyUnresolved = true;
+        break;
+      }
+      // Mirrors the routing in LoanPropagation: a declaration, a parameter
+      // placeholder, or `this` all resolve; anything else does not.
+      bool Resolvable = false;
+      if (const auto *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl()))
+        Resolvable = DeclOrigins.count(VD);
+      else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
+        Resolvable = DeclOrigins.count(PVD);
+      else if (AP.getAsPlaceholderThis())
+        Resolvable = FactMgr.getOriginMgr().getThisOrigins().has_value();
+      if (!Resolvable) {
+        AnyUnresolved = true;
+        break;
+      }
+    }
+    if (AnyUnresolved)
+      SemaHelper->reportUnsupportedStoreDestination(DSF->getStoreExpr());
   }
 
   /// Soundness check: overlapping (aliasing) call arguments. The call may mutate

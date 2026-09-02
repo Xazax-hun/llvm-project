@@ -26,6 +26,77 @@ namespace clang::lifetimes::internal {
 
 // Prepass to find persistent origins. An origin is persistent if it is
 // referenced in more than one basic block.
+/// The origins a dynamic store can WRITE, over-approximated statically.
+///
+/// A dynamic store's destinations are the loans its lvalue holds, which the
+/// prepass cannot evaluate -- but it can bound them. Every loan in that lvalue
+/// was ISSUED into some origin that flows into it, so walking the flow edges
+/// backwards from the lvalue's origin and collecting the loans issued anywhere
+/// in that reachable set gives a superset of the loans it can hold. Each such
+/// loan names its storage by a declaration, and that declaration's origin is
+/// where the store can land.
+///
+/// Marking only these keeps the block-local fast path for everything else. The
+/// cheaper approximations are both far too coarse in practice: marking every
+/// origin, or every declaration's origin, cost ~14x on this pass for a single
+/// lifetime_capture_by in a 60-variable, 120-block function, because in such a
+/// function the declaration origins are exactly the ones carrying loans.
+static void collectDynamicStoreDestinations(const FactManager &FactMgr,
+                                            const CFG &C,
+                                            llvm::BitVector &Out) {
+  llvm::SmallVector<const DynamicStoreFact *> Stores;
+  // Reverse flow edges: for each origin, the origins that flow into it.
+  llvm::DenseMap<unsigned, llvm::SmallVector<OriginID, 2>> FlowsInto;
+  // Loans issued to each origin.
+  llvm::DenseMap<unsigned, llvm::SmallVector<LoanID, 2>> IssuedTo;
+  for (const CFGBlock *B : C)
+    for (const Fact *F : FactMgr.getFacts(B)) {
+      if (const auto *DS = F->getAs<DynamicStoreFact>())
+        Stores.push_back(DS);
+      else if (const auto *OF = F->getAs<OriginFlowFact>())
+        FlowsInto[OF->getDestOriginID().Value].push_back(OF->getSrcOriginID());
+      else if (const auto *IF = F->getAs<IssueFact>())
+        IssuedTo[IF->getOriginID().Value].push_back(IF->getLoanID());
+    }
+  if (Stores.empty())
+    return;
+
+  const OriginManager &OM = FactMgr.getOriginMgr();
+  const auto &DeclOrigins = OM.getDeclOriginLists();
+  llvm::BitVector Seen(OM.getNumOrigins());
+  llvm::SmallVector<OriginID> Work;
+  for (const DynamicStoreFact *DS : Stores) {
+    OriginID Start = DS->getDestLValueOrigin();
+    if (!Seen.test(Start.Value)) {
+      Seen.set(Start.Value);
+      Work.push_back(Start);
+    }
+  }
+  while (!Work.empty()) {
+    OriginID Cur = Work.pop_back_val();
+    // Any loan issued into a reachable origin may reach the store's lvalue.
+    for (LoanID LID : IssuedTo.lookup(Cur.Value)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      const ValueDecl *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl());
+      if (!VD)
+        VD = AP.getAsPlaceholderParam();
+      if (VD) {
+        auto It = DeclOrigins.find(VD);
+        if (It != DeclOrigins.end() && It->second)
+          Out.set(It->second->getOriginID().Value);
+      } else if (AP.getAsPlaceholderThis()) {
+        if (auto ThisOrigins = OM.getThisOrigins())
+          Out.set((*ThisOrigins)->getOriginID().Value);
+      }
+    }
+    for (OriginID Pred : FlowsInto.lookup(Cur.Value))
+      if (!Seen.test(Pred.Value)) {
+        Seen.set(Pred.Value);
+        Work.push_back(Pred);
+      }
+  }
+}
+
 static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
                                                 const CFG &C) {
   llvm::TimeTraceScope("ComputePersistentOrigins");
@@ -75,6 +146,11 @@ static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
         // check (e.g. a conditional store of a stack address to a global).
         CheckOrigin(F->getAs<OriginEscapesFact>()->getEscapedOriginID());
         break;
+      case Fact::Kind::DynamicStore:
+        // Bounded once for the whole function by
+        // collectDynamicStoreDestinations, which needs the flow graph rather
+        // than one fact at a time.
+        break;
       case Fact::Kind::MovedOrigin:
       case Fact::Kind::Expire:
       case Fact::Kind::TestPoint:
@@ -83,6 +159,10 @@ static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
       }
     }
   }
+  // A dynamic store writes origins this per-fact walk cannot name, so its
+  // destinations are bounded separately and marked unconditionally: the store
+  // may be in a different block from every other mention of the destination.
+  collectDynamicStoreDestinations(FactMgr, C, PersistentOrigins);
   return PersistentOrigins;
 }
 
@@ -206,6 +286,56 @@ public:
       ProjectedLoans = LoanSetFactory.add(ProjectedLoans, Projected->getID());
     }
     return setLoans(In, OID, ProjectedLoans);
+  }
+
+  /// A store whose destinations are named by the loans its lvalue holds.
+  ///
+  /// Routing happens here, not in the fact generator, because the destinations
+  /// ARE those loans and they only exist once propagation has run. Every
+  /// destination is MERGED into: with more than one candidate the analysis
+  /// cannot tell which was written, so a destination's earlier loans must
+  /// survive.
+  ///
+  /// Only a loan that names a declaration's storage with no further path
+  /// elements is routed -- that is the storage whose origin is exactly the
+  /// declaration's. A loan naming a subobject, an unknown borrow, or a
+  /// caller-scope placeholder designates storage this transfer cannot resolve
+  /// to an origin; those are left alone here and reported by the checker, so
+  /// the store is refused rather than silently dropped.
+  Lattice transfer(Lattice In, const DynamicStoreFact &F) {
+    LoanSet SrcLoans = getLoans(In, F.getSrcOrigin());
+    if (SrcLoans.isEmpty())
+      return In;
+    const auto &DeclOrigins = FactMgr.getOriginMgr().getDeclOriginLists();
+    Lattice Out = In;
+    for (LoanID LID : getLoans(In, F.getDestLValueOrigin())) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      if (!AP.getElements().empty())
+        continue;
+      // A loan names its storage by a declaration, or -- for caller-provided
+      // storage -- by a placeholder standing for a parameter or the implicit
+      // object. All three have an origin to store into.
+      const OriginNode *Dest = nullptr;
+      if (const auto *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl())) {
+        auto It = DeclOrigins.find(VD);
+        if (It != DeclOrigins.end())
+          Dest = It->second;
+      } else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam()) {
+        auto It = DeclOrigins.find(PVD);
+        if (It != DeclOrigins.end())
+          Dest = It->second;
+      } else if (AP.getAsPlaceholderThis()) {
+        if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+          Dest = *ThisOrigins;
+      }
+      if (!Dest)
+        continue;
+      OriginID DestOID = Dest->getOriginID();
+      Out = setLoans(
+          Out, DestOID,
+          utils::join(getLoans(Out, DestOID), SrcLoans, LoanSetFactory));
+    }
+    return Out;
   }
 
   Lattice transfer(Lattice In, const KillOriginFact &F) {
