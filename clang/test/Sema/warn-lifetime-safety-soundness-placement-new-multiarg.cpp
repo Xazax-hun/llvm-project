@@ -108,10 +108,91 @@ struct Wrapper {
 };
 
 int allocating_wrapper() {
-  char *buf = new char[64];
+  // The `void *` placement parameter is UNANNOTATED and the result does not point
+  // into it, so it is not the construction buffer -- it is an opaque pointer the
+  // callee may mutate through, exactly as at an ordinary call `f(buf)` with the
+  // same signature, which assumes invalidation too. The placement spelling now
+  // agrees with the call spelling.
+  char *buf = new char[64]; // expected-warning {{object whose reference is captured may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
   // expected-warning@+1 {{argument is bound to a parameter that can hold a borrow but is not annotated}}
-  Wrapper *w = new (buf) Wrapper{7};
+  Wrapper *w = new (buf) Wrapper{7}; // expected-note {{assumed to be invalidated by this operation}}
   delete[] buf;
   // no use-after-free: `w` does not point into `buf`.
   return w->x; // expected-warning {{lifetime safety cannot track local variable 'w'}}
+}
+
+//===----------------------------------------------------------------------===//
+// A placement ARGUMENT is an ordinary argument as far as what the callee may do
+// to it. Spelling the call as a new-expression routes it through
+// VisitCXXNewExpr rather than handleFunctionCall, and only the
+// unannotated-indirection question was re-asked there -- so a placement argument
+// that reallocates an owner went unmodelled, while both the explicit
+// `::operator new(...)` call and an identically-signed plain function reported
+// it. The three spellings must agree.
+//===----------------------------------------------------------------------===//
+
+struct MutTag {};
+
+// A hand-rolled owner: a non-const reference parameter to it is what makes the
+// call assumed-invalidating, exactly as a std container would.
+struct [[gsl::Owner(int)]] Bag {
+  void push_back(int);
+  int &operator[](int) [[clang::lifetimebound]];
+};
+
+void *operator new(std::size_t n, MutTag, Bag &v [[clang::noescape]]) {
+  v.push_back(1);
+  // The global allocation function's result is not modelled, so the returned
+  // pointer trips the lost-loan sentinel; unrelated to what is under test here.
+  return ::operator new(n); // expected-warning {{lifetime safety cannot track this value here}}
+}
+void *operator new[](std::size_t n, MutTag, Bag &v [[clang::noescape]]) {
+  v.push_back(1);
+  // The global allocation function's result is not modelled, so the returned
+  // pointer trips the lost-loan sentinel; unrelated to what is under test here.
+  return ::operator new(n); // expected-warning {{lifetime safety cannot track this value here}}
+}
+void *plainAlloc(std::size_t n, MutTag, Bag &v [[clang::noescape]]) {
+  v.push_back(1);
+  // The global allocation function's result is not modelled, so the returned
+  // pointer trips the lost-loan sentinel; unrelated to what is under test here.
+  return ::operator new(n); // expected-warning {{lifetime safety cannot track this value here}}
+}
+
+volatile int isink;
+
+// The explicit call: reported all along.
+void explicit_call() {
+  Bag v;
+  v.push_back(0);
+  int *p = &v[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  (void)::operator new(sizeof(int), MutTag{}, v); // expected-note {{assumed to be invalidated by this operation}}
+  isink = *p;
+}
+
+// A plain function with the same signature: reported all along.
+void plain_function() {
+  Bag v;
+  v.push_back(0);
+  int *p = &v[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  (void)plainAlloc(sizeof(int), MutTag{}, v); // expected-note {{assumed to be invalidated by this operation}}
+  isink = *p;
+}
+
+// The new-expression spelling: was silent.
+void placement_syntax() {
+  Bag v;
+  v.push_back(0);
+  int *p = &v[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  (void)new (MutTag{}, v) int(3); // expected-note {{assumed to be invalidated by this operation}}
+  isink = *p;
+}
+
+// `new[]` routes through the same place.
+void placement_array_syntax() {
+  Bag v;
+  v.push_back(0);
+  int *p = &v[0]; // expected-warning {{may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  (void)new (MutTag{}, v) int[2]; // expected-note {{assumed to be invalidated by this operation}}
+  isink = *p;
 }

@@ -2157,18 +2157,43 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
   // with the annotation removed. Route the placement arguments through the same
   // unannotated-indirection check a normal call gets; the operator-new call is
   // modelled here rather than by handleFunctionCall, so nothing else asks.
-  if (!IsPlacement)
-    if (const FunctionDecl *OperatorNew = NE->getOperatorNew();
-        OperatorNew &&
-        !OperatorNew->getASTContext().getSourceManager().isInSystemHeader(
-            OperatorNew->getLocation())) {
-      llvm::SmallVector<const Expr *, 4> PlacementArgs(
-          NE->placement_arguments().begin(), NE->placement_arguments().end());
-      // The allocation function's parameter 0 is the size, which has no
-      // argument here; prepend a null so index i lines up with parameter i.
-      PlacementArgs.insert(PlacementArgs.begin(), nullptr);
+  if (const FunctionDecl *OperatorNew = NE->getOperatorNew();
+      OperatorNew &&
+      !OperatorNew->getASTContext().getSourceManager().isInSystemHeader(
+          OperatorNew->getLocation())) {
+    llvm::SmallVector<const Expr *, 4> PlacementArgs(
+        NE->placement_arguments().begin(), NE->placement_arguments().end());
+    // The allocation function's parameter 0 is the size, which has no
+    // argument here; prepend a null so index i lines up with parameter i.
+    // The argument helpers skip a null argument.
+    PlacementArgs.insert(PlacementArgs.begin(), nullptr);
+    if (!IsPlacement)
       handleUnannotatedIndirectionArgs(OperatorNew, PlacementArgs);
-    }
+    // The placement argument the result points INTO is the storage being
+    // constructed in, not an owner the call may reallocate: `new (buf) T`
+    // writes bytes into `buf`, it does not move it. Its parameter is typically
+    // `void *`, which paramMayMutateOwner deliberately treats as mutable (an
+    // opaque pointee cannot be shown to be owner-free -- the C-interop userdata
+    // idiom), so without excluding it every placement-new into a buffer would
+    // report an invalidation of that buffer. Blank the slot, as with the size.
+    llvm::SmallVector<const Expr *, 4> MutationArgs(PlacementArgs);
+    if (int Buf = placementArgResultPointsInto(OperatorNew); Buf >= 0)
+      if (static_cast<unsigned>(Buf) + 1 < MutationArgs.size())
+        MutationArgs[Buf + 1] = nullptr;
+    // A placement argument is an ordinary argument as far as what the callee
+    // may do to it: `new (Tag{}, v) T` can reallocate `v` exactly as
+    // `::operator new(sizeof(T), Tag{}, v)` can. Spelling the same call as a
+    // new-expression routed it here instead of through handleFunctionCall, and
+    // only the unannotated-indirection question was re-asked -- so the mutation
+    // went unmodelled while both the explicit call and an identically-signed
+    // plain function were reported. Ask the argument-side questions here too.
+    //
+    // Not gated on IsPlacement: whether the operator hands back a pointer into
+    // one argument says nothing about what it does to the others.
+    handleAssumedInvalidatingCall(NE, OperatorNew, MutationArgs);
+    handleArgumentOverlap(NE, OperatorNew, MutationArgs);
+    handleMovedArgsInCall(OperatorNew, MutationArgs);
+  }
 
   NewNode = NewNode->getPointeeChild();
 
@@ -2753,7 +2778,7 @@ void FactsGenerator::handleMovedArgsInCall(const FunctionDecl *FD,
   for (unsigned I = IsInstance;
        I < Args.size() && I < FD->getNumParams() + IsInstance; ++I) {
     const ParmVarDecl *PVD = FD->getParamDecl(I - IsInstance);
-    if (!PVD->getType()->isRValueReferenceType())
+    if (!Args[I] || !PVD->getType()->isRValueReferenceType())
       continue;
     const Expr *Arg = Args[I];
     OriginNode *MovedOrigins = getOriginNode(*Arg);
@@ -2950,6 +2975,10 @@ void FactsGenerator::handleAssumedInvalidatingCall(
   for (unsigned I = 0; I < Args.size(); ++I) {
     if (IsInstance && I == 0)
       continue; // object argument, handled above
+    // A new-expression has no argument for the allocation function's size
+    // parameter, so that slot is null to keep the indices aligned.
+    if (!Args[I])
+      continue;
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD)
       continue;
@@ -3099,7 +3128,7 @@ void FactsGenerator::emitArgumentOverlap(
     const Expr *At, ArrayRef<const Expr *> Args,
     llvm::function_ref<bool(unsigned)> IsMutatingArg) {
   for (unsigned M = 0; M < Args.size(); ++M) {
-    if (!IsMutatingArg(M))
+    if (!Args[M] || !IsMutatingArg(M))
       continue;
     OriginNode *MutNode = getOriginNode(*Args[M]);
     if (!MutNode)
@@ -3108,7 +3137,7 @@ void FactsGenerator::emitArgumentOverlap(
     // single fact for it (rather than one fact per pair).
     llvm::SmallVector<OriginID, 4> Borrows;
     for (unsigned B = 0; B < Args.size(); ++B) {
-      if (B == M)
+      if (B == M || !Args[B])
         continue;
       // A co-argument can alias the mutated owner's storage if it carries a
       // borrow into it. We rely on the propagated origins/loans rather than the
