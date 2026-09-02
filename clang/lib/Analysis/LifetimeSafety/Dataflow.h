@@ -96,7 +96,36 @@ public:
     const CFGBlock *Start = isForward() ? &Cfg.getEntry() : &Cfg.getExit();
     InStates[Start] = D.getInitialState();
     W.enqueueBlock(Start);
+    drainWorklist(D, W);
 
+    // A backward analysis walks predecessors from the exit, so it only ever
+    // reaches blocks that can REACH the exit. Code that cannot -- the body of
+    // an infinite loop, and in a function that never returns, all of it -- is
+    // left with no state at all, and a use written there is invisible to
+    // anything that consults this analysis. That is silence, not conservatism:
+    // liveness drives the expiry and invalidation checks, so a borrow used only
+    // inside `for (;;)` looked dead and its dangling use went unreported.
+    //
+    // Seed every block the walk missed and let the fixpoint finish. The initial
+    // state is the same bottom the exit starts from, and joins only ever add to
+    // it, so this reaches the same least fixpoint the exit-rooted walk computes
+    // for the rest of the function.
+    if (!isForward()) {
+      bool AnySeeded = false;
+      for (const CFGBlock *B : Cfg) {
+        if (!B || getInState(B))
+          continue;
+        InStates[B] = D.getInitialState();
+        W.enqueueBlock(B);
+        AnySeeded = true;
+      }
+      if (AnySeeded)
+        drainWorklist(D, W);
+    }
+  }
+
+private:
+  template <typename WorklistT> void drainWorklist(Derived &D, WorklistT &W) {
     while (const CFGBlock *B = W.dequeue()) {
       Lattice StateIn = *getInState(B);
       Lattice StateOut = transferBlock(B, StateIn);
