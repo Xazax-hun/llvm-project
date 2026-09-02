@@ -8,7 +8,7 @@
 
 struct CaptureBase {
   const char *hidden = nullptr; // expected-warning {{public data member 'hidden' of a [[gsl::Owner]] type can hold a borrow}}
-  void stash(const char *p [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not supported}}
+  void stash(const char *p [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' names a [[gsl::Owner]] type}}
     hidden = p;
   }
 };

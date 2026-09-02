@@ -4512,16 +4512,40 @@ void Sema::LazyProcessLifetimeCaptureByParams(FunctionDecl *FD) {
       // valid loan can silently mask the dangling one. That relationship is
       // exactly what [[clang::lifetimebound]] expresses (and the analysis does
       // track a lifetimebound constructor parameter), so redirect to it.
+      //
+      // Which of those applies does not depend on how the capturer is SPELLED.
+      // Only `this` was examined, so the identical capture into a named
+      // parameter of owner type -- `lifetime_capture_by(r)` with `Record &r` --
+      // stashed a borrow in an owner with nothing said. Resolve the capturer's
+      // record either way and ask once.
+      const CXXRecordDecl *CapturerRD = nullptr;
       if (Name == "this") {
-        if (isa<CXXConstructorDecl>(FD))
+        if (isa<CXXConstructorDecl>(FD)) {
           Diag(CapturedBy->getArgLocs()[I],
                diag::warn_lifetime_safety_ctor_captures_borrow);
-        else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
-                 MD && MD->getParent() &&
-                 lifetimes::isGslOwnerType(MD->getParent()))
-          Diag(CapturedBy->getArgLocs()[I],
-               diag::warn_lifetime_safety_owner_captures_borrow);
+          CapturedBy->setParamIdx(I, It->second);
+          continue;
+        }
+        if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
+          CapturerRD = MD->getParent();
+      } else {
+        // The mapping numbers the implicit object 0 and the parameters after
+        // it, so undo that offset to reach the ParmVarDecl.
+        unsigned Offset = HasImplicitThisParam ? 1 : 0;
+        int Ix = It->second;
+        if (Ix >= static_cast<int>(Offset) &&
+            static_cast<unsigned>(Ix) - Offset < FD->getNumParams()) {
+          QualType T =
+              FD->getParamDecl(Ix - Offset)->getType().getNonReferenceType();
+          if (T->isPointerType())
+            T = T->getPointeeType();
+          CapturerRD = T->getAsCXXRecordDecl();
+        }
       }
+      if (CapturerRD && lifetimes::isGslOwnerType(CapturerRD))
+        Diag(CapturedBy->getArgLocs()[I],
+             diag::warn_lifetime_safety_owner_captures_borrow)
+            << Name;
       CapturedBy->setParamIdx(I, It->second);
     }
   }

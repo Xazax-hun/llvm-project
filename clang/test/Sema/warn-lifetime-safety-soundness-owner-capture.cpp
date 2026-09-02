@@ -11,7 +11,7 @@ class [[gsl::Owner]] HideOwner {
   string_view hidden;
 
 public:
-  void stash(string_view s [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not supported}}
+  void stash(string_view s [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' names a [[gsl::Owner]] type}}
     hidden = s;
   }
 };
@@ -27,7 +27,7 @@ template <> struct OwnerTmpl<int> {
   const int *p = nullptr;
 
 public:
-  void set(const int *q [[clang::lifetime_capture_by(this)]]) { p = q; } // expected-warning {{'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not supported}}
+  void set(const int *q [[clang::lifetime_capture_by(this)]]) { p = q; } // expected-warning {{'lifetime_capture_by(this)' names a [[gsl::Owner]] type}}
 };
 
 //===----------------------------------------------------------------------===//

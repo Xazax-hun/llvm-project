@@ -11438,8 +11438,8 @@ def warn_lifetime_safety_const_cast
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
 def warn_lifetime_safety_owner_captures_borrow
-    : Warning<"'lifetime_capture_by(this)' on a [[gsl::Owner]] type is not "
-              "supported by lifetime safety: an owner is meant to own its "
+    : Warning<"'lifetime_capture_by(%0)' names a [[gsl::Owner]] type, which is "
+              "not supported by lifetime safety: an owner is meant to own its "
               "contents, and a borrow captured into its members cannot be "
               "tracked">,
       InGroup<LifetimeSafetyOwnerCapture>,

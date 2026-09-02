@@ -7248,7 +7248,8 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
             for (int Idx : A->params())
               if (Idx == LifetimeCaptureByAttr::This) {
                 Diag(P->getLocation(),
-                     diag::warn_lifetime_safety_owner_captures_borrow);
+                     diag::warn_lifetime_safety_owner_captures_borrow)
+                    << "this";
                 break;
               }
     };

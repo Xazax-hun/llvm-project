@@ -14,7 +14,9 @@ struct [[gsl::Owner(int)]] Box {
   Box();
   // Lying: names by-value param 'decoy' as the capturer, but stores the borrow
   // into *this.
-  void bad(Box decoy, string_view s [[clang::lifetime_capture_by(decoy)]]) { // expected-warning {{names a capturing entity other than 'this'}}
+  // 'decoy' is itself an owner, so naming it is refused too (owner-capture) --
+  // both findings are real and independent.
+  void bad(Box decoy, string_view s [[clang::lifetime_capture_by(decoy)]]) { // expected-warning {{names a capturing entity other than 'this'}} expected-warning {{is meant to own its contents}}
     p = s.data();
   }
 
