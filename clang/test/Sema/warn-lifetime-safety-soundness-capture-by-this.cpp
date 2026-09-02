@@ -38,10 +38,16 @@ void captured_outlives_use() {
 //===----------------------------------------------------------------------===//
 // A capture destination has to name the object that will hold the borrow. An
 // inherited method is called on the derived object through an implicit
-// derived-to-base conversion, whose own origin is a fresh node disconnected from
-// that object -- so the captured borrow flowed into a throwaway origin and the
-// object never received it. The identical call on a `Base` object was reported,
-// so the conversion alone decided whether the capture was modelled.
+// derived-to-base conversion, whose own origin is a fresh node that merely COPIES
+// the object's loans -- fine for reading through the upcast, useless for a write,
+// so the captured borrow landed in the copy and the object never received it. The
+// identical call on a `Base` object was reported, so the conversion alone decided
+// whether the capture was modelled.
+//
+// The capture is routed by the loans the capturer's lvalue holds, and the upcast's
+// lvalue carries the derived object's loan -- so this needs no special handling
+// for the conversion, and the same routing covers any other spelling of the
+// receiver.
 //===----------------------------------------------------------------------===//
 
 struct [[gsl::Pointer]] CapBase {
