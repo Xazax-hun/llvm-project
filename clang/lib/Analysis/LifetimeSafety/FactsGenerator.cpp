@@ -2224,12 +2224,22 @@ void FactsGenerator::VisitOMPExecutableDirective(
 }
 
 void FactsGenerator::handleTryStatements() {
-  const Stmt *Body = AC.getBody();
-  if (!Body)
-    return;
-  // Shallow worklist over the body's statements. Do not descend into nested
+  // Shallow worklist over the function's statements. Do not descend into nested
   // lambdas/blocks; their bodies are separate functions analyzed on their own.
-  llvm::SmallVector<const Stmt *, 32> Worklist{Body};
+  llvm::SmallVector<const Stmt *, 32> Worklist;
+  if (const Stmt *Body = AC.getBody())
+    Worklist.push_back(Body);
+  // A constructor's MEM-INITIALIZERS are not part of its body, so a `try`
+  // written there -- inside a statement-expression initializing a member -- is
+  // not reachable from the body alone and went unrefused, while the same `try`
+  // one line further down in the body was refused. runPreScan already seeds
+  // both; do the same here.
+  if (const auto *CD = dyn_cast_if_present<CXXConstructorDecl>(AC.getDecl()))
+    for (const CXXCtorInitializer *Init : CD->inits())
+      if (const Expr *InitE = Init->getInit())
+        Worklist.push_back(InitE);
+  if (Worklist.empty())
+    return;
   while (!Worklist.empty()) {
     const Stmt *S = Worklist.pop_back_val();
     if (!S || isa<LambdaExpr>(S))
