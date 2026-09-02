@@ -7240,9 +7240,13 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
               << F << F->getSourceRange();
       }
     };
-    // Flag each lifetime_capture_by(this) parameter.
+    // Flag each lifetime_capture_by(this) parameter. Member TEMPLATES make the
+    // same promise and are honored the same way, so they are enumerated too --
+    // RD->methods() does not list a FunctionTemplateDecl, and being written as
+    // a template let an inherited `capture_by(this)` stash a borrow in an owner
+    // with nothing said, while the plain spelling right beside it was refused.
     auto CheckCaptureByThisParams = [&](const CXXRecordDecl *RD) {
-      for (const CXXMethodDecl *M : RD->methods())
+      lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
         for (const ParmVarDecl *P : M->parameters())
           if (const auto *A = P->getAttr<LifetimeCaptureByAttr>())
             for (int Idx : A->params())
@@ -7252,6 +7256,7 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
                     << "this";
                 break;
               }
+      });
     };
     if (CheckPubPtr)
       CheckPublicBorrowFields(Record);

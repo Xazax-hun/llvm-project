@@ -30,3 +30,38 @@ struct [[gsl::Owner(char)]] DerivedOwner : OwnerBase {}; // no re-report of 'p'
 
 // Control: a non-owner deriving the same base is not subject to the owner checks.
 struct PlainDerived : CaptureBase {}; // no-warning
+
+//===----------------------------------------------------------------------===//
+// A member function TEMPLATE makes the same promise and is honored the same way,
+// so the inherited walk must enumerate it too. RD->methods() does not list a
+// FunctionTemplateDecl, so being written as a template let this through while the
+// plain spelling right beside it was refused. `cached` is protected rather than
+// public so the owner-public-pointer refusal does not cover for it.
+//===----------------------------------------------------------------------===//
+
+struct TmplBase {
+protected:
+  const char *cached = nullptr;
+
+public:
+  // Plain spelling: refused all along.
+  void setPlain(const char *p [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' names a [[gsl::Owner]] type}}
+    cached = p;
+  }
+  // Template spelling: same promise, and it was silent.
+  template <class T>
+  void setTmpl(T, const char *p [[clang::lifetime_capture_by(this)]]) { // expected-warning {{'lifetime_capture_by(this)' names a [[gsl::Owner]] type}}
+    cached = p;
+  }
+};
+
+struct [[gsl::Owner(char)]] TmplOwner : TmplBase {};
+
+// A base no owner inherits has nothing to refuse.
+struct UnusedBase {
+  const char *q = nullptr;
+  template <class T>
+  void set(T, const char *p [[clang::lifetime_capture_by(this)]]) { // no-warning
+    q = p;
+  }
+};

@@ -904,6 +904,19 @@ bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
   return reachesMutableOwner(RD, V, /*AliasOnly=*/true);
 }
 
+void forEachMemberFunction(
+    const CXXRecordDecl *RD,
+    llvm::function_ref<void(const CXXMethodDecl *)> Visit) {
+  if (!RD)
+    return;
+  for (const CXXMethodDecl *MD : RD->methods())
+    Visit(MD);
+  for (const Decl *D : RD->decls())
+    if (const auto *FTD = dyn_cast<FunctionTemplateDecl>(D))
+      if (const auto *MD = dyn_cast<CXXMethodDecl>(FTD->getTemplatedDecl()))
+        Visit(MD);
+}
+
 bool recordHasGslOwnerField(QualType QT) {
   QT = QT.getNonReferenceType();
   // The implicit object argument of a member call is the `this` pointer

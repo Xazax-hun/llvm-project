@@ -216,6 +216,19 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD);
 // reallocate it.
 bool recordAliasesMutableOwner(const CXXRecordDecl *RD);
 
+/// Enumerates \p RD's member functions, INCLUDING member templates.
+///
+/// RD->methods() does not list a FunctionTemplateDecl, so a templated member is
+/// invisible to any check that walks methods() alone -- a `template <class U>
+/// void operator()(U*)` deleter, a `template <class U> void deallocate(U*,
+/// size_t)` allocator hook, or a `template <class T> void set(T, sv
+/// [[capture_by(this)]])`
+/// -- each escaping on the strength of being written as a template. Use this
+/// wherever a class-level check enumerates member functions.
+void forEachMemberFunction(
+    const CXXRecordDecl *RD,
+    llvm::function_ref<void(const CXXMethodDecl *)> Visit);
+
 // As recordContainsMutableOwner, but takes the receiver type of a member call:
 // peels a reference and the `this` pointer to reach the record. Used by the safe
 // model to treat a non-const member call on an object as invalidating views into

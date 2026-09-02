@@ -3228,23 +3228,6 @@ static bool hasUncheckedDeallocationFunction(const CXXRecordDecl *RD) {
   });
 }
 
-/// Enumerates \p RD's member functions, INCLUDING member templates.
-///
-/// RD->methods() does not list a FunctionTemplateDecl, so a templated member was
-/// invisible to every check that walked methods() -- a `template <class U> void
-/// operator()(U*)` deleter, or a `template <class U> void deallocate(U*, size_t)`
-/// allocator hook, escaped on the strength of being written as a template.
-static void forEachMemberFunction(
-    const CXXRecordDecl *RD,
-    llvm::function_ref<void(const CXXMethodDecl *)> Visit) {
-  for (const CXXMethodDecl *MD : RD->methods())
-    Visit(MD);
-  for (const Decl *D : RD->decls())
-    if (const auto *FTD = dyn_cast<FunctionTemplateDecl>(D))
-      if (const auto *MD = dyn_cast<CXXMethodDecl>(FTD->getTemplatedDecl()))
-        Visit(MD);
-}
-
 /// True if the standard library may invoke \p FD on a user-supplied template
 /// argument -- an allocator, a deleter, a comparator, a hash, or a character-traits
 /// class.
@@ -3318,7 +3301,7 @@ static bool hasUncheckedLibraryHook(QualType QT) {
   bool IsHook = DerivesStdHook;
   bool Unchecked = false;
   auto Scan = [&](const CXXRecordDecl *R) {
-    forEachMemberFunction(R, [&](const CXXMethodDecl *MD) {
+    lifetimes::forEachMemberFunction(R, [&](const CXXMethodDecl *MD) {
       if (MD->isImplicit() || !isHookName(MD))
         return;
       if (isDistinctiveHookName(MD))
@@ -3510,7 +3493,7 @@ static bool isDestructionOrderSafeType(QualType QT, SeenTypes &Seen,
   // inheritance chain is walked here.
   if (Ops == ShutdownOps::Any) {
     bool Unchecked = false;
-    forEachMemberFunction(RD, [&](const CXXMethodDecl *MD) {
+    lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *MD) {
       if (MD->isImplicit() || MD->isDefaulted())
         return;
       if (!lifetimes::carriesDestructionOrderPromise(MD))
@@ -4202,7 +4185,7 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
       // Member TEMPLATES make the promise too, and are honored at every call
       // site the same way, so they owe the same body. RD->methods() does not
       // list them; forEachMemberFunction does.
-      forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
+      lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
         if (!M->hasAttr<LifetimeNonInvalidatingAttr>() || M->isConst())
           return;
         // A body anywhere in this TU is what the verifier needs. Ask the
