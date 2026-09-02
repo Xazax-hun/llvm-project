@@ -711,13 +711,6 @@ class DynamicStoreFact : public Fact {
   OriginID SrcOrigin;
   /// The assignment, for diagnostics.
   const Expr *StoreExpr;
-  /// Whether an unresolvable destination must be REFUSED. True where this fact
-  /// replaced a blanket refusal (an assignment through a selecting lvalue), so
-  /// the refusal has to survive whatever the routing cannot resolve. False
-  /// where the routing is purely additive on top of a store that is already
-  /// modelled another way (a lifetime_capture_by flow), where refusing would
-  /// invent a diagnostic the analysis never used to emit.
-  bool RefuseIfUnresolved;
 
 public:
   static bool classof(const Fact *F) {
@@ -725,15 +718,13 @@ public:
   }
 
   DynamicStoreFact(OriginID DestLValueOrigin, OriginID SrcOrigin,
-                   const Expr *StoreExpr, bool RefuseIfUnresolved)
+                   const Expr *StoreExpr)
       : Fact(Kind::DynamicStore), DestLValueOrigin(DestLValueOrigin),
-        SrcOrigin(SrcOrigin), StoreExpr(StoreExpr),
-        RefuseIfUnresolved(RefuseIfUnresolved) {}
+        SrcOrigin(SrcOrigin), StoreExpr(StoreExpr) {}
 
   OriginID getDestLValueOrigin() const { return DestLValueOrigin; }
   OriginID getSrcOrigin() const { return SrcOrigin; }
   const Expr *getStoreExpr() const { return StoreExpr; }
-  bool refuseIfUnresolved() const { return RefuseIfUnresolved; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

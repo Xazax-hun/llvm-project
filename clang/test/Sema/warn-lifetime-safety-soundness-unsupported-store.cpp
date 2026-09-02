@@ -74,11 +74,8 @@ struct [[gsl::Pointer]] View {
 void cond_view_base(View a [[clang::noescape]], View b [[clang::noescape]],
                     bool c) {
   int local = 0;
-  // Still refused: the destination is a MEMBER of a selecting base, so the loans
-  // name a subobject path with no origin of its own to store into.
+  // Still refused, and not by the routing: a store into a member whose BASE is a
+  // transient selecting origin is refused in the fact generator, before any
+  // dynamic store is emitted, so no routing happens for it at all.
   (c ? a : b).p = &local; // expected-warning {{assignment through this expression is not modeled}}
 }
-
-// The rejection survives where the routing cannot resolve a destination: see
-// `cond_view_base` above, whose loans name a subobject path with no origin of its
-// own to store into, so a borrow deposited there would still be dropped.

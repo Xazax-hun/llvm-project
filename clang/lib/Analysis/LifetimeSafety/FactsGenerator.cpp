@@ -1352,8 +1352,7 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         if (OriginNode *Src =
                 getRValueOrigins(RHSExpr, getOriginNode(*RHSExpr)))
           CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
-              DestLV->getOriginID(), Src->getOriginID(), cast<Expr>(LHSExpr),
-              /*RefuseIfUnresolved=*/true));
+              DestLV->getOriginID(), Src->getOriginID(), cast<Expr>(LHSExpr)));
     return;
   }
   OriginNode *RHSNode = getOriginNode(*RHSExpr);
@@ -3151,8 +3150,7 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       if (CapturingOriginNode)
         CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
             CapturingOriginNode->getOriginID(),
-            CapturedOriginNode->getOriginID(), Args[I],
-            /*RefuseIfUnresolved=*/false));
+            CapturedOriginNode->getOriginID(), Args[I]));
 
       // Soundness: capturing the argument into the receiver object (`this`) is a
       // store into that object. If the argument borrows a member of the

@@ -2021,13 +2021,19 @@ public:
   ///
   /// Unresolvable means: the lvalue holds no loans at all (it designates
   /// nothing the analysis tracks), or it holds a loan naming something with no
-  /// origin to store into -- a subobject path, an Unknown borrow from an
-  /// unmodelled expression, or a caller-scope placeholder. A borrow stored
-  /// through any of those is dropped, and a pre-existing concrete loan on the
-  /// real object would mask the loss, so the store must be reported rather than
-  /// assumed harmless.
+  /// origin to store into -- an Unknown borrow from an unmodelled expression,
+  /// or heap storage. A borrow stored through any of those is dropped, and a
+  /// pre-existing concrete loan on the real object would mask the loss, so the
+  /// store must be reported rather than assumed harmless.
+  ///
+  /// This applies to EVERY dynamic store, a capture included. A capture also
+  /// emits a direct flow into the receiver, which for a while looked like
+  /// reason enough to let an unresolved capture pass quietly -- but that flow
+  /// targets the r-value the receiver expression produced, which for anything
+  /// but a plain variable is a throwaway. Treating the direct flow as a
+  /// baseline is what let a capture through a member receiver vanish.
   void checkDynamicStore(const DynamicStoreFact *DSF) {
-    if (!SemaHelper || !DSF->refuseIfUnresolved())
+    if (!SemaHelper)
       return;
     LoanSet DestLoans =
         LoanPropagation.getLoans(DSF->getDestLValueOrigin(), DSF);
@@ -2036,10 +2042,18 @@ public:
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
       // Asks the same question the routing does, so the refusal covers exactly
       // the destinations the routing cannot write.
-      if (!FactMgr.getOriginMgr().getOriginForAccessPath(AP)) {
-        AnyUnresolved = true;
-        break;
-      }
+      if (FactMgr.getOriginMgr().getOriginForAccessPath(AP))
+        continue;
+      // A temporary that is not lifetime-extended dies at the end of the full
+      // expression, so nothing can read a borrow stored into it afterwards.
+      // There is no loss to report -- and refusing would fire on every
+      // `Widget{}.set(x)`. An EXTENDED temporary does outlive the statement, so
+      // it is not exempt.
+      if (const auto *MTE = AP.getAsMaterializeTemporaryExpr();
+          MTE && !MTE->getExtendingDecl())
+        continue;
+      AnyUnresolved = true;
+      break;
     }
     if (AnyUnresolved)
       SemaHelper->reportUnsupportedStoreDestination(DSF->getStoreExpr());
