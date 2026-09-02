@@ -4197,8 +4197,7 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
     bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
       if (RD != RD->getDefinition() || RD->isDependentType())
         return true;
-      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-      if (!lifetimes::recordContainsMutableOwner(RD, Visited))
+      if (!lifetimes::recordContainsMutableOwner(RD))
         return true;
       // Member TEMPLATES make the promise too, and are honored at every call
       // site the same way, so they owe the same body. RD->methods() does not

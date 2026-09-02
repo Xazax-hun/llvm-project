@@ -222,8 +222,7 @@ static bool paramMayMutateOwner(QualType PT) {
     if (const CXXRecordDecl *RD = Pointee->getAsCXXRecordDecl();
         RD && !RD->hasDefinition())
       return true;
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-    return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited);
+    return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl());
   }
   if (isGslPointerType(PT.getNonReferenceType())) {
     if (pointsToMutableOwner(PT.getNonReferenceType()))
@@ -233,9 +232,8 @@ static bool paramMayMutateOwner(QualType PT) {
     // aliases the same owner, so the callee can reallocate it through the copy,
     // invalidating borrows into it. (A by-value record that OWNS its owner is a
     // copy and must not be treated this way -- hence gated on gsl::Pointer.)
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
     return recordContainsMutableOwner(
-        PT.getNonReferenceType()->getAsCXXRecordDecl(), Visited);
+        PT.getNonReferenceType()->getAsCXXRecordDecl());
   }
   // A BY-VALUE record that ALIASES a mutable owner: a lambda capturing a
   // container by reference, a std::function wrapping one, a struct holding a
@@ -244,8 +242,7 @@ static bool paramMayMutateOwner(QualType PT) {
   // case above, and the reason a callback parameter is a mutation the signature
   // does not otherwise show. A by-value record that OWNS its owner is excluded,
   // since the copy owns its own.
-  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-  return recordAliasesMutableOwner(PT->getAsCXXRecordDecl(), Visited);
+  return recordAliasesMutableOwner(PT->getAsCXXRecordDecl());
 }
 
 /// Maps a modeled call-argument index to the callee's corresponding

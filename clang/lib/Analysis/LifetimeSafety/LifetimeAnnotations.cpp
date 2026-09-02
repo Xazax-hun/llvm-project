@@ -825,29 +825,55 @@ bool isMutableOwnerType(QualType QT) {
   return isGslOwnerType(QT) && !QT.isConstQualified();
 }
 
-bool recordContainsMutableOwner(
-    const CXXRecordDecl *RD,
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+namespace {
+/// Cycle protection for the owner-reachability walk below, kept per question:
+/// a record answered for one and cut off for the other would silently lose the
+/// second answer (a by-value sub-object visited while asking ALIASES would stop
+/// a later CONTAINS query about the same record through a pointer).
+struct OwnerWalkVisited {
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Contains;
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Aliases;
+  bool markSeen(const CXXRecordDecl *RD, bool AliasOnly) {
+    auto &S = AliasOnly ? Aliases : Contains;
+    return S.insert(RD->getCanonicalDecl()).second;
+  }
+};
+} // namespace
+
+/// Walks \p RD for a reachable mutable owner.
+///
+/// \p AliasOnly restricts the answer to an owner the record does NOT own: a
+/// by-value owner field is skipped, because a copy of the record carries its
+/// own and mutating that reaches nothing the caller holds. That is the only
+/// difference between the two questions; everything else -- bases, indirection,
+/// gsl::Pointer members, by-value sub-objects -- is the same walk.
+static bool reachesMutableOwner(const CXXRecordDecl *RD, OwnerWalkVisited &V,
+                                bool AliasOnly) {
   if (!RD || !RD->hasDefinition())
     return false;
-  if (!Visited.insert(RD->getCanonicalDecl()).second)
+  if (!V.markSeen(RD, AliasOnly))
     return false;
   for (const CXXBaseSpecifier &B : RD->bases())
-    if (recordContainsMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
+    if (reachesMutableOwner(B.getType()->getAsCXXRecordDecl(), V, AliasOnly))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
     QualType DeclT = FD->getType();
-    if (isMutableOwnerType(DeclT))
+    // An owner held BY VALUE is owned, not aliased.
+    if (!AliasOnly && isMutableOwnerType(DeclT))
       return true;
     // A non-const pointer/reference member whose pointee is (or contains) a
     // mutable owner: the owner can be reallocated through the indirection
     // (`v->push_back(...)`). A const pointee cannot be mutated, so it is
-    // excluded.
+    // excluded. Past the indirection ownership stops mattering -- whatever the
+    // pointee owns belongs to whoever it points at, not to a copy of this
+    // record
+    // -- so the pointee is always asked the full question.
     if (DeclT->isPointerType() || DeclT->isReferenceType()) {
       QualType Pointee = DeclT->getPointeeType();
       if (!Pointee.isConstQualified() &&
           (isMutableOwnerType(Pointee) ||
-           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
+           reachesMutableOwner(Pointee->getAsCXXRecordDecl(), V,
+                               /*AliasOnly=*/false)))
         return true;
     }
     // A gsl::Pointer member (e.g. an iterator) that exposes mutable access to a
@@ -856,55 +882,26 @@ bool recordContainsMutableOwner(
         pointsToMutableOwner(DeclT.getNonReferenceType()))
       return true;
     // Recurse into a non-owner record field (e.g. an aggregate sub-object that
-    // itself holds an owner). Owners are leaves -- we never descend into them.
+    // itself holds -- or aliases -- an owner). Owners are leaves: we never
+    // descend into them.
     QualType FT = DeclT.getNonReferenceType();
     while (FT->isArrayType())
       FT = FT->getAsArrayTypeUnsafe()->getElementType();
     if (!isGslOwnerType(FT) &&
-        recordContainsMutableOwner(FT->getAsCXXRecordDecl(), Visited))
+        reachesMutableOwner(FT->getAsCXXRecordDecl(), V, AliasOnly))
       return true;
   }
   return false;
 }
 
-bool recordAliasesMutableOwner(
-    const CXXRecordDecl *RD,
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
-  if (!RD || !RD->hasDefinition())
-    return false;
-  if (!Visited.insert(RD->getCanonicalDecl()).second)
-    return false;
-  for (const CXXBaseSpecifier &B : RD->bases())
-    if (recordAliasesMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
-      return true;
-  for (const FieldDecl *FD : RD->fields()) {
-    QualType DeclT = FD->getType();
-    // Deliberately NOT the by-value `isMutableOwnerType(DeclT)` case that
-    // recordContainsMutableOwner tests: that owner is owned, so a copy of this
-    // record carries its own, and mutating it reaches nothing the caller holds.
-    //
-    // Past an indirection ownership stops mattering -- whatever the pointee
-    // owns is the caller's -- so the pointee is asked the CONTAINS question.
-    if (DeclT->isPointerType() || DeclT->isReferenceType()) {
-      QualType Pointee = DeclT->getPointeeType();
-      if (!Pointee.isConstQualified() &&
-          (isMutableOwnerType(Pointee) ||
-           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
-        return true;
-    }
-    if (isGslPointerType(DeclT.getNonReferenceType()) &&
-        pointsToMutableOwner(DeclT.getNonReferenceType()))
-      return true;
-    // A by-value sub-object may itself alias an owner, so keep asking the ALIAS
-    // question through it. Owners are leaves.
-    QualType FT = DeclT.getNonReferenceType();
-    while (FT->isArrayType())
-      FT = FT->getAsArrayTypeUnsafe()->getElementType();
-    if (!isGslOwnerType(FT) &&
-        recordAliasesMutableOwner(FT->getAsCXXRecordDecl(), Visited))
-      return true;
-  }
-  return false;
+bool recordContainsMutableOwner(const CXXRecordDecl *RD) {
+  OwnerWalkVisited V;
+  return reachesMutableOwner(RD, V, /*AliasOnly=*/false);
+}
+
+bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
+  OwnerWalkVisited V;
+  return reachesMutableOwner(RD, V, /*AliasOnly=*/true);
 }
 
 bool recordHasGslOwnerField(QualType QT) {
@@ -913,8 +910,7 @@ bool recordHasGslOwnerField(QualType QT) {
   // (type `S*`); peel it to reach the record.
   if (QT->isPointerType())
     QT = QT->getPointeeType();
-  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-  return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Visited);
+  return recordContainsMutableOwner(QT->getAsCXXRecordDecl());
 }
 
 static StringRef getName(const CXXRecordDecl &RD) {

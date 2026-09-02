@@ -283,9 +283,7 @@ static bool recordContainsOwnerSubobjectDerivedFrom(
     return false;
   if (RD->getCanonicalDecl() == Target->getCanonicalDecl() ||
       RD->isDerivedFrom(Target)) {
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> OwnerVisited;
-    return isGslOwnerType(RD) ||
-           recordContainsMutableOwner(RD, OwnerVisited);
+    return isGslOwnerType(RD) || recordContainsMutableOwner(RD);
   }
   if (!Visited.insert(RD->getCanonicalDecl()).second)
     return false;
@@ -1105,9 +1103,7 @@ public:
     if (T.isNull())
       return false;
     const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-    return isGslOwnerType(T) ||
-           (RD && recordContainsMutableOwner(RD, Visited));
+    return isGslOwnerType(T) || (RD && recordContainsMutableOwner(RD));
   }
 
   void checkConstSubversion(const InvalidateOriginFact *IOF) {
@@ -1282,9 +1278,9 @@ public:
         // `a.pos = ...` (`Vec2&`) merely because the enclosing record happens to
         // hold both a stray `Vec2` and a container. A view merely borrowing into
         // an owner is excluded -- its type is no such by-value subobject.
-        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited, Visited2;
+        llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited2;
         bool DirectOwner =
-            IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT, Visited));
+            IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT));
         // The enclosing-object fallback is accepted only for a receiver
         // (ReachableOwner), not for the dynamic-dispatch argument case
         // (DenotedOwner) -- see OwnerLoanGate.
@@ -1553,8 +1549,7 @@ public:
       bool WrapsOwner = false;
       if (!DirectOwner)
         if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
-          llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-          WrapsOwner = recordContainsMutableOwner(RD, Visited);
+          WrapsOwner = recordContainsMutableOwner(RD);
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
@@ -1741,8 +1736,7 @@ public:
     if (isGslOwnerType(GlobalTy))
       return true;
     if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
-      llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
-      return recordContainsMutableOwner(RD, Visited);
+      return recordContainsMutableOwner(RD);
     }
     return false;
   }
