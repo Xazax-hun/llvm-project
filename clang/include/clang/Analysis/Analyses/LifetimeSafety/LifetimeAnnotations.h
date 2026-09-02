@@ -206,6 +206,19 @@ bool isMutableOwnerType(QualType QT);
 bool recordContainsMutableOwner(
     const CXXRecordDecl *RD, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited);
 
+// Returns true if `RD` reaches a mutable owner it does not OWN: through a
+// non-const pointer or reference member, or a gsl::Pointer member. A by-value
+// owner field is deliberately excluded -- copying the record copies that owner,
+// so mutating the copy cannot invalidate a borrow into the caller's.
+//
+// This is what makes a BY-VALUE argument dangerous: a lambda capturing a
+// container by reference, a std::function wrapping one, a struct holding a
+// `vector<T>&`. The copy still aliases the caller's owner, so the callee can
+// reallocate it. `Visited` cuts cycles.
+bool recordAliasesMutableOwner(
+    const CXXRecordDecl *RD,
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited);
+
 // As recordContainsMutableOwner, but takes the receiver type of a member call:
 // peels a reference and the `this` pointer to reach the record. Used by the safe
 // model to treat a non-const member call on an object as invalidating views into

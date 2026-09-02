@@ -237,7 +237,15 @@ static bool paramMayMutateOwner(QualType PT) {
     return recordContainsMutableOwner(
         PT.getNonReferenceType()->getAsCXXRecordDecl(), Visited);
   }
-  return false;
+  // A BY-VALUE record that ALIASES a mutable owner: a lambda capturing a
+  // container by reference, a std::function wrapping one, a struct holding a
+  // `vector<T>&`. Copying it copies the alias, so calling it can still
+  // reallocate the CALLER's owner -- the same reasoning as the gsl::Pointer
+  // case above, and the reason a callback parameter is a mutation the signature
+  // does not otherwise show. A by-value record that OWNS its owner is excluded,
+  // since the copy owns its own.
+  llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited;
+  return recordAliasesMutableOwner(PT->getAsCXXRecordDecl(), Visited);
 }
 
 /// Maps a modeled call-argument index to the callee's corresponding

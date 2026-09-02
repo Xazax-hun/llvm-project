@@ -867,6 +867,46 @@ bool recordContainsMutableOwner(
   return false;
 }
 
+bool recordAliasesMutableOwner(
+    const CXXRecordDecl *RD,
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+  if (!RD || !RD->hasDefinition())
+    return false;
+  if (!Visited.insert(RD->getCanonicalDecl()).second)
+    return false;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    if (recordAliasesMutableOwner(B.getType()->getAsCXXRecordDecl(), Visited))
+      return true;
+  for (const FieldDecl *FD : RD->fields()) {
+    QualType DeclT = FD->getType();
+    // Deliberately NOT the by-value `isMutableOwnerType(DeclT)` case that
+    // recordContainsMutableOwner tests: that owner is owned, so a copy of this
+    // record carries its own, and mutating it reaches nothing the caller holds.
+    //
+    // Past an indirection ownership stops mattering -- whatever the pointee
+    // owns is the caller's -- so the pointee is asked the CONTAINS question.
+    if (DeclT->isPointerType() || DeclT->isReferenceType()) {
+      QualType Pointee = DeclT->getPointeeType();
+      if (!Pointee.isConstQualified() &&
+          (isMutableOwnerType(Pointee) ||
+           recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Visited)))
+        return true;
+    }
+    if (isGslPointerType(DeclT.getNonReferenceType()) &&
+        pointsToMutableOwner(DeclT.getNonReferenceType()))
+      return true;
+    // A by-value sub-object may itself alias an owner, so keep asking the ALIAS
+    // question through it. Owners are leaves.
+    QualType FT = DeclT.getNonReferenceType();
+    while (FT->isArrayType())
+      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    if (!isGslOwnerType(FT) &&
+        recordAliasesMutableOwner(FT->getAsCXXRecordDecl(), Visited))
+      return true;
+  }
+  return false;
+}
+
 bool recordHasGslOwnerField(QualType QT) {
   QT = QT.getNonReferenceType();
   // The implicit object argument of a member call is the `this` pointer
