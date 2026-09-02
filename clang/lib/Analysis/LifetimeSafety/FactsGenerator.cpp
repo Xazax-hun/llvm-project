@@ -2199,6 +2199,22 @@ void FactsGenerator::VisitMSAsmStmt(const MSAsmStmt *AS) {
       UntrackedConstructReason::InlineAsm, AS->getAsmLoc()));
 }
 
+void FactsGenerator::VisitOMPExecutableDirective(
+    const OMPExecutableDirective *D) {
+  // An OpenMP directive's data-sharing clauses make copies the analysis does
+  // not model -- `private`/`firstprivate` give each thread its own object, so a
+  // borrow of the original names storage the body never touches -- and the body
+  // may run concurrently, so a borrow's validity no longer follows from the
+  // sequential control flow the analysis reasons about. Reject the construct
+  // under the safe programming model.
+  //
+  // The directive's BODY is still walked normally, so a hazard written there is
+  // reported precisely as well; this refusal covers what the clauses and the
+  // concurrency hide.
+  CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+      UntrackedConstructReason::OpenMPDirective, D->getBeginLoc()));
+}
+
 void FactsGenerator::handleTryStatements() {
   const Stmt *Body = AC.getBody();
   if (!Body)

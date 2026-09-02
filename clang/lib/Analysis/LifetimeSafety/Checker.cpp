@@ -1842,6 +1842,10 @@ public:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportInlineAsm(UCF->getConstructLoc());
       break;
+    case UntrackedConstructReason::OpenMPDirective:
+      if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
+        SemaHelper->reportOpenMPDirective(UCF->getConstructLoc());
+      break;
     case UntrackedConstructReason::SetjmpLongjmp:
       SemaHelper->reportSetjmpLongjmp(E->getExprLoc());
       break;

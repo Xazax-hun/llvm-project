@@ -921,6 +921,19 @@ The construct is rejected under the safe programming model.
   }];
 }
 
+def LifetimeSafetyOpenMP : DiagGroup<"lifetime-safety-openmp"> {
+  code Documentation = [{
+Warns on an OpenMP construct. A directive's data-sharing clauses make copies the
+analysis does not model ('private'/'firstprivate' give each thread its own
+object) and its body may run concurrently, so a borrow's validity no longer
+follows from the sequential control flow the analysis reasons about. A
+'declare reduction' or 'declare mapper' is worse than unmodeled: its combiner and
+initializer expressions are not part of any function body, so they are never
+analyzed at all and a dangling use written there is invisible. Both are rejected
+under the safe programming model.
+  }];
+}
+
 def LifetimeSafetyTypePunning : DiagGroup<"lifetime-safety-type-punning"> {
   code Documentation = [{
 Warns on a union member access or a 'reinterpret_cast'. Both reinterpret the
@@ -1087,6 +1100,7 @@ def LifetimeSafetySoundness : DiagGroup<"lifetime-safety-soundness",
                                          LifetimeSafetyUnknownOwnership,
                                          LifetimeSafetyException,
                                          LifetimeSafetyInlineAsm,
+                                         LifetimeSafetyOpenMP,
                                          LifetimeSafetyTypePunning,
                                          LifetimeSafetySetjmp,
                                          LifetimeSafetyCoroutine,

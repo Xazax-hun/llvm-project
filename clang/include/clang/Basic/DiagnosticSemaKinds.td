@@ -11332,6 +11332,17 @@ def warn_lifetime_safety_exception
               "may be missed">,
       InGroup<LifetimeSafetyException>,
       DefaultIgnore;
+def warn_lifetime_safety_openmp
+    : Warning<"%select{OpenMP directive|'declare reduction'|'declare mapper'}0 "
+              "is not modeled by lifetime safety analysis; "
+              "%select{data-sharing clauses copy objects the analysis does not "
+              "track and the body may run concurrently|the combiner and "
+              "initializer expressions are not part of any function body, so "
+              "they are never analyzed|the mapper expressions are not part of "
+              "any function body, so they are never analyzed}0, so a dangling "
+              "use could be missed">,
+      InGroup<LifetimeSafetyOpenMP>,
+      DefaultIgnore;
 def warn_lifetime_safety_inline_asm
     : Warning<"inline assembly is not modeled by lifetime safety analysis; an "
               "output operand can reseat a pointer and an input or memory "

@@ -746,6 +746,9 @@ public:
   void reportInlineAsm(SourceLocation Loc) override {
     S.Diag(Loc, diag::warn_lifetime_safety_inline_asm);
   }
+  void reportOpenMPDirective(SourceLocation Loc) override {
+    S.Diag(Loc, diag::warn_lifetime_safety_openmp) << 0;
+  }
   void reportSetjmpLongjmp(SourceLocation Loc) override {
     S.Diag(Loc, diag::warn_lifetime_safety_setjmp);
   }

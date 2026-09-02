@@ -83,6 +83,7 @@ public:
   void VisitStmtExpr(const StmtExpr *SE);
   void VisitGCCAsmStmt(const GCCAsmStmt *AS);
   void VisitMSAsmStmt(const MSAsmStmt *AS);
+  void VisitOMPExecutableDirective(const OMPExecutableDirective *D);
 
 private:
   OriginNode *getOriginNode(const ValueDecl &D);

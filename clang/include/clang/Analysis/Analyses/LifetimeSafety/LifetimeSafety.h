@@ -364,6 +364,9 @@ public:
   // can move or invalidate a borrow -- so it is rejected.
   virtual void reportInlineAsm(SourceLocation Loc) {}
 
+  // Reports an OpenMP executable directive, which the analysis does not model.
+  virtual void reportOpenMPDirective(SourceLocation Loc) {}
+
   // Reports a setjmp/longjmp family call. Its non-local control flow (a jump back
   // to the setjmp point) is not modeled by the CFG, so a borrow invalidated
   // before the jump and used after it re-enters could be missed.

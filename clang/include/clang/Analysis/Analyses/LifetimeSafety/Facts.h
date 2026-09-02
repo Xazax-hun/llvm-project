@@ -521,7 +521,8 @@ enum class UntrackedConstructReason : uint8_t {
   /// lifetime annotations, so the call is not modeled.
   IndirectCall,
   /// An argument bound to a pointer/reference parameter that carries none of
-  /// the lifetime annotations ('lifetimebound', 'noescape', 'lifetime_capture_by'),
+  /// the lifetime annotations ('lifetimebound', 'noescape',
+  /// 'lifetime_capture_by'),
   /// so the analysis cannot tell whether the borrow escapes the call.
   UnannotatedIndirection,
   /// An ownership-transferring move of an owner (e.g. 'std::move(owner)' or
@@ -549,7 +550,8 @@ enum class UntrackedConstructReason : uint8_t {
   /// intra-procedural analysis cannot see -- invalidating the view, so the
   /// borrow cannot be tracked.
   ViewOnMutableGlobal,
-  /// A `const` member function that mutates an owner reached through the pointee
+  /// A `const` member function that mutates an owner reached through the
+  /// pointee
   /// of an owning smart-pointer data member (e.g. `void f() const {
   /// uptr_->append(...); }` where `uptr_` is `std::unique_ptr<std::string>`).
   /// `const` does not propagate through a smart pointer, so the pointee is
@@ -563,7 +565,8 @@ enum class UntrackedConstructReason : uint8_t {
   /// single-indirection rule is mirrored here for transient expressions, which
   /// could otherwise build a double indirection no declaration captures.
   MultiLevelIndirectionExpr,
-  /// A member access on a union. Different union members alias the same storage,
+  /// A member access on a union. Different union members alias the same
+  /// storage,
   /// so a borrow into one member can be invalidated by writing another (or by
   /// switching the active member); the analysis keys borrows by field identity
   /// and does not model this aliasing, so such a borrow can dangle undetected.
@@ -573,47 +576,66 @@ enum class UntrackedConstructReason : uint8_t {
   /// borrow recovered through it is not tracked.
   ReinterpretCast,
   /// A cast that recovers a typed pointer out of a `void *`. Like a
-  /// `reinterpret_cast`, it hides where the pointer came from: `void *` is opaque,
-  /// so the conversion can name any type at all, and splitting a conversion in two
-  /// through one launders it past checks that look at the source and target types
-  /// (`Base * -> void * -> Derived *` has a record on only one side of each half).
-  /// Casting *to* `void *` is not reported -- that is the opaque-userdata idiom,
+  /// `reinterpret_cast`, it hides where the pointer came from: `void *` is
+  /// opaque,
+  /// so the conversion can name any type at all, and splitting a conversion in
+  /// two
+  /// through one launders it past checks that look at the source and target
+  /// types
+  /// (`Base * -> void * -> Derived *` has a record on only one side of each
+  /// half).
+  /// Casting *to* `void *` is not reported -- that is the opaque-userdata
+  /// idiom,
   /// and what a callee may do with such a parameter is handled conservatively
   /// elsewhere.
   VoidPointerCast,
-  /// A base-to-derived conversion. Whether the derived subobject is alive depends
+  /// A base-to-derived conversion. Whether the derived subobject is alive
+  /// depends
   /// on whether the complete object's construction has finished and its
-  /// destruction has not begun -- which nothing at the conversion reveals. Inside
-  /// a constructor or destructor of a base it is undefined ([class.cdtor]), and a
-  /// base destructor reaching derived state is a use-after-free, since bases are
-  /// destroyed after the derived part. `dynamic_cast` is excluded: it is checked at
+  /// destruction has not begun -- which nothing at the conversion reveals.
+  /// Inside
+  /// a constructor or destructor of a base it is undefined ([class.cdtor]), and
+  /// a
+  /// base destructor reaching derived state is a use-after-free, since bases
+  /// are
+  /// destroyed after the derived part. `dynamic_cast` is excluded: it is
+  /// checked at
   /// run time, and inside a constructor or destructor the object is treated as
   /// being of that constructor's or destructor's own class, so it simply fails.
   Downcast,
-  /// A by-reference lambda capture of an indirection-typed variable (e.g. `[&sv]`
-  /// where sv is a std::string_view): the capture forms a reference to a view --
+  /// A by-reference lambda capture of an indirection-typed variable (e.g.
+  /// `[&sv]`
+  /// where sv is a std::string_view): the capture forms a reference to a view
+  /// --
   /// two levels of indirection -- and a reassignment of the view inside the
-  /// lambda body is not flowed back, so a borrow it holds can dangle undetected.
+  /// lambda body is not flowed back, so a borrow it holds can dangle
+  /// undetected.
   LambdaRefCaptureIndirection,
-  /// An array whose element type is itself an indirection (a pointer, reference,
+  /// An array whose element type is itself an indirection (a pointer,
+  /// reference,
   /// or view) decaying to a pointer (e.g. `int* arr[N]` -> `int**`), other than
   /// as the base of an `arr[i]` subscript. The decay forms a pointer-to-pointer
-  /// -- a double indirection the analysis cannot model (like `int**` / `&p`), and
-  /// per-element borrows of such an array cannot be tracked (cf. std::vector<int*>).
+  /// -- a double indirection the analysis cannot model (like `int**` / `&p`),
+  /// and
+  /// per-element borrows of such an array cannot be tracked (cf.
+  /// std::vector<int*>).
   ArrayOfIndirectionDecay,
   /// An assignment whose destination lvalue selects/forwards among several
   /// objects -- e.g. `(c ? p : q) = ...`, `(f(), p) = ...`, or those wrapped in
-  /// `*&(...)`/casts -- so a stored borrow cannot be routed to a tracked storage
+  /// `*&(...)`/casts -- so a stored borrow cannot be routed to a tracked
+  /// storage
   /// origin and is dropped. The destination is borrow-holding (a pointer/view).
   UnsupportedStoreDestination,
   /// Soundness catch-all: an expression whose type carries a borrow (a pointer,
-  /// reference, or view) for which the fact generator has no specific handler --
+  /// reference, or view) for which the fact generator has no specific handler
+  /// --
   /// e.g. a C11 atomic builtin (`AtomicExpr`) or a compound literal. Such an
   /// expression produces a value whose origin is never populated, so any borrow
   /// it should carry is silently dropped. Flagging it keeps the soundness model
   /// from silently failing on a construct it does not model.
   UnmodeledExpr,
-  /// An inline assembly statement (`asm(...)`). The analysis does not model what
+  /// An inline assembly statement (`asm(...)`). The analysis does not model
+  /// what
   /// the asm does: an output operand can reseat a pointer to anything, and an
   /// input/memory-clobbering operand can move or invalidate a borrow, with no
   /// visible flow. A stale loan on an asm-reseated pointer would otherwise be
@@ -622,18 +644,27 @@ enum class UntrackedConstructReason : uint8_t {
   /// A call to a `setjmp`/`longjmp` family function (recognized via the
   /// `returns_twice` attribute or the setjmp/longjmp builtins). Non-local
   /// control flow -- `longjmp` transferring back to a `setjmp` point, which the
-  /// CFG does not model as a back-edge -- can re-enter scopes and re-run code in
+  /// CFG does not model as a back-edge -- can re-enter scopes and re-run code
+  /// in
   /// a way the dataflow cannot follow, so a borrow invalidated before the jump
-  /// and used after it would be missed. The construct is rejected under the safe
+  /// and used after it would be missed. The construct is rejected under the
+  /// safe
   /// programming model.
   SetjmpLongjmp,
-  /// A coroutine. Its body is deferred past suspension points and resumed later,
+  /// A coroutine. Its body is deferred past suspension points and resumed
+  /// later,
   /// possibly after a by-reference argument's temporary has been destroyed (the
   /// coroutine frame outlives the call's full-expression). The analysis models
   /// the call as ordinary, so a borrowed parameter used in the resumed body --
   /// after its argument died -- is not connected to that expiry and would be
   /// missed. The construct is rejected under the safe programming model.
   Coroutine,
+  /// An OpenMP executable directive. Its data-sharing clauses make copies the
+  /// analysis does not model (`private`/`firstprivate` give each thread its own
+  /// object), and its body may run concurrently, so a borrow's validity no
+  /// longer follows from the sequential control flow the analysis reasons
+  /// about. The construct is rejected under the safe programming model.
+  OpenMPDirective,
 };
 
 /// Records a construct that the analysis cannot fully model, attached to the

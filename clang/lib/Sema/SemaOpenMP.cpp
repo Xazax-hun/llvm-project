@@ -24132,6 +24132,14 @@ SemaOpenMP::DeclGroupPtrTy SemaOpenMP::ActOnOpenMPDeclareReductionDirectiveEnd(
       if (S)
         SemaRef.PushOnScopeChains(cast<OMPDeclareReductionDecl>(D), S,
                                   /*AddToContext=*/false);
+      // Lifetime safety (safe programming model): the combiner and initializer
+      // are expressions attached to this declaration, not statements in any
+      // function body, so no CFG is ever built for them and nothing in them is
+      // analyzed -- a whole use-after-free written in an initializer is
+      // invisible. Reject the construct here, where it is declared, rather than
+      // at the reduction's use: the expressions belong to the declaration and
+      // are what cannot be checked.
+      SemaRef.Diag(D->getLocation(), diag::warn_lifetime_safety_openmp) << 1;
     } else {
       D->setInvalidDecl();
     }
@@ -24253,6 +24261,12 @@ SemaOpenMP::DeclGroupPtrTy SemaOpenMP::ActOnOpenMPDeclareMapperDirective(
   VD->setLexicalDeclContext(DMD);
   DMD->addDecl(VD);
   DMD->setMapperVarRef(MapperVarRef);
+
+  // Lifetime safety (safe programming model): as with 'declare reduction', the
+  // mapper's expressions hang off this declaration rather than living in a
+  // function body, so no CFG covers them and nothing in them is analyzed.
+  if (!Invalid)
+    SemaRef.Diag(DMD->getLocation(), diag::warn_lifetime_safety_openmp) << 2;
 
   return DeclGroupPtrTy::make(DeclGroupRef(DMD));
 }
