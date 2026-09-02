@@ -2031,24 +2031,12 @@ public:
       return;
     LoanSet DestLoans =
         LoanPropagation.getLoans(DSF->getDestLValueOrigin(), DSF);
-    const auto &DeclOrigins = FactMgr.getOriginMgr().getDeclOriginLists();
     bool AnyUnresolved = DestLoans.isEmpty();
     for (LoanID LID : DestLoans) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      if (!AP.getElements().empty()) {
-        AnyUnresolved = true;
-        break;
-      }
-      // Mirrors the routing in LoanPropagation: a declaration, a parameter
-      // placeholder, or `this` all resolve; anything else does not.
-      bool Resolvable = false;
-      if (const auto *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl()))
-        Resolvable = DeclOrigins.count(VD);
-      else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
-        Resolvable = DeclOrigins.count(PVD);
-      else if (AP.getAsPlaceholderThis())
-        Resolvable = FactMgr.getOriginMgr().getThisOrigins().has_value();
-      if (!Resolvable) {
+      // Asks the same question the routing does, so the refusal covers exactly
+      // the destinations the routing cannot write.
+      if (!FactMgr.getOriginMgr().getOriginForAccessPath(AP)) {
         AnyUnresolved = true;
         break;
       }

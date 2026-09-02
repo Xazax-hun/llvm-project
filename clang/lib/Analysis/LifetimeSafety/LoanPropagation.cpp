@@ -33,8 +33,7 @@ namespace clang::lifetimes::internal {
 /// was ISSUED into some origin that flows into it, so walking the flow edges
 /// backwards from the lvalue's origin and collecting the loans issued anywhere
 /// in that reachable set gives a superset of the loans it can hold. Each such
-/// loan names its storage by a declaration, and that declaration's origin is
-/// where the store can land.
+/// loan names the storage the store can land in, and that storage has an origin.
 ///
 /// Marking only these keeps the block-local fast path for everything else. The
 /// cheaper approximations are both far too coarse in practice: marking every
@@ -62,7 +61,6 @@ static void collectDynamicStoreDestinations(const FactManager &FactMgr,
     return;
 
   const OriginManager &OM = FactMgr.getOriginMgr();
-  const auto &DeclOrigins = OM.getDeclOriginLists();
   llvm::BitVector Seen(OM.getNumOrigins());
   llvm::SmallVector<OriginID> Work;
   for (const DynamicStoreFact *DS : Stores) {
@@ -77,17 +75,11 @@ static void collectDynamicStoreDestinations(const FactManager &FactMgr,
     // Any loan issued into a reachable origin may reach the store's lvalue.
     for (LoanID LID : IssuedTo.lookup(Cur.Value)) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      const ValueDecl *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl());
-      if (!VD)
-        VD = AP.getAsPlaceholderParam();
-      if (VD) {
-        auto It = DeclOrigins.find(VD);
-        if (It != DeclOrigins.end() && It->second)
-          Out.set(It->second->getOriginID().Value);
-      } else if (AP.getAsPlaceholderThis()) {
-        if (auto ThisOrigins = OM.getThisOrigins())
-          Out.set((*ThisOrigins)->getOriginID().Value);
-      }
+      // Exactly the origin the routing would write, so the two stay in step:
+      // a destination the routing can reach but the prepass does not mark is
+      // one whose deposit is discarded at the next block boundary.
+      if (const OriginNode *Dest = OM.getOriginForAccessPath(AP))
+        Out.set(Dest->getOriginID().Value);
     }
     for (OriginID Pred : FlowsInto.lookup(Cur.Value))
       if (!Seen.test(Pred.Value)) {
@@ -296,38 +288,24 @@ public:
   /// cannot tell which was written, so a destination's earlier loans must
   /// survive.
   ///
-  /// Only a loan that names a declaration's storage with no further path
-  /// elements is routed -- that is the storage whose origin is exactly the
-  /// declaration's. A loan naming a subobject, an unknown borrow, or a
-  /// caller-scope placeholder designates storage this transfer cannot resolve
-  /// to an origin; those are left alone here and reported by the checker, so
+  /// A loan names the storage written, and getOriginForAccessPath turns that
+  /// name into the origin holding it -- including a subobject, which resolves
+  /// to the very origin a later read of the same member consults. A loan whose
+  /// ROOT does not resolve (an unknown borrow) designates storage this transfer
+  /// cannot reach; those are left alone here and reported by the checker, so
   /// the store is refused rather than silently dropped.
   Lattice transfer(Lattice In, const DynamicStoreFact &F) {
     LoanSet SrcLoans = getLoans(In, F.getSrcOrigin());
     if (SrcLoans.isEmpty())
       return In;
-    const auto &DeclOrigins = FactMgr.getOriginMgr().getDeclOriginLists();
     Lattice Out = In;
     for (LoanID LID : getLoans(In, F.getDestLValueOrigin())) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      if (!AP.getElements().empty())
-        continue;
-      // A loan names its storage by a declaration, or -- for caller-provided
-      // storage -- by a placeholder standing for a parameter or the implicit
-      // object. All three have an origin to store into.
-      const OriginNode *Dest = nullptr;
-      if (const auto *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl())) {
-        auto It = DeclOrigins.find(VD);
-        if (It != DeclOrigins.end())
-          Dest = It->second;
-      } else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam()) {
-        auto It = DeclOrigins.find(PVD);
-        if (It != DeclOrigins.end())
-          Dest = It->second;
-      } else if (AP.getAsPlaceholderThis()) {
-        if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
-          Dest = *ThisOrigins;
-      }
+      // A loan names the storage the store lands in; that storage has an origin
+      // whenever the path resolves -- including a subobject, whose origin is
+      // the one a later read of the same member consults.
+      const OriginNode *Dest =
+          FactMgr.getOriginMgr().getOriginForAccessPath(AP);
       if (!Dest)
         continue;
       OriginID DestOID = Dest->getOriginID();

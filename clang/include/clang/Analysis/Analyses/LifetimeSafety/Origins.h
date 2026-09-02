@@ -26,6 +26,8 @@
 
 namespace clang::lifetimes::internal {
 
+class AccessPath;
+
 using OriginID = utils::ID<struct OriginTag>;
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, OriginID ID) {
@@ -270,6 +272,25 @@ public:
   getDeclOriginLists() const {
     return DeclToNode;
   }
+
+  /// The origin holding what \p AP names, or null if the path does not resolve
+  /// to one.
+  ///
+  /// A loan names storage as a root plus a path of subobject steps. The root is
+  /// a declaration, or -- for caller-provided storage -- a placeholder standing
+  /// for a parameter or the implicit object; each has an origin. Field steps
+  /// then follow the origin tree's field edges, so `h.v` resolves to the very
+  /// origin a later read of `h.v` consults. That is what makes a store
+  /// *through* a member lvalue visible afterwards, rather than landing in the
+  /// throwaway origin of the expression that designated it.
+  ///
+  /// Descent stops where the origin tree stops distinguishing subobjects: a
+  /// `gsl::Pointer` record is a single origin for the whole object, and an
+  /// `Interior` step stands for an unknown subobject. The enclosing origin is
+  /// then what a read consults too, so it is the right -- and conservative --
+  /// answer. Null means the ROOT did not resolve, which callers must treat as a
+  /// store they cannot track.
+  const OriginNode *getOriginForAccessPath(const AccessPath &AP) const;
 
 private:
   OriginID getNextOriginID() { return NextOriginID++; }

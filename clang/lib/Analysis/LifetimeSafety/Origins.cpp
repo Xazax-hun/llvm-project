@@ -18,6 +18,7 @@
 #include "clang/AST/TypeBase.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeStats.h"
+#include "clang/Analysis/Analyses/LifetimeSafety/Loans.h"
 #include "clang/Analysis/AnalysisDeclContext.h"
 #include "llvm/ADT/StringMap.h"
 
@@ -560,6 +561,42 @@ void OriginManager::registerLifetimeAnnotatedOriginType(QualType QT) {
     return;
 
   LifetimeAnnotatedOriginTypes.insert(QT.getCanonicalType().getTypePtr());
+}
+
+const OriginNode *
+OriginManager::getOriginForAccessPath(const AccessPath &AP) const {
+  const OriginNode *N = nullptr;
+  if (const auto *VD = dyn_cast_or_null<ValueDecl>(AP.getAsValueDecl())) {
+    auto It = DeclToNode.find(VD);
+    if (It != DeclToNode.end())
+      N = It->second;
+  } else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam()) {
+    auto It = DeclToNode.find(PVD);
+    if (It != DeclToNode.end())
+      N = It->second;
+  } else if (AP.getAsPlaceholderThis()) {
+    if (auto ThisOrigins = getThisOrigins())
+      N = *ThisOrigins;
+  }
+  if (!N)
+    return nullptr;
+  for (const PathElement &PE : AP.getElements()) {
+    // Descend only as far as the tree distinguishes. A field edge exists when
+    // the subobject has an origin of its own, and that is the origin a read of
+    // the same member consults, so descending keeps the store and the read on
+    // the same node. Where no edge exists -- a `gsl::Pointer` record is one
+    // origin for the whole object, and an `Interior` step stands for an unknown
+    // subobject -- the enclosing node IS what a read consults, so stopping
+    // there lands the store where it will be seen. Never skip past a step onto
+    // an unrelated node.
+    if (!PE.isField())
+      break;
+    const OriginNode *Child = N->getFieldChildInChain(PE.getFieldDecl());
+    if (!Child)
+      break;
+    N = Child;
+  }
+  return N;
 }
 
 } // namespace clang::lifetimes::internal
