@@ -2396,9 +2396,29 @@ static void collectExtendedTemporaries(
     if (!S)
       continue;
     if (const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(S))
-      if (MTE->getStorageDuration() == SD_Automatic &&
-          MTE->getExtendingDecl() == VD)
-        Out.push_back(MTE);
+      if (MTE->getStorageDuration() == SD_Automatic) {
+        // Extended to this variable, or to one of its subobjects. Clang records
+        // the target as the variable for a temporary bound one level down, but
+        // leaves it as the FIELD once another aggregate is nested in between --
+        // and either way the storage dies with this variable, because the
+        // object owning that member is this variable. A temporary belonging to
+        // some OTHER variable (one declared inside a lambda body in this
+        // initializer, say) names that variable and is left to its own scope.
+        const ValueDecl *Extended = MTE->getExtendingDecl();
+        if (Extended == VD || isa_and_nonnull<FieldDecl>(Extended))
+          Out.push_back(MTE);
+      }
+    // A default initializer holds its expression on the FIELD, so
+    // CXXDefaultInitExpr::children() is an empty range and walking children
+    // alone never enters it. A temporary bound to a reference member by a
+    // default member initializer is extended to the enclosing OBJECT, so it
+    // dies with this variable -- but it lives behind exactly that empty range,
+    // so it was never collected and never expired, leaving the borrow immortal.
+    // Same for a default argument.
+    if (const auto *DIE = dyn_cast<CXXDefaultInitExpr>(S))
+      Worklist.push_back(DIE->getExpr());
+    else if (const auto *DAE = dyn_cast<CXXDefaultArgExpr>(S))
+      Worklist.push_back(DAE->getExpr());
     for (const Stmt *Child : S->children())
       Worklist.push_back(Child);
   }
