@@ -466,7 +466,6 @@ public:
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
-    checkGlobalCaptureAnnotations();
     checkMultiLevelIndirection();
     suggestAnnotations();
     reportNoescapeViolations();
@@ -497,17 +496,6 @@ public:
     if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
       for (int Idx : A->params())
         if (Idx == LifetimeCaptureByAttr::This)
-          return true;
-    return false;
-  }
-
-  /// Returns true if \p PVD is annotated
-  /// [[clang::lifetime_capture_by(unknown)]], which documents that the parameter
-  /// may be captured by an unspecified location.
-  static bool capturesUnknown(const ParmVarDecl *PVD) {
-    if (const auto *A = PVD->getAttr<LifetimeCaptureByAttr>())
-      for (int Idx : A->params())
-        if (Idx == LifetimeCaptureByAttr::Unknown)
           return true;
     return false;
   }
@@ -2619,23 +2607,6 @@ public:
       SemaHelper->reportCaptureByViolation(PVD);
     for (const ParmVarDecl *PVD : UndeclaredFieldCaptures)
       SemaHelper->reportUndeclaredFieldCapture(PVD);
-  }
-
-  // Bans [[clang::lifetime_capture_by(global)]] and
-  // [[clang::lifetime_capture_by(unknown)]]: the analysis cannot track a borrow
-  // captured into global/static storage or an unspecified location, so the
-  // construct is rejected.
-  void checkGlobalCaptureAnnotations() {
-    if (!SemaHelper)
-      return;
-    const auto *Fn = dyn_cast_or_null<FunctionDecl>(FD);
-    if (!Fn)
-      return;
-    for (const ParmVarDecl *PVD : Fn->parameters())
-      if (capturesGlobal(PVD))
-        SemaHelper->reportGlobalCapture(PVD, /*IsUnknown=*/false);
-      else if (capturesUnknown(PVD))
-        SemaHelper->reportGlobalCapture(PVD, /*IsUnknown=*/true);
   }
 
   void reportLifetimeboundViolations() {

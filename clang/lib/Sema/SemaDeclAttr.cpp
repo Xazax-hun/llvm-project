@@ -4485,8 +4485,22 @@ void Sema::LazyProcessLifetimeCaptureByParams(FunctionDecl *FD) {
               << Entities[I] << Loc;
         continue;
       }
-      if (Name == "unknown" || Name == "global")
+      if (Name == "unknown" || Name == "global") {
         DisallowReservedParams(Name);
+        // Lifetime safety (safe programming model): the analysis cannot track a
+        // borrow captured into global/static storage or into an unspecified
+        // location, so it models these captures as nothing at all and the
+        // annotation buys a caller no protection.
+        //
+        // Checked here, with the annotation, because that is what it is a
+        // property of. Asking the per-function analysis instead needs a BODY,
+        // which let the case that matters most through: a function declared in
+        // a header and defined in another translation unit, whose call sites
+        // dropped the capture with nothing said.
+        Diag(CapturedBy->getArgLocs()[I],
+             diag::warn_lifetime_safety_global_capture)
+            << (Name == "unknown");
+      }
       // Lifetime safety (safe programming model): capturing a borrow into the
       // members of a [[gsl::Owner]] via 'lifetime_capture_by(this)' is not
       // supported -- an owner owns its contents, and a borrow stashed in its

@@ -292,13 +292,6 @@ public:
   /// enclosing object -- a capture the declaration does not advertise.
   virtual void reportUndeclaredFieldCapture(const ParmVarDecl *PVD) {}
 
-  // Reports a parameter annotated [[clang::lifetime_capture_by(global)]] or
-  // [[clang::lifetime_capture_by(unknown)]]. The safe programming model rejects
-  // both: the analysis cannot track a borrow captured into global/static storage
-  // or an unspecified location, so such a capture may dangle undetected.
-  // \p IsUnknown selects which spelling is reported.
-  virtual void reportGlobalCapture(const ParmVarDecl *PVD, bool IsUnknown) {}
-
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
   virtual void reportMultiLevelIndirection(const ValueDecl *VD) {}

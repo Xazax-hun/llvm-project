@@ -75,3 +75,42 @@ int main() {
   Clean c;
   return c.read();
 }
+
+//===----------------------------------------------------------------------===//
+// The ban is a property of the DECLARATION, so a body is not required.
+//
+// It used to be checked from the per-function analysis, which needs one -- so
+// the case that matters most went unsaid: a function declared in a header and
+// defined in another translation unit. Every call site dropped the capture, and
+// the annotation the caller was trusting bought nothing.
+//===----------------------------------------------------------------------===//
+
+// Declared only; defined in some other TU.
+void captures_global_decl_only(int *a [[clang::lifetime_capture_by(global)]]); // expected-warning {{'lifetime_capture_by(global)' is not supported by the safe programming model}}
+void captures_unknown_decl_only(int *a [[clang::lifetime_capture_by(unknown)]]); // expected-warning {{'lifetime_capture_by(unknown)' is not supported by the safe programming model}}
+
+// Annotated on the declaration, defined here without repeating the attribute.
+// The declaration is where the annotation is written, so that is where it is
+// reported -- and reported once, not once per redeclaration.
+void captures_global_split(int *a [[clang::lifetime_capture_by(global)]]); // expected-warning {{'lifetime_capture_by(global)' is not supported by the safe programming model}}
+// The definition repeats the signature without the attribute, so ITS parameter
+// really is unannotated -- the annotation does not carry across to it.
+void captures_global_split(int *a) { g_p = a; } // expected-warning {{not annotated for lifetime safety}}
+
+// A member function declared in the class and defined out of line.
+struct SplitMember {
+  void take(int *a [[clang::lifetime_capture_by(unknown)]]); // expected-warning {{'lifetime_capture_by(unknown)' is not supported by the safe programming model}}
+};
+void SplitMember::take(int *a) { (void)a; } // expected-warning {{not annotated for lifetime safety}}
+
+// A function template is reported once, on the pattern -- not again per
+// instantiation.
+template <class T>
+void captures_global_tmpl(int *a [[clang::lifetime_capture_by(global)]]) { g_p = a; } // expected-warning {{'lifetime_capture_by(global)' is not supported by the safe programming model}}
+void instantiate_tmpl() {
+  captures_global_tmpl<int>(nullptr);
+  captures_global_tmpl<char>(nullptr);
+}
+
+// Capturing by a named parameter is supported and stays clean.
+void captures_by_param(int *a [[clang::lifetime_capture_by(out)]], int *&out); // no-warning
