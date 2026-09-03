@@ -2059,10 +2059,17 @@ public:
       const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
       const auto *VD =
           dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
-      // A local with automatic storage. A parameter's own storage escaping is
-      // the noescape question, answered below; a static or global outlives the
-      // call and is no hazard.
-      if (!VD || !VD->hasLocalStorage() || isa<ParmVarDecl>(VD))
+      // A local with automatic storage. A static or global outlives the call and
+      // is no hazard.
+      if (!VD || !VD->hasLocalStorage())
+        continue;
+      // A REFERENCE or POINTER parameter denotes storage the CALLER owns, so its
+      // escape is the noescape question, answered below. A BY-VALUE parameter is
+      // not that: the parameter object itself dies with the call, so a borrow of
+      // ITS storage dangles in the caller exactly as a local's does -- copying
+      // the parameter into a local first was reported all along, and only the
+      // root of the borrow differs between the two.
+      if (isa<ParmVarDecl>(VD) && VD->getType()->isPointerOrReferenceType())
         continue;
       SemaHelper->reportDanglingField(L->getIssuingExpr(), FD,
                                       /*MovedExpr=*/nullptr,
