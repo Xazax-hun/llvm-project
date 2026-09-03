@@ -383,3 +383,73 @@ void test(StatusOr<FooView> foo1, StatusOr<NonAnnotatedFooView> foo2) {
   foo2 = NonAnnotatedFoo(); // expected-warning {{object backing 'foo2' will be destroyed at the end}}
 }
 } // namespace GH106372
+
+namespace static_operators {
+// A C++23 static `operator()` / `operator[]` is still written with object syntax,
+// so the object expression is argument 0 of the call while the callee's own
+// parameters start at 0. Dropping it was gated on the callee being an INSTANCE
+// member, which a static operator is not, so every parameter shifted by one and
+// the first one's [[clang::lifetimebound]] was attributed to the object. That
+// both missed the real dangle and blamed the object, which usually outlives the
+// call.
+struct Subscript {
+  static const int &operator[](const int &i [[clang::lifetimebound]]) { return i; }
+};
+struct Call {
+  static const int &operator()(const int &i [[clang::lifetimebound]]) { return i; }
+};
+
+const int &static_subscript_dangles() {
+  Subscript s;
+  return s[1]; // expected-warning {{returning reference to local temporary object}}
+}
+const int &static_call_dangles() {
+  Call c;
+  return c(1); // expected-warning {{returning reference to local temporary object}}
+}
+
+// The object is not bound to anything, so a long-lived argument does not dangle
+// and the local object must not be blamed for it.
+const int &static_subscript_ok(const int &i [[clang::lifetimebound]]) {
+  Subscript s;
+  return s[i]; // no-warning
+}
+const int &static_call_ok(const int &i [[clang::lifetimebound]]) {
+  Call c;
+  return c(i); // no-warning
+}
+
+// Only the second parameter is bound: the shift would report the first.
+struct TwoParams {
+  static const int &operator[](const int &unbound,
+                               const int &i [[clang::lifetimebound]]) {
+    return i;
+  }
+};
+const int &second_param(const int &live [[clang::lifetimebound]]) {
+  return TwoParams{}[live, 1]; // expected-warning {{returning reference to local temporary object}}
+}
+const int &second_param_ok(const int &live [[clang::lifetimebound]]) {
+  return TwoParams{}[1, live]; // no-warning
+}
+
+// A file-static FREE operator is static too, but its argument 0 is a real
+// parameter, so it must keep its mapping. Only the second parameter is bound.
+struct Tag {};
+static const int &operator+(Tag, const int &i [[clang::lifetimebound]]) { return i; }
+const int &free_static_operator() {
+  return Tag{} + 1; // expected-warning {{returning reference to local temporary object}}
+}
+const int &free_static_operator_ok(const int &live [[clang::lifetimebound]]) {
+  return Tag{} + live; // no-warning
+}
+
+// A non-static member operator, where argument 0 really is the object.
+struct NonStatic {
+  const int &operator[](const int &i [[clang::lifetimebound]]) const { return i; }
+};
+const int &non_static_dangles() {
+  NonStatic n;
+  return n[1]; // expected-warning {{returning reference to local temporary object}}
+}
+} // namespace static_operators

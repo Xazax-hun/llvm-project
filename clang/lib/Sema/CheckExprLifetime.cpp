@@ -415,8 +415,20 @@ static void visitFunctionCallArguments(IndirectLocalPath &Path, Expr *Call,
   bool EnableGSLAnalysis = !Callee->getASTContext().getDiagnostics().isIgnored(
       diag::warn_dangling_lifetime_pointer, SourceLocation());
   Expr *ObjectArg = nullptr;
-  if (isa<CXXOperatorCallExpr>(Call) && Callee->isCXXInstanceMember()) {
-    ObjectArg = Args[0];
+  if (isa<CXXOperatorCallExpr>(Call) && isa<CXXMethodDecl>(Callee)) {
+    // The object expression is argument 0 of an operator call written with
+    // object syntax, while the callee's own parameters start at 0, so it has to
+    // be dropped either way. A C++23 static `operator()` / `operator[]` is
+    // written that way too but has no implicit object parameter, so there is
+    // nothing for an attribute to bind to and ObjectArg stays null; failing to
+    // drop it there shifted every parameter, binding the first one's
+    // [[clang::lifetimebound]] to the object instead.
+    //
+    // Testing for a member rather than for the operators by name keeps a
+    // file-static FREE operator (`static bool operator==(A, B)`, not a
+    // CXXMethodDecl) out of this: its argument 0 is a real parameter.
+    if (Callee->isCXXInstanceMember())
+      ObjectArg = Args[0];
     Args = Args.slice(1);
   } else if (auto *MCE = dyn_cast<CXXMemberCallExpr>(Call)) {
     ObjectArg = MCE->getImplicitObjectArgument();
