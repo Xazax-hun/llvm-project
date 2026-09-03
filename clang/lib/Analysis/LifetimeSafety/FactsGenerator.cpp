@@ -2729,9 +2729,19 @@ void FactsGenerator::handleExitBlock() {
   // captured local going out of scope while still held by the object. The `this`
   // placeholder loan never expires, so this adds no false positive for an object
   // that only holds caller-scoped borrows.
-  if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+  if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins()) {
     CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
         AC.getDecl()->getEndLoc(), *ThisOrigins));
+    // The object outlives the call, so a borrow resting in it at exit escapes
+    // -- however it got there. Only a store into a NAMED member produced an
+    // escape fact, so a capture that lands on the object instead (a
+    // whole-object assignment, a placement new, a helper declared
+    // lifetime_capture_by(this), an inherited setter) was invisible to the
+    // annotation checks, and a [[clang::lifetimebound]] parameter could be
+    // captured into the object with nothing said.
+    EscapesInCurrentBlock.push_back(
+        FactMgr.createFact<ObjectEscapeFact>((*ThisOrigins)->getOriginID()));
+  }
 }
 
 void FactsGenerator::handleGSLPointerConstruction(const CXXConstructExpr *CCE) {

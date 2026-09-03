@@ -84,6 +84,13 @@ void CapturedByThisEscapeFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   OS << ", via CapturedByThis)\n";
 }
 
+void ObjectEscapeFact::dump(llvm::raw_ostream &OS, const LoanManager &,
+                            const OriginManager &OM) const {
+  OS << "OriginEscapes (";
+  OM.dump(getEscapedOriginID(), OS);
+  OS << ", via Object)\n";
+}
+
 // Recursively prints every origin in the subtree rooted at `N`.
 static void dumpUsedOrigins(const OriginNode *N, const FieldDecl *FD,
                             const OriginManager &OM, llvm::raw_ostream &OS,

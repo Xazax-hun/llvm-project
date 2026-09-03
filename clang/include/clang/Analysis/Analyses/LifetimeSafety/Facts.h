@@ -210,11 +210,13 @@ class OriginEscapesFact : public Fact {
 public:
   /// The way an origin can escape the current scope.
   enum class EscapeKind : uint8_t {
-    Return, /// Escapes via return statement.
-    Field,  /// Escapes via assignment to a field.
-    Global, /// Escapes via assignment to global storage.
+    Return,         /// Escapes via return statement.
+    Field,          /// Escapes via assignment to a field.
+    Global,         /// Escapes via assignment to global storage.
     CapturedByThis, /// Captured into the implicit object via
                     /// [[clang::lifetime_capture_by(this)]].
+    Object,         /// Rests in the implicit object at function exit, whichever
+                    /// way it got there.
   } EscKind;
 
   static bool classof(const Fact *F) {
@@ -292,6 +294,31 @@ public:
 /// function, that noescape promise is violated. Unlike a Field escape this
 /// carries no specific member (the capture target is the whole object), so it
 /// records the capturing call expression for the diagnostic.
+/// A borrow resting in the implicit object when the function returns.
+///
+/// The object outlives the call, so whatever it holds outlives it too. Unlike
+/// FieldEscapeFact this names no member: the borrow may have arrived by a
+/// whole- object assignment, a placement new, or a helper that captured it, and
+/// the analysis models those as landing on the object rather than on one field.
+///
+/// Exists for ANNOTATION VERIFICATION -- a parameter whose declaration does not
+/// admit being captured here. The dangling-use side is already covered by the
+/// implicit use of `this` at exit, which anchors the report at the expiry with
+/// the destroyed/used-here notes, so this fact is deliberately ignored there.
+class ObjectEscapeFact : public OriginEscapesFact {
+public:
+  explicit ObjectEscapeFact(OriginID OID)
+      : OriginEscapesFact(OID, EscapeKind::Object) {}
+
+  static bool classof(const Fact *F) {
+    return F->getKind() == Kind::OriginEscapes &&
+           static_cast<const OriginEscapesFact *>(F)->getEscapeKind() ==
+               EscapeKind::Object;
+  }
+  void dump(llvm::raw_ostream &OS, const LoanManager &,
+            const OriginManager &) const override;
+};
+
 class CapturedByThisEscapeFact : public OriginEscapesFact {
   const Expr *CaptureExpr;
 

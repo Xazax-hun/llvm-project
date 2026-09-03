@@ -671,7 +671,15 @@ public:
         // genuine parameter capturer produces no field escape; a truthful
         // capture_by(this) names `this` and is excluded -- it is validated
         // elsewhere, e.g. owner-capture.)
-        if (isa<FieldEscapeFact>(OEF) && PVD->hasAttr<LifetimeCaptureByAttr>() &&
+        // An ObjectEscapeFact says the same thing without naming a member: the
+        // borrow rests in the object at exit, whichever way it got there (a
+        // whole-object assignment, a placement new, a helper declared
+        // lifetime_capture_by(this), an inherited setter). Keying only on a
+        // NAMED member let every one of those spellings through while the
+        // direct `v = p` was reported.
+        bool EscapesIntoObject =
+            isa<FieldEscapeFact>(OEF) || isa<ObjectEscapeFact>(OEF);
+        if (EscapesIntoObject && PVD->hasAttr<LifetimeCaptureByAttr>() &&
             !capturesThis(PVD))
           CaptureByFieldViolations.insert(PVD);
         // '[[clang::lifetimebound]]' describes the RETURN VALUE and nothing else. A store
@@ -686,7 +694,7 @@ public:
         // written the capture is modeled and the dangling use is reported at the call
         // site. A parameter that already names `this` is excluded: it declared the
         // capture, and is validated elsewhere.
-        if (isa<FieldEscapeFact>(OEF) && PVD->hasAttr<LifetimeBoundAttr>() &&
+        if (EscapesIntoObject && PVD->hasAttr<LifetimeBoundAttr>() &&
             !capturesThis(PVD))
           UndeclaredFieldCaptures.insert(PVD);
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
@@ -2576,7 +2584,13 @@ public:
           // Global escape.
           SemaHelper->reportDanglingGlobal(IssueExpr, GlobalEscape->getGlobal(),
                                            MovedExpr, ExpiryLoc);
-        else
+        else if (isa<ObjectEscapeFact>(OEF)) {
+          // Deliberately silent: a borrow resting in the object whose source
+          // has expired is already reported through the implicit use of `this`
+          // at exit, which anchors at the expiry and carries the
+          // destroyed/later- used-here notes. This fact exists for annotation
+          // verification, where no member can be named.
+        } else
           llvm_unreachable("Unhandled OriginEscapesFact type");
       } else
         llvm_unreachable("Unhandled CausingFact type");
