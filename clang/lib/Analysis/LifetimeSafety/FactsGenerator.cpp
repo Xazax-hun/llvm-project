@@ -1715,9 +1715,19 @@ void FactsGenerator::VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *OCE) {
   }
 
   ArrayRef Args = {OCE->getArgs(), OCE->getNumArgs()};
-  // For `static operator()`, the first argument is the object argument,
-  // remove it from the argument list to avoid off-by-one errors.
-  if (OCE->getOperator() == OO_Call && OCE->getDirectCallee()->isStatic())
+  // A C++23 static `operator()` or `operator[]` is still written with object
+  // syntax, so the object expression is argument 0 while the callee's parameters
+  // start at 0 too. Drop it to avoid an off-by-one that binds the first
+  // parameter -- and any [[clang::lifetimebound]] on it -- to the object
+  // instead: `r[k]` then claims the result borrows `r`, which outlives it, and
+  // the dangle into `k` goes unreported.
+  //
+  // Ask whether the callee is a static MEMBER rather than naming the operators,
+  // so a future static operator needs no change here. `isStatic()` alone would
+  // not do: a file-static free operator (`static bool operator==(A, B)`) is
+  // static too, and its argument 0 is a real parameter.
+  if (const auto *MD = dyn_cast_or_null<CXXMethodDecl>(OCE->getDirectCallee());
+      MD && MD->isStatic())
     Args = Args.slice(1);
   handleFunctionCall(OCE, OCE->getDirectCallee(), Args);
 }
