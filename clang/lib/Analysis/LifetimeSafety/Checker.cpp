@@ -2000,6 +2000,12 @@ public:
   ///
   /// No liveness question is needed: the destination outlives the call by
   /// definition and the local does not, so this always dangles.
+  ///
+  /// Still required after an owner's members gained origins: the member now has
+  /// somewhere for the borrow to land, but the READ is in the caller, so there
+  /// is no use in this function to keep it live and expiry never fires.
+  /// Verified by disabling this -- the corpus held at 322/322 while three lit
+  /// tests lost diagnostics outright, with nothing replacing them.
   void checkLocalEscapesIntoCallerObject(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
