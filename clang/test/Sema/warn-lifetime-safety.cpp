@@ -3116,7 +3116,12 @@ void placement_new_pointer_field_use_after_scope() {
 }
 } // namespace placement_new
 
-// FIXME: Currently this is not diagnosed because placement new does not overwrite the placement argument's origins.
+// A placement new constructs into storage that already exists and outlives the
+// expression, so a borrow the new object captures comes to rest THERE. The
+// initializer used to flow only into the new-expression's own pointee origin --
+// a throwaway for a placement form -- so the object never received it. The store
+// is routed by the loans the buffer holds, like any other store through an
+// lvalue, so these are diagnosed.
 namespace placement_new_argument {
 struct PlacementNewInMethod {
   View V;
@@ -3124,10 +3129,12 @@ struct PlacementNewInMethod {
   void bad_store_after_placement_new() {
     {
       MyObj obj;
-      new (&V) View(obj);
-    }
+      new (&V) View(obj); // expected-warning {{local variable 'obj' does not live long enough}}
+    } // expected-note {{destroyed here}}
     V.use();
-  }
+    // The borrow now lives on the OBJECT, so the use that reaches it is the
+    // implicit read of `this` at the method's exit.
+  } // expected-note {{later used here}}
 };
 
 void placement_new_member_call_from_dead_scope() {
@@ -3211,9 +3218,9 @@ void placement_new_addressof_from_dead_scope() {
   View storage;
   {
     MyObj obj;
-    new (&storage) View(obj);
-  }
-  storage.use();
+    new (&storage) View(obj); // expected-warning {{local variable 'obj' does not live long enough}}
+  } // expected-note {{destroyed here}}
+  storage.use(); // expected-note {{later used here}}
 }
 
 void placement_new_explicit_void_cast_from_dead_scope() {

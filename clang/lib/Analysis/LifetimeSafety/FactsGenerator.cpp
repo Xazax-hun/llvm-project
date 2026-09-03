@@ -2108,7 +2108,8 @@ static int placementArgResultPointsInto(const FunctionDecl *OperatorNew) {
 }
 
 bool FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
-                                        OriginNode *NewNode) {
+                                        OriginNode *NewNode,
+                                        OriginNode **BufferOut) {
   if (NE->getNumPlacementArgs() < 1)
     return false;
   int Which = placementArgResultPointsInto(NE->getOperatorNew());
@@ -2123,6 +2124,8 @@ bool FactsGenerator::handlePlacementNew(const CXXNewExpr *NE,
       PlacementArg->getType()->isVoidPointerType())
     PlacementArg = ICE->getSubExpr();
   OriginNode *PlacementNode = getOriginNode(*PlacementArg);
+  if (BufferOut)
+    *BufferOut = PlacementNode;
 
   // The pointer returned by placement new comes from the placement
   // argument.
@@ -2142,7 +2145,8 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
   // heap-allocation loan. (A single non-void* placement arg, e.g. nothrow, is
   // left with no loan here so a later use trips the lost-loan backstop, the
   // prior behavior.)
-  bool IsPlacement = handlePlacementNew(NE, NewNode);
+  OriginNode *PlacementBuffer = nullptr;
+  bool IsPlacement = handlePlacementNew(NE, NewNode, &PlacementBuffer);
   if (!IsPlacement && NE->getNumPlacementArgs() != 1) {
     const Loan *L = createLoan(FactMgr, NE);
     CurrentBlockFacts.push_back(
@@ -2202,8 +2206,22 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
 
   // FIXME: OriginNode is null for `new[]` initializers. Remove this `Init`
   // check once array origins are supported.
-  if (OriginNode *InitNode = getOriginNode(*Init); InitNode)
+  if (OriginNode *InitNode = getOriginNode(*Init); InitNode) {
     flow(NewNode, InitNode, true);
+    // A placement new constructs into storage that already exists and outlives
+    // the expression, so a borrow the new object captures comes to rest THERE.
+    // The flow above only reaches the new-expression's own pointee origin,
+    // which for a placement form is a throwaway -- `new (this) S{t}` left the
+    // borrow of `t` in it and the object never received it, while both `v = t`
+    // and `*this = S{t}` in the same method were reported.
+    //
+    // Route it by the loans the buffer holds, as any other store through an
+    // lvalue is: those name the storage written, so `this` resolves to the
+    // object's own origin and a later read of its member sees the borrow.
+    if (IsPlacement && PlacementBuffer)
+      CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+          PlacementBuffer->getOriginID(), InitNode->getOriginID(), NE));
+  }
 }
 
 void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {

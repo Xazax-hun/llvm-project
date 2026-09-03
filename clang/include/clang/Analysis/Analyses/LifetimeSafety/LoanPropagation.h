@@ -38,6 +38,14 @@ public:
 
   LoanSet getLoans(OriginID OID, ProgramPoint P) const;
 
+  /// Whether \p DSF had a destination the routing could not reach, so a borrow
+  /// stored through it was dropped. Decided during propagation, where the
+  /// pre-store state is available: afterwards the destination lvalue may also
+  /// hold what the store itself deposited (it does when the lvalue IS the
+  /// object, as for `this`), and judging that payload as a destination would
+  /// refuse a store that landed correctly.
+  bool hasUnresolvedStoreDestination(const DynamicStoreFact *DSF) const;
+
   /// Builds the chain of origins through which a loan has propagated.
   ///
   /// Starting from StartPoint where StartOID currently holds TargetLoan,

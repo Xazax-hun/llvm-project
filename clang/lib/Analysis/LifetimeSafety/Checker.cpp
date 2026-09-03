@@ -2019,29 +2019,10 @@ public:
   /// but a plain variable is a throwaway. Treating the direct flow as a
   /// baseline is what let a capture through a member receiver vanish.
   void checkDynamicStore(const DynamicStoreFact *DSF) {
-    if (!SemaHelper)
-      return;
-    LoanSet DestLoans =
-        LoanPropagation.getLoans(DSF->getDestLValueOrigin(), DSF);
-    bool AnyUnresolved = DestLoans.isEmpty();
-    for (LoanID LID : DestLoans) {
-      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      // Asks the same question the routing does, so the refusal covers exactly
-      // the destinations the routing cannot write.
-      if (FactMgr.getOriginMgr().getOriginForAccessPath(AP))
-        continue;
-      // A temporary that is not lifetime-extended dies at the end of the full
-      // expression, so nothing can read a borrow stored into it afterwards.
-      // There is no loss to report -- and refusing would fire on every
-      // `Widget{}.set(x)`. An EXTENDED temporary does outlive the statement, so
-      // it is not exempt.
-      if (const auto *MTE = AP.getAsMaterializeTemporaryExpr();
-          MTE && !MTE->getExtendingDecl())
-        continue;
-      AnyUnresolved = true;
-      break;
-    }
-    if (AnyUnresolved)
+    // The verdict is LoanPropagation's: it is the only place with the pre-store
+    // state, and it is where the routing decides what it could reach, so the
+    // two cannot disagree.
+    if (SemaHelper && LoanPropagation.hasUnresolvedStoreDestination(DSF))
       SemaHelper->reportUnsupportedStoreDestination(DSF->getStoreExpr());
   }
 

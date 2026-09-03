@@ -138,11 +138,22 @@ static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
         // check (e.g. a conditional store of a stack address to a global).
         CheckOrigin(F->getAs<OriginEscapesFact>()->getEscapedOriginID());
         break;
-      case Fact::Kind::DynamicStore:
-        // Bounded once for the whole function by
-        // collectDynamicStoreDestinations, which needs the flow graph rather
+      case Fact::Kind::DynamicStore: {
+        // The origins this fact READS are ordinary reads and must be registered
+        // like any other, or a store whose block mentions them nowhere else
+        // leaves them block-local -- their loans are then dropped at the
+        // boundary, the destination lvalue looks like it holds nothing, and the
+        // store is refused as unresolvable even though it names a perfectly
+        // good object.
+        const auto *DS = F->getAs<DynamicStoreFact>();
+        CheckOrigin(DS->getDestLValueOrigin());
+        CheckOrigin(DS->getSrcOrigin());
+        // Where the store LANDS is a different question -- those origins are
+        // not named by this fact -- and is bounded once for the whole function
+        // by collectDynamicStoreDestinations, which needs the flow graph rather
         // than one fact at a time.
         break;
+      }
       case Fact::Kind::MovedOrigin:
       case Fact::Kind::Expire:
       case Fact::Kind::TestPoint:
@@ -295,25 +306,51 @@ public:
   /// cannot reach; those are left alone here and reported by the checker, so
   /// the store is refused rather than silently dropped.
   Lattice transfer(Lattice In, const DynamicStoreFact &F) {
-    LoanSet SrcLoans = getLoans(In, F.getSrcOrigin());
-    if (SrcLoans.isEmpty())
-      return In;
+    // Whether anything the store had to reach was missed is decided HERE, where
+    // the pre-store state is in hand. Asking afterwards is wrong when the
+    // destination lvalue is itself a destination -- `this`, whose lvalue origin
+    // IS the object's -- because by then it also holds what this very store
+    // deposited, and judging the payload as a destination refuses a store that
+    // landed perfectly. Recomputing it in the checker also duplicated these
+    // rules; now there is one copy. Overwritten on each visit, so the converged
+    // iteration's verdict is the one that stands.
+    bool Unresolved = false;
+    LoanSet DestLoans = getLoans(In, F.getDestLValueOrigin());
     Lattice Out = In;
-    for (LoanID LID : getLoans(In, F.getDestLValueOrigin())) {
+    LoanSet SrcLoans = getLoans(In, F.getSrcOrigin());
+    if (DestLoans.isEmpty())
+      Unresolved = true;
+    for (LoanID LID : DestLoans) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
       // A loan names the storage the store lands in; that storage has an origin
       // whenever the path resolves -- including a subobject, whose origin is
       // the one a later read of the same member consults.
-      const OriginNode *Dest =
-          FactMgr.getOriginMgr().getOriginForAccessPath(AP);
-      if (!Dest)
+      if (const OriginNode *Dest =
+              FactMgr.getOriginMgr().getOriginForAccessPath(AP)) {
+        if (!SrcLoans.isEmpty()) {
+          OriginID DestOID = Dest->getOriginID();
+          Out = setLoans(
+              Out, DestOID,
+              utils::join(getLoans(Out, DestOID), SrcLoans, LoanSetFactory));
+        }
         continue;
-      OriginID DestOID = Dest->getOriginID();
-      Out = setLoans(
-          Out, DestOID,
-          utils::join(getLoans(Out, DestOID), SrcLoans, LoanSetFactory));
+      }
+      // A temporary that is not lifetime-extended dies at the end of the full
+      // expression, so nothing can read a borrow stored into it afterwards --
+      // no loss to report, and refusing would fire on every `Widget{}.set(x)`.
+      // An EXTENDED temporary outlives the statement and is not exempt.
+      if (const auto *MTE = AP.getAsMaterializeTemporaryExpr();
+          MTE && !MTE->getExtendingDecl())
+        continue;
+      Unresolved = true;
     }
+    UnresolvedStores[&F] = Unresolved;
     return Out;
+  }
+
+  bool hasUnresolvedStoreDestination(const DynamicStoreFact *DSF) const {
+    auto It = UnresolvedStores.find(DSF);
+    return It != UnresolvedStores.end() && It->second;
   }
 
   Lattice transfer(Lattice In, const KillOriginFact &F) {
@@ -423,6 +460,9 @@ private:
 
   OriginLoanMap::Factory &OriginLoanMapFactory;
   LoanSet::Factory &LoanSetFactory;
+  /// Per dynamic store, whether anything it had to reach was missed. Decided in
+  /// the transfer, where the PRE-store state is in hand.
+  llvm::DenseMap<const DynamicStoreFact *, bool> UnresolvedStores;
   /// Boolean vector indexed by origin ID. If true, the origin appears in
   /// multiple basic blocks and must participate in join operations. If false,
   /// the origin is block-local and can be discarded at block boundaries.
@@ -447,6 +487,11 @@ LoanPropagationAnalysis::~LoanPropagationAnalysis() = default;
 
 LoanSet LoanPropagationAnalysis::getLoans(OriginID OID, ProgramPoint P) const {
   return PImpl->getLoans(OID, P);
+}
+
+bool LoanPropagationAnalysis::hasUnresolvedStoreDestination(
+    const DynamicStoreFact *DSF) const {
+  return PImpl->hasUnresolvedStoreDestination(DSF);
 }
 
 llvm::SmallVector<OriginID>
