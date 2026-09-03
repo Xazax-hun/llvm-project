@@ -603,7 +603,18 @@ public:
         return;
       if (PVD->hasAttr<LifetimeBoundAttr>()) {
         // Track that this lifetimebound parameter correctly escapes.
-        if (isa<ReturnEscapeFact>(OEF))
+        //
+        // On a CONSTRUCTOR the annotation describes the CONSTRUCTED OBJECT, not
+        // a return value -- that is what the ctor-capture ban tells authors to
+        // write instead of lifetime_capture_by(this). So the borrow coming to
+        // rest in the object IS the escape that verifies it, and demanding a
+        // return escape reported "could not verify that the return value can be
+        // lifetime bound" on a constructor that has no return value at all. The
+        // suggestion branch below already knew this rule; the two now agree.
+        bool VerifiedByObject =
+            isa<CXXConstructorDecl>(FD) &&
+            (isa<FieldEscapeFact>(OEF) || isa<ObjectEscapeFact>(OEF));
+        if (isa<ReturnEscapeFact>(OEF) || VerifiedByObject)
           VerifiedLiftimeboundEscapes.insert(PVD);
       } else {
         // Otherwise, suggest lifetimebound for parameter escaping through
@@ -682,20 +693,25 @@ public:
         if (EscapesIntoObject && PVD->hasAttr<LifetimeCaptureByAttr>() &&
             !capturesThis(PVD))
           CaptureByFieldViolations.insert(PVD);
-        // '[[clang::lifetimebound]]' describes the RETURN VALUE and nothing else. A store
-        // of the parameter's borrow into a field of `this` is a second, undeclared
-        // relationship: the object now aliases the argument, and a caller reading only the
-        // declaration cannot tell it must keep the argument alive. The annotation also
-        // suppressed the unannotated-indirection backstop, so such a capture went
-        // unchecked entirely while the lifetimebound claim itself was satisfied -- the
+        // '[[clang::lifetimebound]]' describes the RETURN VALUE and nothing
+        // else. A store of the parameter's borrow into a field of `this` is a
+        // second, undeclared relationship: the object now aliases the argument,
+        // and a caller reading only the declaration cannot tell it must keep
+        // the argument alive. The annotation also suppressed the
+        // unannotated-indirection backstop, so such a capture went unchecked
+        // entirely while the lifetimebound claim itself was satisfied -- the
         // function really does return the parameter, truthfully.
         //
-        // '[[clang::lifetime_capture_by(this)]]' is the annotation for it, and once
-        // written the capture is modeled and the dangling use is reported at the call
-        // site. A parameter that already names `this` is excluded: it declared the
-        // capture, and is validated elsewhere.
+        // '[[clang::lifetime_capture_by(this)]]' is the annotation for it, and
+        // once written the capture is modeled and the dangling use is reported
+        // at the call site. A parameter that already names `this` is excluded:
+        // it declared the capture, and is validated elsewhere. Not on a
+        // CONSTRUCTOR: there the annotation means exactly "the constructed
+        // object may refer to this parameter", so the capture is declared, not
+        // undeclared. Reporting it contradicted the ctor-capture ban, which
+        // points authors at lifetimebound for precisely this.
         if (EscapesIntoObject && PVD->hasAttr<LifetimeBoundAttr>() &&
-            !capturesThis(PVD))
+            !capturesThis(PVD) && !isa<CXXConstructorDecl>(FD))
           UndeclaredFieldCaptures.insert(PVD);
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
       } else if (const auto *MD = AP.getAsPlaceholderThis())

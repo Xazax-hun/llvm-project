@@ -418,9 +418,14 @@ public:
     const auto *Attr = ParmWithLifetimebound->getAttr<LifetimeBoundAttr>();
     StringRef ParamName = ParmWithLifetimebound->getName();
     bool HasName = ParamName.size() > 0;
+    // On a constructor the annotation describes the constructed object; saying
+    // "return value" there is what made this read as nonsense on a constructor,
+    // which has none.
+    bool IsCtor =
+        isa<CXXConstructorDecl>(ParmWithLifetimebound->getDeclContext());
     S.Diag(Attr->getLocation(),
            diag::warn_lifetime_safety_lifetimebound_violation)
-        << HasName << ParamName << Attr->getRange();
+        << IsCtor << HasName << ParamName << Attr->getRange();
   }
 
   void reportLifetimeboundViolation(
@@ -430,7 +435,7 @@ public:
     assert(Attr && "Expected lifetimebound attribute");
     S.Diag(Attr->getLocation(),
            diag::warn_lifetime_safety_lifetimebound_violation)
-        << 2 << "" << Attr->getRange();
+        << /*the return value*/ 0 << 2 << "" << Attr->getRange();
   }
 
   void reportCaptureByViolation(const ParmVarDecl *PVD) override {
