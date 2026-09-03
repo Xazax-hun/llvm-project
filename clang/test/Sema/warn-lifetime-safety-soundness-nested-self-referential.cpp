@@ -95,8 +95,11 @@ private:
   std::string body;
 
 public:
+  // `o`'s own origin carries no borrow -- the borrow lands on its member's
+  // origin -- so reading it trips the lost-borrow sentinel here.
   void bind(Other &o [[clang::noescape]]) {
-    // expected-warning@+1 {{assignment through this expression is not modeled}}
+    // expected-warning@+2 {{assignment through this expression is not modeled}}
+    // expected-warning@+1 {{lifetime safety cannot track parameter 'o' here}}
     o.hdr.name = body;
   }
 };

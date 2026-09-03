@@ -16,7 +16,9 @@ struct [[gsl::Owner(int)]] Box {
   // into *this.
   // 'decoy' is itself an owner, so naming it is refused too (owner-capture) --
   // both findings are real and independent.
-  void bad(Box decoy, string_view s [[clang::lifetime_capture_by(decoy)]]) { // expected-warning {{names a capturing entity other than 'this'}} expected-warning {{is meant to own its contents}}
+  // `decoy` can hold a borrow now that an owner's members are tracked, so the
+  // ordinary annotation demand applies to it too.
+  void bad(Box decoy, string_view s [[clang::lifetime_capture_by(decoy)]]) { // expected-warning {{names a capturing entity other than 'this'}} expected-warning {{is meant to own its contents}} expected-warning {{parameter that can hold a borrow is not annotated}}
     p = s.data();
   }
 

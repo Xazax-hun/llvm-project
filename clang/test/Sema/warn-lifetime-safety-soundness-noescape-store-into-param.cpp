@@ -42,7 +42,7 @@ struct Holder {
   std::string_view sv; // expected-note {{this field dangles}}
 };
 
-void into_plain_param(Holder &h [[clang::noescape]],           // expected-warning {{uses more than one level of indirection}}
+void into_plain_param(Holder &h [[clang::noescape]],
                       std::string_view s [[clang::noescape]]) { // expected-warning {{parameter is marked [[clang::noescape]] but escapes}}
   h.sv = s; // expected-note {{escapes into an object the caller owns here}}
 }
@@ -68,7 +68,7 @@ void just_read(std::string_view s [[clang::noescape]]) { sink = s.data()[0]; }
 // noescape promise -- the local dangles, `s` itself does not escape -- and it is
 // reported as such: a local's borrow in caller-owned storage dangles once the
 // function returns.
-void local_into_param(Holder &h [[clang::noescape]], // expected-warning {{uses more than one level of indirection}}
+void local_into_param(Holder &h [[clang::noescape]],
                       std::string_view s [[clang::noescape]]) {
   std::string tmp;
   h.sv = tmp; // expected-warning {{stack memory associated with local variable 'tmp' escapes to the field 'sv' which will dangle}}
@@ -81,7 +81,7 @@ struct SelfHolder {
   std::string_view other;
 };
 
-void self_store(SelfHolder &h [[clang::noescape]]) { // expected-warning {{uses more than one level of indirection}}
+void self_store(SelfHolder &h [[clang::noescape]]) {
   // expected-warning@+1 {{lifetime safety cannot track parameter 'h' here}}
   h.sv = h.other;
 }

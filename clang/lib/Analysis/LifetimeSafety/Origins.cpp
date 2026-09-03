@@ -143,16 +143,24 @@ bool OriginManager::hasOrigins(QualType QT) const {
   // TODO: Unions are not tracked.
   if (RD->isUnion())
     return false;
+  // A [[gsl::Owner]]'s members are otherwise opaque, which leaves a borrow
+  // parked in one of them untracked. Track a NON-PUBLIC member too when the
+  // owner is written in this TU: a library owner's members are implementation
+  // details that must stay opaque (std::string holds private pointers), but a
+  // user-written owner caching a borrow is exactly what needs modeling.
+  bool TrackNonPublic = isGslOwnerType(RD) && !isLibraryOwned(RD);
   for (const auto *FD : RD->fields())
-    if (FD->getAccess() == AS_public && hasOrigins(FD->getType()))
+    if ((FD->getAccess() == AS_public || TrackNonPublic) &&
+        hasOrigins(FD->getType()))
       return true;
   return false;
 }
 
 bool OriginManager::isTrackedField(const CXXRecordDecl *RD,
                                    const FieldDecl *FD) const {
-  return FD->getAccess() == AS_public && hasOrigins(FD->getType()) &&
-         isAccessedField(FD);
+  bool Accessible = FD->getAccess() == AS_public ||
+                    (isGslOwnerType(RD) && !isLibraryOwned(RD));
+  return Accessible && hasOrigins(FD->getType()) && isAccessedField(FD);
 }
 
 /// Determines if an expression has origins that need to be tracked.
@@ -247,12 +255,55 @@ OriginNode *OriginManager::buildNodeForType(QualType QT, const T *Node) {
   return buildNodeForTypeImpl(QT, Node, Visited, 0);
 }
 
+bool OriginManager::isBorrowLikeRecord(QualType QT) const {
+  const auto *RD = QT->getAsCXXRecordDecl();
+  if (!RD)
+    return false;
+  return isGslPointerType(QT) || isStdCallableWrapperType(RD) ||
+         RD->isLambda() ||
+         LifetimeAnnotatedOriginTypes.contains(
+             QT.getCanonicalType().getTypePtr());
+}
+
 unsigned OriginManager::getIndirectionDepth(QualType QT) {
   if (!hasOrigins(QT))
     return 0;
-  // Measure with the same builder used for declarations; the throwaway tree's
-  // pointee-chain length is the indirection depth.
-  return buildNodeForType(QT, static_cast<const Expr *>(nullptr))->getLength();
+  // Count POINTER/REFERENCE hops only. A record terminates the count: reaching
+  // its members is a different axis (field edges, each with its own origin),
+  // not another level of indirection.
+  //
+  // Measuring the origin tree's pointee-chain length instead made a record
+  // count as a level merely by being the pointee, so `Owner &` and `View &`
+  // came out at two -- the same as `int **` -- and every out-parameter of a
+  // borrow-carrying record was refused. That is the wrong reading: `s.p = &x`
+  // through an `S &` is modelled (the member has its own origin), while `**pp`
+  // is what the single-indirection rule exists to reject.
+  unsigned Depth = 0;
+  for (QualType T = QT;;) {
+    if (const auto *AT = T->getAs<AtomicType>()) {
+      T = AT->getValueType();
+      continue;
+    }
+    // An array shares one origin across its elements, so it is not a level.
+    if (T->isArrayType()) {
+      T = T->getAsArrayTypeUnsafe()->getElementType();
+      continue;
+    }
+    if (!T->isPointerOrReferenceType()) {
+      // A record that IS a borrow -- a [[gsl::Pointer]] view, a callable
+      // wrapper, a lambda, a type registered for tracking -- is one level: it
+      // stands in for the pointer it holds, so `View &` is two levels exactly
+      // as `int *&` is, and stays refused. A record that merely CONTAINS
+      // borrows (an owner, a plain aggregate) is not: its members are the field
+      // axis, each with its own origin, so `Owner &` is one level.
+      if (isBorrowLikeRecord(T))
+        ++Depth;
+      break;
+    }
+    ++Depth;
+    T = T->getPointeeType();
+  }
+  return Depth;
 }
 
 template <typename T>

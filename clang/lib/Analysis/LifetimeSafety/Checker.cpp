@@ -1423,6 +1423,19 @@ public:
     const OriginNode *OL = UF->getUsedOrigins();
     if (!OL)
       return;
+    // An object whose borrows live in its MEMBERS holds none itself, so an
+    // empty loan set on it says nothing: reading a [[gsl::Owner]] whose member
+    // caches a borrow would otherwise trip this sentinel on every use, because
+    // the loan sits on the member's origin. Field children are exactly that
+    // case.
+    //
+    // Deliberately narrow -- this node's children, not the type. Suppressing by
+    // type instead reaches objects whose members this function never names, and
+    // that costs real sentinels elsewhere (an array of owner-of-indirection, a
+    // static destruction-order read): each broadening traded one for another.
+    for (const OriginNode::Edge &E : OL->children())
+      if (E.FD)
+        return;
     // An unknown-ownership user type (e.g. `struct Holder { int *p; };`) is
     // opaque: it is already reported via UnknownOwnership, and its value
     // legitimately carries no tracked loan. Reporting a "lost loan" on it would
@@ -2267,8 +2280,8 @@ public:
       if (!FactMgr.getOriginMgr().hasOrigins(PVD->getType()))
         continue;
       // Multi-level indirection is reported separately; don't double-flag.
-      if (OriginNode *L = FactMgr.getOriginMgr().getOrCreateNode(PVD);
-          L && L->getLength() > 1)
+      // Same depth notion as that check, so the two stay in step.
+      if (FactMgr.getOriginMgr().getIndirectionDepth(PVD->getType()) > 1)
         continue;
       if (PVD->hasAttr<LifetimeBoundAttr>() || PVD->hasAttr<NoEscapeAttr>() ||
           PVD->hasAttr<LifetimeCaptureByAttr>())
@@ -2334,7 +2347,12 @@ public:
         if (const auto *Fn = dyn_cast<FunctionDecl>(P->getDeclContext());
             Fn && Fn->isMain() && isCharacterPointerChain(P->getType(), AST))
           return;
-      unsigned Depth = L->getLength();
+      // Count pointer/reference hops, not origin-tree nodes: a record is the
+      // pointee of a reference without being another level of indirection (see
+      // OriginManager::getIndirectionDepth). Using the tree length made every
+      // `Owner &` / `View &` out-parameter look like `int **` and be refused.
+      unsigned Depth =
+          FactMgr.getOriginMgr().getIndirectionDepth(VD->getType());
       if (const auto *VarD = dyn_cast<VarDecl>(VD);
           VarD && RangeVars.contains(VarD) &&
           VarD->getType()->isReferenceType() && Depth > 0)

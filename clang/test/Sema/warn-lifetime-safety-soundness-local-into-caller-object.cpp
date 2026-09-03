@@ -56,7 +56,7 @@ void from_local(Box &c [[clang::noescape]]) {
 
 // A BY-VALUE parameter is the callee's own copy; writing it reaches nothing the
 // caller holds.
-void by_value(Box c) {
+void by_value(Box c) { // expected-warning {{parameter that can hold a borrow is not annotated}}
   string l = "a long heap string value exceeding the sso buffer now";
   c.d = l.c_str(); // no-warning
 }

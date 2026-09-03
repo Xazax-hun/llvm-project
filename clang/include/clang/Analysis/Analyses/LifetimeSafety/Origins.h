@@ -292,6 +292,14 @@ public:
   /// store they cannot track.
   const OriginNode *getOriginForAccessPath(const AccessPath &AP) const;
 
+  /// True if \p QT is a record that IS a borrow rather than one that merely
+  /// CONTAINS borrows: a [[gsl::Pointer]] view, a callable wrapper, a lambda,
+  /// or a type registered for tracking. Such a record stands in for the pointer
+  /// it holds, so it counts as a level of indirection and an empty loan set on
+  /// it is meaningful. An owner or plain aggregate is the other kind: its
+  /// borrows live in its members, on their own origins.
+  bool isBorrowLikeRecord(QualType QT) const;
+
 private:
   OriginID getNextOriginID() { return NextOriginID++; }
 
