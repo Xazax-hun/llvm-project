@@ -11,7 +11,7 @@
 // recognizes a member declared in a gsl::Pointer base subobject.
 
 struct [[gsl::Pointer]] ViewBase {
-  const int *p;
+  const int *p; // expected-note {{this field dangles}}
 };
 struct Derived : ViewBase {
   int extra;
@@ -21,7 +21,10 @@ int sink;
 void base_member_store(Derived &d [[clang::noescape]]) {
   {
     int local = 42;
+    // Refused as an unmodelled store, AND reported precisely: a local's borrow
+    // stored into a member of caller-owned storage dangles once we return.
     d.p = &local; // expected-warning {{assignment through this expression is not modeled}}
+    // expected-warning@-1 {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
   }
   sink = *d.p;
 }

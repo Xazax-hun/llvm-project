@@ -39,7 +39,7 @@ public:
 
 // A plain (non-owner) destination is the same escape.
 struct Holder {
-  std::string_view sv;
+  std::string_view sv; // expected-note {{this field dangles}}
 };
 
 void into_plain_param(Holder &h [[clang::noescape]],           // expected-warning {{uses more than one level of indirection}}
@@ -64,12 +64,14 @@ void into_local(std::string_view s [[clang::noescape]]) {
 // Read, not stored.
 void just_read(std::string_view s [[clang::noescape]]) { sink = s.data()[0]; }
 
-// Storing a borrow of a LOCAL into a parameter is a different bug (the local
-// dangles, not the noescape promise); `s` itself does not escape here.
+// Storing a borrow of a LOCAL into a parameter is a DIFFERENT bug from the
+// noescape promise -- the local dangles, `s` itself does not escape -- and it is
+// reported as such: a local's borrow in caller-owned storage dangles once the
+// function returns.
 void local_into_param(Holder &h [[clang::noescape]], // expected-warning {{uses more than one level of indirection}}
                       std::string_view s [[clang::noescape]]) {
   std::string tmp;
-  h.sv = tmp;
+  h.sv = tmp; // expected-warning {{stack memory associated with local variable 'tmp' escapes to the field 'sv' which will dangle}}
 }
 
 // A store WITHIN one parameter (source and destination are the same object) is

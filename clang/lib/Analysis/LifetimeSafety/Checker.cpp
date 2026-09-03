@@ -457,6 +457,7 @@ public:
         else if (const auto *FSF = F->getAs<FieldStoreFact>()) {
           checkSelfReferentialStore(FSF);
           checkNoescapeStoreIntoParam(FSF);
+          checkLocalEscapesIntoCallerObject(FSF);
         } else if (const auto *AOF = F->getAs<ArgOverlapFact>())
           checkArgumentOverlap(AOF);
         else if (const auto *DSF = F->getAs<DynamicStoreFact>()) {
@@ -1972,6 +1973,57 @@ public:
   /// Loan-based: the container's loans say which object is stored into and the
   /// stored value's loans say what is being parked there, so this does not
   /// depend on the shape of either expression.
+  /// Soundness: a LOCAL's borrow stored into a member of caller-owned storage
+  /// dangles as soon as the function returns.
+  ///
+  /// The noescape sibling below only fires when the SOURCE is an annotated
+  /// parameter, so `c.d = s` with a noescape `s` was reported while
+  /// `c.d = l.c_str()` with a local `l` was not -- and nothing else covers it.
+  /// Expiry cannot: the borrow has nowhere persistent to land, because a
+  /// [[gsl::Owner]]'s members are opaque (`d` is private, so it has no origin
+  /// of its own), so at the local's expiry no live origin holds it. And the
+  /// multi-level-indirection refusal that rejects a pointer-like out-parameter
+  /// does not apply either -- an owner is a single level.
+  ///
+  /// No liveness question is needed: the destination outlives the call by
+  /// definition and the local does not, so this always dangles.
+  void checkLocalEscapesIntoCallerObject(const FieldStoreFact *FSF) {
+    if (!SemaHelper)
+      return;
+    // The destination must be reached through a PARAMETER. A store into `this`
+    // is covered by the field-escape path, and a store into a local is no
+    // escape -- the local's own expiry checks it.
+    bool CallerOwned = false;
+    for (LoanID CL : LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF))
+      if (FactMgr.getLoanMgr()
+              .getLoan(CL)
+              ->getAccessPath()
+              .getAsPlaceholderParam()) {
+        CallerOwned = true;
+        break;
+      }
+    if (!CallerOwned)
+      return;
+    const auto *ME = dyn_cast_or_null<MemberExpr>(FSF->getStoreExpr());
+    const auto *FD = ME ? dyn_cast<FieldDecl>(ME->getMemberDecl()) : nullptr;
+    if (!FD)
+      return;
+    for (LoanID SL : LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF)) {
+      const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
+      const auto *VD =
+          dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
+      // A local with automatic storage. A parameter's own storage escaping is
+      // the noescape question, answered below; a static or global outlives the
+      // call and is no hazard.
+      if (!VD || !VD->hasLocalStorage() || isa<ParmVarDecl>(VD))
+        continue;
+      SemaHelper->reportDanglingField(L->getIssuingExpr(), FD,
+                                      /*MovedExpr=*/nullptr,
+                                      FSF->getStoreExpr()->getExprLoc());
+      return;
+    }
+  }
+
   void checkNoescapeStoreIntoParam(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
