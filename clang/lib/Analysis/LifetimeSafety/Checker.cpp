@@ -2241,6 +2241,17 @@ public:
             // storage or anything below it.
             if (MAP.isPrefixOf(BAP))
               Aliases = true;
+            // ...and the other way round: a borrow of an object that CONTAINS
+            // the mutated storage reaches it. `f(m, m.data)` hands the callee
+            // the whole `Model` and its `data` mutably; the callee borrows
+            // `m.data`'s buffer through `m` and the mutation frees it. Only the
+            // container-below-borrow direction was tested, so the same overlap
+            // written as `f(m.data, m)` or `f(m, m.data)` was missed while
+            // `f(v, v)` and a view alongside its owner were both caught.
+            // Disjoint siblings still diverge: neither `m.a` nor `m.b` is a
+            // prefix of the other.
+            if (BAP.isPrefixOf(MAP))
+              Aliases = true;
           }
         }
         if (!Aliases)
