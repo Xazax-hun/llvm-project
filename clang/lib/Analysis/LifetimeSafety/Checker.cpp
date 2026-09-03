@@ -341,9 +341,11 @@ private:
   /// suppressed the unannotated-indirection backstop, so the real capture went
   /// unchecked. Keyed by parameter to de-duplicate.
   llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
-  /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into
-  /// the enclosing object, which the annotation does not describe.
-  llvm::DenseSet<const ParmVarDecl *> UndeclaredFieldCaptures;
+  /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into an
+  /// object the caller owns, which the annotation does not describe. Maps to the
+  /// parameter whose object received it, or null for the implicit object.
+  llvm::DenseMap<const ParmVarDecl *, const ParmVarDecl *>
+      UndeclaredFieldCaptures;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
   /// For a [[clang::lifetime_immortal]] function: the worst offending subject
   /// its return value borrows (0 = local/temporary, 1 = parameter, 2 = this);
@@ -462,6 +464,7 @@ public:
           checkSelfReferentialStore(FSF);
           checkNoescapeStoreIntoParam(FSF);
           checkLocalEscapesIntoCallerObject(FSF);
+          checkUndeclaredCaptureIntoCallerObject(FSF);
         } else if (const auto *AOF = F->getAs<ArgOverlapFact>())
           checkArgumentOverlap(AOF);
         else if (const auto *DSF = F->getAs<DynamicStoreFact>()) {
@@ -716,7 +719,7 @@ public:
         // points authors at lifetimebound for precisely this.
         if (EscapesIntoObject && PVD->hasAttr<LifetimeBoundAttr>() &&
             !capturesThis(PVD) && !isa<CXXConstructorDecl>(FD))
-          UndeclaredFieldCaptures.insert(PVD);
+          UndeclaredFieldCaptures.try_emplace(PVD, /*Capturer=*/nullptr);
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
       } else if (const auto *MD = AP.getAsPlaceholderThis())
         CheckImplicitThis(MD);
@@ -2078,6 +2081,57 @@ public:
     }
   }
 
+  /// '[[clang::lifetimebound]]' describes the RETURN VALUE and nothing else. A
+  /// store of the parameter's borrow into an object the CALLER owns is a second,
+  /// undeclared relationship: that object now aliases the argument, and a caller
+  /// reading only the declaration cannot tell it must keep the argument alive.
+  /// The annotation also suppressed the unannotated-indirection backstop, so the
+  /// capture went unchecked entirely while the lifetimebound claim itself stayed
+  /// truthful -- the function really does return the parameter.
+  ///
+  /// The escape-fact path above asks this for the implicit object, but there is
+  /// no escape fact for a parameter's object: the store is all there is to see.
+  /// So `setPrefix(this->d_, p)` was reported while the same store one parameter
+  /// over, `setPrefix(c.d_, p)`, was silent.
+  void checkUndeclaredCaptureIntoCallerObject(const FieldStoreFact *FSF) {
+    if (!SemaHelper)
+      return;
+    // The destination must be an object the caller owns, which is what a
+    // parameter placeholder denotes. A BY-VALUE parameter is the callee's own
+    // copy, and its loans are rooted at the parameter variable rather than at a
+    // placeholder, so it does not look caller-owned here -- correctly, since
+    // depositing a borrow in a copy that dies with the call captures nothing.
+    const ParmVarDecl *Dest = nullptr;
+    for (LoanID CL : LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF))
+      if (const auto *PVD = FactMgr.getLoanMgr()
+                                .getLoan(CL)
+                                ->getAccessPath()
+                                .getAsPlaceholderParam()) {
+        Dest = PVD;
+        break;
+      }
+    if (!Dest)
+      return;
+    for (LoanID SL : LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(SL)->getAccessPath();
+      const auto *Src = AP.getAsPlaceholderParam();
+      // Storing a borrow of the destination into itself is self-reference, not a
+      // capture of a second object; checkSelfReferentialStore answers that.
+      if (!Src || Src == Dest)
+        continue;
+      if (!Src->hasAttr<LifetimeBoundAttr>())
+        continue;
+      // A parameter carrying any '[[clang::lifetime_capture_by]]' has declared a
+      // capture. Whether it names THIS destination is the capture_by checks'
+      // question, the same split the escape-fact path makes; answering it here
+      // too would report a declared relationship as undeclared.
+      if (Src->hasAttr<LifetimeCaptureByAttr>())
+        continue;
+      UndeclaredFieldCaptures.try_emplace(Src, Dest);
+      return;
+    }
+  }
+
   void checkNoescapeStoreIntoParam(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
@@ -2775,8 +2829,8 @@ public:
       return;
     for (const ParmVarDecl *PVD : CaptureByFieldViolations)
       SemaHelper->reportCaptureByViolation(PVD);
-    for (const ParmVarDecl *PVD : UndeclaredFieldCaptures)
-      SemaHelper->reportUndeclaredFieldCapture(PVD);
+    for (const auto &[PVD, Capturer] : UndeclaredFieldCaptures)
+      SemaHelper->reportUndeclaredFieldCapture(PVD, Capturer);
   }
 
   void reportLifetimeboundViolations() {

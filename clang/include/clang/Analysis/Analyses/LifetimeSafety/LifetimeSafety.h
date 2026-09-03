@@ -290,7 +290,10 @@ public:
   virtual void reportCaptureByViolation(const ParmVarDecl *PVD) {}
   /// A '[[clang::lifetimebound]]' parameter whose borrow is also captured into the
   /// enclosing object -- a capture the declaration does not advertise.
-  virtual void reportUndeclaredFieldCapture(const ParmVarDecl *PVD) {}
+  /// \p Capturer is the parameter whose object the borrow was captured into, or
+  /// null when it was captured into the implicit object.
+  virtual void reportUndeclaredFieldCapture(const ParmVarDecl *PVD,
+                                            const ParmVarDecl *Capturer) {}
 
   // Reports a declaration whose type uses more than one level of indirection
   // (e.g. 'int **'), which the analysis cannot fully model.
