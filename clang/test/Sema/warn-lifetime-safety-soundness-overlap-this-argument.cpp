@@ -6,6 +6,7 @@ using std::string_view;
 using std::vector;
 
 volatile char sink;
+volatile int isink;
 
 // A borrow rooted at the callee's `$this` placeholder was once not treated as
 // invalidated by a mutation reached through a *parameter*, so soundness rested
@@ -129,20 +130,25 @@ struct [[gsl::Owner]] AllConst {
   }
 };
 
-// Negative: a mutation of a FIELD does not alias a borrow of the whole object.
-// Both loans widen to the same `$this` root, so deciding the alias by loan
-// identity would be a false positive; the mutated argument's static type pins the
-// mutation to the field, which is neither the `this` class nor a base of it.
-// (`self` is const, so the only mutated argument is the field `v`.)
+// A mutation of a FIELD does alias a borrow of the whole object: handed the
+// object, the callee can borrow into any field of it, including the one being
+// mutated -- and `const` does not prevent borrowing. This was a documented
+// negative, on the grounds that the mutated argument's static type pins the
+// mutation to the field, which is neither the `this` class nor a base of it. But
+// that argument only rules out the object being MOVED; it says nothing about a
+// borrow taken through the object into the field, which is the hazard below.
+// The report is anchored at the method the `$this` placeholder stands for, since
+// a widened whole-object borrow has no more precise anchor.
 struct [[gsl::Owner]] FieldMutation {
   vector<int> v;
   static void grow(vector<int> &x [[clang::noescape]],
                    const FieldMutation *self [[clang::noescape]]) {
-    x.push_back(1);
-    (void)self;
+    const int *p = self->v.data(); // borrow of self->v's buffer, through `self`
+    x.push_back(1);                // `x` IS self->v -> reallocates, frees it
+    isink = *p;                    // dangling
   }
-  void run() {
-    grow(v, this); // no-warning: mutating a field does not move the object
+  void run() { // expected-warning {{implicit object parameter may be invalidated by an operation}}
+    grow(v, this); // expected-note {{assumed to be invalidated by this operation}}
   }
 };
 

@@ -378,7 +378,11 @@ private:
   llvm::DenseSet<std::pair<unsigned, const Stmt *>> ReportedAssumedInval;
   /// (aliased storage, call) pairs already reported as an argument overlap, to
   /// avoid a duplicate when two aliasing reference arguments are symmetric.
-  llvm::DenseSet<std::pair<const void *, const Expr *>> ReportedArgOverlap;
+  /// Maps to the report's index in PendingAssumedInval, so a later report for
+  /// the same storage with a better anchor can replace it rather than be
+  /// de-duplicated away.
+  llvm::DenseMap<std::pair<const void *, const Expr *>, unsigned>
+      ReportedArgOverlap;
   /// Field-store expressions already reported as self-referential.
   llvm::DenseSet<const Expr *> ReportedSelfRefStores;
   /// Methods already reported for breaking their non-invalidating promise; the
@@ -2206,53 +2210,53 @@ public:
         // Skip loans with no reportable anchor at all; they would emit nothing.
         if (!HasPreciseAnchor && !BorrowsThis)
           continue;
-        bool Aliases;
-        if (BorrowsThis && BAP.getElements().empty()) {
-          // A borrow of the whole object: only a mutation of that object (or of
-          // a base subobject of it) aliases it. Deciding this by loan identity
-          // would over-match disjoint fields, whose loans widen to the same
-          // `$this` root.
+        // The borrow aliases the mutated argument if it denotes the same
+        // storage, a SUBOBJECT of it, or an object CONTAINING it.
+        //
+        // A `$this`-rooted path WITH elements (`$this.items.*`) is the observer
+        // shape: `items[0]->unregister(items)` borrows `$this.items.*.*` as the
+        // receiver while passing `$this.items` mutably, and `Registry` is
+        // neither the mutated `vector` nor derived from it, so a record test
+        // says no. The path comparison says yes and stays precise: a disjoint
+        // sibling `$this.other` diverges rather than matching.
+        //
+        // A borrow of the WHOLE object (`$this` with no elements) also aliases
+        // a mutation OF that object, or of a base subobject of it, which no
+        // path comparison sees -- that is what the record test adds. It must
+        // not DECIDE the answer, though: for a mutation of something the object
+        // merely CONTAINS it is strictly weaker than the path comparison below,
+        // so deciding here left `helper(*this, this->data)` silent while the
+        // same overlap spelled `helper(m, m.data)` was reported.
+        bool Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
+        if (!Aliases && BorrowsThis && BAP.getElements().empty())
           Aliases = thisBorrowAliasesMutationOf(BorrowsThis, MutatedRecord);
-        } else {
-          // Otherwise the borrow names specific storage -- including a
-          // `$this`-rooted path with elements (`$this.items.*`), which the
-          // coarse record test above threw away. That is the observer shape:
-          // `items[0]->unregister(items)` borrows `$this.items.*.*` as the
-          // receiver while passing `$this.items` mutably, and `Registry` is
-          // neither the mutated `vector` nor derived from it, so the record
-          // test said no. The path comparison says yes and stays precise: a
-          // disjoint sibling `$this.other` diverges rather than matching.
-          //
-          // The borrow aliases the mutated argument if it borrows the same
-          // storage, OR a SUBOBJECT of it: mutating an object (`a` / the
-          // receiver `this`) may reallocate any owner field it (transitively)
+        for (LoanID ML : Mutating) {
+          if (Aliases)
+            break;
+          const AccessPath &MAP =
+              FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
+          // Mutating an object may reallocate any owner field it (transitively)
           // contains, dangling a field-rooted borrow into it. So `f(a, a.b)` /
           // `obj.m(this->buf)` overlap, while disjoint subobjects (`f(a.b,
           // a.c)`) do not -- `c` is not a member of `b`'s type. (Field loans
           // are instance-insensitive: the same accepted over-approximation as
           // the invalidation check.)
-          Aliases = isFieldBorrowOf(BLoan, MutatedRecord);
-          for (LoanID ML : Mutating) {
-            if (Aliases)
-              break;
-            const AccessPath &MAP =
-                FactMgr.getLoanMgr().getLoan(ML)->getAccessPath();
-            // The co-argument aliases the mutated one if it borrows that
-            // storage or anything below it.
-            if (MAP.isPrefixOf(BAP))
-              Aliases = true;
-            // ...and the other way round: a borrow of an object that CONTAINS
-            // the mutated storage reaches it. `f(m, m.data)` hands the callee
-            // the whole `Model` and its `data` mutably; the callee borrows
-            // `m.data`'s buffer through `m` and the mutation frees it. Only the
-            // container-below-borrow direction was tested, so the same overlap
-            // written as `f(m.data, m)` or `f(m, m.data)` was missed while
-            // `f(v, v)` and a view alongside its owner were both caught.
-            // Disjoint siblings still diverge: neither `m.a` nor `m.b` is a
-            // prefix of the other.
-            if (BAP.isPrefixOf(MAP))
-              Aliases = true;
-          }
+          if (MAP.isPrefixOf(BAP))
+            Aliases = true;
+          // ...and the other way round: a borrow of an object that CONTAINS the
+          // mutated storage reaches it. `f(m, m.data)` hands the callee the
+          // whole `Model` and its `data` mutably; the callee borrows `m.data`'s
+          // buffer through `m` and the mutation frees it. Only the
+          // container-below-borrow direction was tested, so the same overlap
+          // written as `f(m.data, m)` or `f(m, m.data)` was missed while
+          // `f(v, v)` and a view alongside its owner were both caught. Disjoint
+          // siblings still diverge: neither `m.a` nor `m.b` is a prefix of the
+          // other. A borrow whose path widened UP to the whole object does
+          // match a mutation of any field of it, which is the conservative
+          // answer a call site allows: the path says only "somewhere in this
+          // object", and the callee's own borrowing is not visible here.
+          if (BAP.isPrefixOf(MAP))
+            Aliases = true;
         }
         if (!Aliases)
           continue;
@@ -2272,11 +2276,33 @@ public:
       const void *Storage = RAP.getAsValueDecl();
       if (!Storage)
         Storage = RAP.getAsPlaceholderThis();
-      if (Storage && !ReportedArgOverlap.insert({Storage, Op}).second)
-        continue;
+      auto IsPrecise = [&](LoanID L) {
+        const Loan *Ln = FactMgr.getLoanMgr().getLoan(L);
+        return Ln->getIssuingExpr() ||
+               Ln->getAccessPath().getAsPlaceholderParam();
+      };
+      if (Storage) {
+        auto It = ReportedArgOverlap.find({Storage, Op});
+        if (It != ReportedArgOverlap.end()) {
+          // The pair can disagree on anchor QUALITY while keying to the same
+          // storage: `grow(v, this)` gives one fact only a widened `$this`
+          // borrow, reportable at the method, and the other the precise
+          // `$this.v` field borrow, reportable at the argument. Which fact is
+          // walked first must not settle that, so a precise report replaces a
+          // coarse one in place instead of being de-duplicated away.
+          LoanID &Prev = std::get<0>(PendingAssumedInval[It->second]);
+          if (IsPrecise(ReportLoan) && !IsPrecise(Prev) &&
+              ReportedAssumedInval.insert({ReportLoan.Value, Op}).second)
+            Prev = ReportLoan;
+          continue;
+        }
+      }
       // Reuse the assumed-invalidation reporting (the operation is the call).
-      if (ReportedAssumedInval.insert({ReportLoan.Value, Op}).second)
+      if (ReportedAssumedInval.insert({ReportLoan.Value, Op}).second) {
+        if (Storage)
+          ReportedArgOverlap[{Storage, Op}] = PendingAssumedInval.size();
         PendingAssumedInval.push_back({ReportLoan, Op, /*FallbackUse=*/nullptr});
+      }
     }
   }
 
