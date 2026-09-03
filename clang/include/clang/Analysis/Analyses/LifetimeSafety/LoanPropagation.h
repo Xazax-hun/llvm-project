@@ -46,6 +46,12 @@ public:
   /// refuse a store that landed correctly.
   bool hasUnresolvedStoreDestination(const DynamicStoreFact *DSF) const;
 
+  /// The loans \p DSF's destination lvalue held BEFORE the store ran -- i.e.
+  /// the storage it names. Recorded during propagation for the same reason as
+  /// above: afterwards the lvalue may also hold the store's own payload.
+  llvm::ArrayRef<LoanID>
+  getPreStoreDestinationLoans(const DynamicStoreFact *DSF) const;
+
   /// Builds the chain of origins through which a loan has propagated.
   ///
   /// Starting from StartPoint where StartOID currently holds TargetLoan,

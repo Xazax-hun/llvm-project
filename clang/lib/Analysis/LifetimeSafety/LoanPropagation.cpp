@@ -345,7 +345,22 @@ public:
       Unresolved = true;
     }
     UnresolvedStores[&F] = Unresolved;
+    // The loans the lvalue held BEFORE the store. Anyone asking afterwards sees
+    // the store's own payload mixed in (when the lvalue is itself a
+    // destination, as `this` is), which would make the payload look like the
+    // destination.
+    auto &Recorded = PreStoreDestLoans[&F];
+    Recorded.clear();
+    for (LoanID LID : DestLoans)
+      Recorded.push_back(LID);
     return Out;
+  }
+
+  llvm::ArrayRef<LoanID>
+  getPreStoreDestinationLoans(const DynamicStoreFact *DSF) const {
+    auto It = PreStoreDestLoans.find(DSF);
+    return It != PreStoreDestLoans.end() ? llvm::ArrayRef<LoanID>(It->second)
+                                         : llvm::ArrayRef<LoanID>();
   }
 
   bool hasUnresolvedStoreDestination(const DynamicStoreFact *DSF) const {
@@ -463,6 +478,9 @@ private:
   /// Per dynamic store, whether anything it had to reach was missed. Decided in
   /// the transfer, where the PRE-store state is in hand.
   llvm::DenseMap<const DynamicStoreFact *, bool> UnresolvedStores;
+  /// Per dynamic store, the loans its destination lvalue held before it ran.
+  llvm::DenseMap<const DynamicStoreFact *, llvm::SmallVector<LoanID, 4>>
+      PreStoreDestLoans;
   /// Boolean vector indexed by origin ID. If true, the origin appears in
   /// multiple basic blocks and must participate in join operations. If false,
   /// the origin is block-local and can be discarded at block boundaries.
@@ -487,6 +505,11 @@ LoanPropagationAnalysis::~LoanPropagationAnalysis() = default;
 
 LoanSet LoanPropagationAnalysis::getLoans(OriginID OID, ProgramPoint P) const {
   return PImpl->getLoans(OID, P);
+}
+
+llvm::ArrayRef<LoanID> LoanPropagationAnalysis::getPreStoreDestinationLoans(
+    const DynamicStoreFact *DSF) const {
+  return PImpl->getPreStoreDestinationLoans(DSF);
 }
 
 bool LoanPropagationAnalysis::hasUnresolvedStoreDestination(

@@ -459,8 +459,10 @@ public:
           checkNoescapeStoreIntoParam(FSF);
         } else if (const auto *AOF = F->getAs<ArgOverlapFact>())
           checkArgumentOverlap(AOF);
-        else if (const auto *DSF = F->getAs<DynamicStoreFact>())
+        else if (const auto *DSF = F->getAs<DynamicStoreFact>()) {
           checkDynamicStore(DSF);
+          checkNoescapeStoreThroughLValue(DSF);
+        }
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
@@ -2018,6 +2020,45 @@ public:
   /// targets the r-value the receiver expression produced, which for anything
   /// but a plain variable is a throwaway. Treating the direct flow as a
   /// baseline is what let a capture through a member receiver vanish.
+  /// Soundness: a [[clang::noescape]] borrow stored through an lvalue that
+  /// names CALLER-OWNED storage escapes, exactly as a store into a field of
+  /// `this` or through a parameter does.
+  ///
+  /// The field-store path only sees a store into a NAMED member, so
+  /// `*this = S{q}` -- which writes the whole object -- escaped unreported
+  /// while `v = q` one line away was caught. The escape check at function exit
+  /// does not cover it either: it inspects the FIELD origins, and a
+  /// gsl::Pointer record is a single leaf origin with no field edges, so the
+  /// borrow deposited on the object is on no field's origin.
+  ///
+  /// The destination's loans must be read from BEFORE the store: afterwards the
+  /// lvalue also holds the payload, whose own loans are parameter placeholders
+  /// -- which would make the destination look like a parameter.
+  void checkNoescapeStoreThroughLValue(const DynamicStoreFact *DSF) {
+    if (!SemaHelper)
+      return;
+    // Does the destination name storage the caller owns?
+    const ParmVarDecl *DestParam = nullptr;
+    bool DestIsThis = false;
+    for (LoanID LID : LoanPropagation.getPreStoreDestinationLoans(DSF)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      if (AP.getAsPlaceholderThis())
+        DestIsThis = true;
+      else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
+        DestParam = PVD;
+    }
+    if (!DestIsThis && !DestParam)
+      return;
+    for (LoanID SL : LoanPropagation.getLoans(DSF->getSrcOrigin(), DSF)) {
+      const AccessPath &SAP = FactMgr.getLoanMgr().getLoan(SL)->getAccessPath();
+      const auto *Src = SAP.getAsPlaceholderParam();
+      if (!Src || Src == DestParam || !Src->hasAttr<NoEscapeAttr>())
+        continue;
+      NoescapeParamStoreMap.try_emplace(Src, DSF->getStoreExpr());
+      return;
+    }
+  }
+
   void checkDynamicStore(const DynamicStoreFact *DSF) {
     // The verdict is LoanPropagation's: it is the only place with the pre-store
     // state, and it is where the routing decides what it could reach, so the
