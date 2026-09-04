@@ -3305,6 +3305,24 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       OriginNode *Dest = getRValueOrigins(CapturedByArg, CapturingOriginNode);
       if (!Dest)
         continue;
+      // Route the capture by the loans the capturer's LVALUE holds. Those name
+      // the object that will hold the borrow, whatever expression designated it
+      // -- so an inherited method's receiver, which arrives as a derived-to-base
+      // conversion whose own origin is a disconnected copy, deposits into the
+      // object rather than into the copy. Additive: the flow below is unchanged,
+      // and merge semantics make a duplicate deposit into the same origin
+      // harmless. Routing-only, so an unresolvable capturer is not refused --
+      // that would invent a diagnostic this path never emitted.
+      //
+      // Emitted BEFORE the flow, so the destination's PRE-STORE loans are
+      // genuinely pre-store. The flow merges the payload into the destination
+      // origin, so a checker asking which object the store lands in would
+      // otherwise find the payload's own parameter among the destination's loans
+      // and mistake the store for a self-store into that parameter.
+      if (CapturingOriginNode)
+        CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+            CapturingOriginNode->getOriginID(),
+            CapturedOriginNode->getOriginID(), Args[I]));
       // KillDest=false because we cannot know if previous captures are being
       // replaced or accumulated. Multiple successive captures into the same
       // destination must all be tracked, so captured lifetimes are always
@@ -3312,19 +3330,6 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
       CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
           Dest->getOriginID(), CapturedOriginNode->getOriginID(),
           /*KillDest=*/false));
-      // Additionally route the capture by the loans the capturer's LVALUE
-      // holds. Those name the object that will hold the borrow, whatever
-      // expression designated it -- so an inherited method's receiver, which
-      // arrives as a derived-to-base conversion whose own origin is a
-      // disconnected copy, deposits into the object rather than into the copy.
-      // Additive: the flow above is unchanged, and merge semantics make a
-      // duplicate deposit into the same origin harmless. Routing-only, so an
-      // unresolvable capturer is not refused -- that would invent a diagnostic
-      // this path never emitted.
-      if (CapturingOriginNode)
-        CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
-            CapturingOriginNode->getOriginID(),
-            CapturedOriginNode->getOriginID(), Args[I]));
 
       // Soundness: capturing the argument into the receiver object (`this`) is a
       // store into that object. If the argument borrows a member of the
