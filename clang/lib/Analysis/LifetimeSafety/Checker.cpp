@@ -340,6 +340,9 @@ private:
   /// the annotation's named capturer does not describe -- and the annotation
   /// suppressed the unannotated-indirection backstop, so the real capture went
   /// unchecked. Keyed by parameter to de-duplicate.
+  /// Captured enclosing-function locals whose borrow escapes into the object
+  /// from inside a lambda body, mapped to the borrow's issuing expression.
+  llvm::DenseMap<const VarDecl *, const Expr *> LambdaCapturedEscapes;
   llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
   /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into an
   /// object the caller owns, which the annotation does not describe. Maps to the
@@ -495,6 +498,16 @@ public:
       for (int Idx : A->params())
         if (Idx == LifetimeCaptureByAttr::Global)
           return true;
+    return false;
+  }
+
+  /// Returns true if \p VD is declared inside \p Fn, i.e. it belongs to this
+  /// function's own frame rather than to an enclosing one.
+  static bool isDeclaredIn(const VarDecl *VD, const Decl *Fn) {
+    for (const DeclContext *DC = VD->getDeclContext(); DC;
+         DC = DC->getParent())
+      if (DC == cast<DeclContext>(Fn))
+        return true;
     return false;
   }
 
@@ -678,6 +691,28 @@ public:
           AnnotatedParamEscapesToGlobalMap.try_emplace(PVD,
                                                        GlobalEsc->getGlobal());
       }
+      // Soundness: this function is a lambda's operator(), and the escaping
+      // borrow names a variable of an ENCLOSING function -- necessarily a
+      // capture, since that is the only way to reach one. This CFG contains no
+      // Expire for it: the variable lives in a frame the analysis cannot see,
+      // so the borrow looks immortal here and the escape into the object is
+      // waved through. The enclosing function cannot see it either -- nothing
+      // the body writes is flowed back, the closure carries only a merged
+      // origin saying whether it outlives a capture -- so the dangle is
+      // invisible from both sides.
+      //
+      // Asked of the LOANS rather than of the store's syntax, so it holds
+      // however the borrow reached the object: a direct member assignment, an
+      // overloaded operator=, a whole-object assignment, or a helper called on
+      // the object.
+      if (isa<FieldEscapeFact>(OEF) || isa<ObjectEscapeFact>(OEF))
+        if (const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
+            VD && VD->hasLocalStorage() && !isDeclaredIn(VD, FD))
+          if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+              MD && MD->getParent()->isLambda())
+            LambdaCapturedEscapes.try_emplace(VD, L->getIssuingExpr()
+                                                      ? L->getIssuingExpr()
+                                                      : nullptr);
       if (const auto *PVD = AP.getAsPlaceholderParam()) {
         // A [[clang::lifetime_capture_by(X)]] parameter promises its borrow is
         // captured by X. If the borrow instead escapes into the enclosing
@@ -2827,6 +2862,9 @@ public:
   void reportCaptureByViolations() {
     if (!SemaHelper)
       return;
+    for (const auto &[VD, E] : LambdaCapturedEscapes)
+      SemaHelper->reportLambdaStoreIntoCapturedObject(
+          E, E ? E->getExprLoc() : VD->getLocation());
     for (const ParmVarDecl *PVD : CaptureByFieldViolations)
       SemaHelper->reportCaptureByViolation(PVD);
     for (const auto &[PVD, Capturer] : UndeclaredFieldCaptures)

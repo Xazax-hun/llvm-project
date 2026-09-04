@@ -11287,6 +11287,15 @@ def warn_lifetime_safety_unsupported_store
               "here cannot be tracked and a later dangling use could be missed">,
       InGroup<LifetimeSafetyUnsupportedStore>,
       DefaultIgnore;
+def warn_lifetime_safety_lambda_store_into_captured_object
+    : Warning<"storing a borrow into a member of the captured enclosing object "
+              "is not modeled by lifetime safety analysis; the lambda body is a "
+              "separate function, so what it writes is not seen by the "
+              "enclosing function and the lifetimes of the locals it captured "
+              "are not seen here, and a borrow of one of them left in the "
+              "object could dangle undetected">,
+      InGroup<LifetimeSafetyUnsupportedStore>,
+      DefaultIgnore;
 def warn_lifetime_safety_unmodeled_expr
     : Warning<"this expression is not modeled by lifetime safety analysis; it "
               "produces a value that can hold a borrow, but the analysis does "

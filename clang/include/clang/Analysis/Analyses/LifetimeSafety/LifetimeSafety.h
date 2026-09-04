@@ -326,6 +326,8 @@ public:
   // several objects (`(c ? p : q) = ...`, `(f(), p) = ...`, `*&(...) = ...`), so
   // a stored borrow cannot be routed to a tracked storage origin.
   virtual void reportUnsupportedStoreDestination(const Expr *E) {}
+  virtual void reportLambdaStoreIntoCapturedObject(const Expr *E,
+                                                   SourceLocation Loc) {}
 
   // Reports an origin-bearing expression the fact generator does not model (no
   // specific handler), so any borrow it carries is silently dropped.

@@ -696,6 +696,13 @@ public:
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unsupported_store)
         << E->getSourceRange();
   }
+  void reportLambdaStoreIntoCapturedObject(const Expr *E,
+                                           SourceLocation Loc) override {
+    auto D = S.Diag(Loc,
+                    diag::warn_lifetime_safety_lambda_store_into_captured_object);
+    if (E)
+      D << E->getSourceRange();
+  }
   void reportUnmodeledExpr(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unmodeled_expr)
         << E->getSourceRange();
