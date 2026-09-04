@@ -1437,9 +1437,15 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
         // same store through a reference (`n.d`, where a reference has no
         // storage and its lvalue origin IS the object's) was caught.
         //
-        // `this` is excluded: the model already gives it the OBJECT's origin,
-        // not a pointer's, so descending there would go a level too deep.
-        if (ME_LHS->isArrow() && !isa<CXXThisExpr>(Base->IgnoreParenImpCasts()))
+        // Only an lvalue base is a pointer OBJECT like that. A prvalue pointer
+        // expression has no storage, so its own origin already denotes what it
+        // points at and descending goes a level too deep, losing the object: a
+        // store through `(&c)->d` then targeted nothing and went unreported,
+        // while `c.d`, `(*&c).d` and `Cache *lp = &c; lp->d` -- the same store,
+        // differently spelled -- were all caught. `this` is the same shape and
+        // used to be the one spelling excluded by name; asking the value
+        // category covers it and every other prvalue receiver.
+        if (ME_LHS->isArrow() && Base->isLValue())
           if (OriginNode *Pointee = Container->getPointeeChild())
             Container = Pointee;
         CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
