@@ -327,6 +327,8 @@ public:
   // a stored borrow cannot be routed to a tracked storage origin.
   virtual void reportUnsupportedStoreDestination(const Expr *E) {}
   virtual void reportBinaryConditionalTemporary(const Expr *E) {}
+  virtual void reportAssignmentDereferencesMember(const Expr *E,
+                                                 SourceLocation Loc) {}
   virtual void reportLambdaStoreIntoCapturedObject(const Expr *E,
                                                    SourceLocation Loc) {}
 

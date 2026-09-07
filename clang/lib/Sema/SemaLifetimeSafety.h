@@ -692,6 +692,13 @@ public:
         << "this array of pointers (decaying to a pointer to a pointer)"
         << E->getSourceRange();
   }
+  void reportAssignmentDereferencesMember(const Expr *E,
+                                          SourceLocation Loc) override {
+    auto D = S.Diag(
+        Loc, diag::warn_lifetime_safety_assignment_dereferences_member);
+    if (E)
+      D << E->getSourceRange();
+  }
   void reportBinaryConditionalTemporary(const Expr *E) override {
     S.Diag(E->getExprLoc(),
            diag::warn_lifetime_safety_binary_conditional_temporary)

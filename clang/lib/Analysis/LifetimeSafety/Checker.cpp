@@ -343,6 +343,9 @@ private:
   /// Captured enclosing-function locals whose borrow escapes into the object
   /// from inside a lambda body, mapped to the borrow's issuing expression.
   llvm::DenseMap<const VarDecl *, const Expr *> LambdaCapturedEscapes;
+  /// Set once the analyzed assignment operator has been reported for reading
+  /// through the borrow its object already holds; one report per operator.
+  bool ReportedAssignmentDeref = false;
   llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
   /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into an
   /// object the caller owns, which the annotation does not describe. Maps to the
@@ -460,6 +463,7 @@ public:
         else if (const auto *UF = F->getAs<UseFact>()) {
           checkLostLoan(UF);
           checkBorrowFromMutableGlobal(UF);
+          checkAssignmentDereferencesOwnBorrow(UF);
         }
         else if (const auto *UCF = F->getAs<UntrackedConstructFact>())
           recordUntrackedConstruct(UCF);
@@ -1476,6 +1480,43 @@ public:
   /// loan propagation (or the pointer is null/uninitialized, which is equally
   /// untracked). Reports it so that, with the warning enabled as an error, the
   /// analysis never silently fails to account for a borrow.
+  /// An assignment is modeled as kill-then-propagate, which assumes the operator
+  /// only RESEATS the borrow. An assignment operator whose body instead reads or
+  /// writes THROUGH the borrow the object already holds does more than that, and
+  /// the model discards exactly the part that can dangle: it kills the loan the
+  /// dereference reads, and records a write of the object where the body performs
+  /// a read of it. So an invalidation before `r = 'x'` went unreported, while the
+  /// same access spelled `r.set('x')` was caught.
+  ///
+  /// Asked of the LOANS, not of the body's syntax. A member's origin is seeded at
+  /// entry with an Uninitialized loan naming that field, so a USE of an origin
+  /// carrying such a loan is precisely "this operator reads the borrow the object
+  /// already holds" -- however the dereference is written (`*p`, `p[i]`, `p->f`,
+  /// or through a helper). A pure reseat never uses one: it reads the RIGHT
+  /// operand's borrow, whose loans are rooted at that parameter instead.
+  void checkAssignmentDereferencesOwnBorrow(const UseFact *UF) {
+    if (!SemaHelper || ReportedAssignmentDeref)
+      return;
+    const auto *MD = dyn_cast_or_null<CXXMethodDecl>(FD);
+    if (!MD || MD->getOverloadedOperator() != OO_Equal)
+      return;
+    const OriginNode *OL = UF->getUsedOrigins();
+    if (!OL)
+      return;
+    for (LoanID LID : LoanPropagation.getLoans(OL->getOriginID(), UF)) {
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+      const auto *Field =
+          dyn_cast_or_null<FieldDecl>(AP.getAsUninitialized());
+      if (Field && Field->getParent() == MD->getParent()) {
+        ReportedAssignmentDeref = true;
+        const Expr *Use = UF->getUseExpr();
+        SemaHelper->reportAssignmentDereferencesMember(
+            Use, Use ? Use->getExprLoc() : MD->getLocation());
+        return;
+      }
+    }
+  }
+
   void checkLostLoan(const UseFact *UF) {
     if (!SemaHelper || UF->isWritten() || UF->isImplicit())
       return;

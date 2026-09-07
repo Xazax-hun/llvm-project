@@ -11296,6 +11296,14 @@ def warn_lifetime_safety_lambda_store_into_captured_object
               "object could dangle undetected">,
       InGroup<LifetimeSafetyUnsupportedStore>,
       DefaultIgnore;
+def warn_lifetime_safety_assignment_dereferences_member
+    : Warning<"this assignment operator reads or writes through a borrow the "
+              "object already holds, which lifetime safety analysis does not "
+              "model: an assignment is treated as replacing the borrow, so the "
+              "access through the old one is not checked and a dangling use "
+              "could be missed">,
+      InGroup<LifetimeSafetyUnsupportedStore>,
+      DefaultIgnore;
 def warn_lifetime_safety_binary_conditional_temporary
     : Warning<"the common operand of this GNU conditional creates a temporary "
               "whose destruction is not modeled by lifetime safety analysis, so "
