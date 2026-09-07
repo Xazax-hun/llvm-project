@@ -631,6 +631,15 @@ OriginManager::getOriginForAccessPath(const AccessPath &AP) const {
   }
   if (!N)
     return nullptr;
+  // A field of the IMPLICIT OBJECT has two origins: the structural child of the
+  // `this` origin list, and the per-FieldDecl one. A read of the member, and a
+  // store written directly on `this` (`d = ...`), both consult the per-FieldDecl
+  // origin; the structural child is only touched by the implicit `this` use at
+  // exit. Landing on the structural child would therefore deposit a routed store
+  // where no read looks -- and, because that child IS part of the exit use, would
+  // make the borrow live at the source's expiry and turn a field-specific
+  // dangling-field report into a coarser use-after-scope one.
+  const bool RootIsThis = AP.getAsPlaceholderThis() != nullptr;
   for (const PathElement &PE : AP.getElements()) {
     // Descend only as far as the tree distinguishes. A field edge exists when
     // the subobject has an origin of its own, and that is the origin a read of
@@ -643,6 +652,10 @@ OriginManager::getOriginForAccessPath(const AccessPath &AP) const {
     if (!PE.isField())
       break;
     const OriginNode *Child = N->getFieldChildInChain(PE.getFieldDecl());
+    // Prefer the origin a read consults, which is this function's contract.
+    if (RootIsThis)
+      if (auto It = DeclToNode.find(PE.getFieldDecl()); It != DeclToNode.end())
+        Child = It->second;
     if (!Child)
       break;
     N = Child;

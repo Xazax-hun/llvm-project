@@ -769,6 +769,10 @@ class DynamicStoreFact : public Fact {
   OriginID SrcOrigin;
   /// The assignment, for diagnostics.
   const Expr *StoreExpr;
+  /// When set, this store only ROUTES the borrow to the storage the
+  /// destination's loans name; the store is already modeled by other facts, so a
+  /// destination that cannot be resolved is not reported as unsupported.
+  bool RoutingOnly = false;
 
 public:
   static bool classof(const Fact *F) {
@@ -776,13 +780,14 @@ public:
   }
 
   DynamicStoreFact(OriginID DestLValueOrigin, OriginID SrcOrigin,
-                   const Expr *StoreExpr)
+                   const Expr *StoreExpr, bool RoutingOnly = false)
       : Fact(Kind::DynamicStore), DestLValueOrigin(DestLValueOrigin),
-        SrcOrigin(SrcOrigin), StoreExpr(StoreExpr) {}
+        SrcOrigin(SrcOrigin), StoreExpr(StoreExpr), RoutingOnly(RoutingOnly) {}
 
   OriginID getDestLValueOrigin() const { return DestLValueOrigin; }
   OriginID getSrcOrigin() const { return SrcOrigin; }
   const Expr *getStoreExpr() const { return StoreExpr; }
+  bool isRoutingOnly() const { return RoutingOnly; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

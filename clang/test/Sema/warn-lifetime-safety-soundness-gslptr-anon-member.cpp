@@ -38,9 +38,13 @@ struct [[gsl::Pointer]] W {
 int nested_anon_member(W w [[clang::noescape]]) {
   {
     int local = 0;
-    w.q = &local; // expected-warning {{assignment through this expression is not modeled}}
-  }
-  return *w.q;
+    // Routing the store by the member lvalue's own loans reaches the object
+    // through the anonymous records too, so this is now diagnosed precisely as
+    // well as refused.
+    w.q = &local; // expected-warning {{assignment through this expression is not modeled}} \
+                  // expected-warning {{local variable 'local' does not live long enough}}
+  } // expected-note {{destroyed here}}
+  return *w.q; // expected-note {{later used here}}
 }
 
 // Control: a direct (non-anonymous) member is the case the merge already handled.

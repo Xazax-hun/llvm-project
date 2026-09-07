@@ -1450,6 +1450,20 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
             Container = Pointee;
         CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
             ME_LHS, RHSNode->getOriginID(), Container->getOriginID()));
+        // Route the store by the loans the MEMBER LVALUE itself holds. Those
+        // name the storage written -- the object's loan projected by the field --
+        // so they reach the object's own field origin whatever expression
+        // designated the object. An alias (`Box &s = *this`, `Box *p = this`, a
+        // [[clang::lifetimebound]] accessor) otherwise receives a disconnected
+        // COPY of the object's tree at the binding, and a store through it lands
+        // in the copy while every check reads the object's own origin.
+        //
+        // Routing-only: the plain flow already models the store, so a
+        // destination that does not resolve must not become a new refusal.
+        if (OriginNode *MemberLV = getOriginNode(*ME_LHS))
+          CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+              MemberLV->getOriginID(), RHSNode->getOriginID(), ME_LHS,
+              /*RoutingOnly=*/true));
         // See through anonymous struct/union members: for `v.p` where `p` lives
         // in an anonymous struct inside a [[gsl::Pointer]] `V`, the assigned
         // member's base is the unnamed anonymous-record subobject (whose type is

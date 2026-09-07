@@ -3131,10 +3131,10 @@ struct PlacementNewInMethod {
       MyObj obj;
       new (&V) View(obj); // expected-warning {{local variable 'obj' does not live long enough}}
     } // expected-note {{destroyed here}}
-    V.use();
-    // The borrow now lives on the OBJECT, so the use that reaches it is the
-    // implicit read of `this` at the method's exit.
-  } // expected-note {{later used here}}
+    // The borrow lands on the member's own origin, so the use that reaches it is
+    // this read of it -- not, as before, the implicit read of `this` at exit.
+    V.use(); // expected-note {{later used here}}
+  }
 };
 
 void placement_new_member_call_from_dead_scope() {
@@ -3972,15 +3972,16 @@ DerivedS inherited_field() {
   return d; // Should warn.
 }
 
-// FIXME: False negative. `p->v1 = local` deposits into p's origin tree,
-// which is independent of s's tree after the initial `p = &s` flow.
-// Requires alias analysis.
+// A store through a pointer to a local object reaches that object: the member
+// lvalue's own loans name the storage written (`s`'s loan projected by the
+// field), so routing the store by them lands it on `s`'s field origin rather
+// than on the independent tree `p` received at `p = &s`.
 S field_write_via_pointer() {
   S s;
   MyObj local;
   S *p = &s;
-  p->v = local;
-  return s; // Should warn.
+  p->v = local; // expected-warning {{stack memory associated with local variable 'local' is returned}}
+  return s;     // expected-note {{returned here}}
 }
 
 struct ViewPtrHolder { View *p; };

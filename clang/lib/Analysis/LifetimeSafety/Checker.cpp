@@ -2258,7 +2258,8 @@ public:
     // The verdict is LoanPropagation's: it is the only place with the pre-store
     // state, and it is where the routing decides what it could reach, so the
     // two cannot disagree.
-    if (SemaHelper && LoanPropagation.hasUnresolvedStoreDestination(DSF))
+    if (SemaHelper && !DSF->isRoutingOnly() &&
+        LoanPropagation.hasUnresolvedStoreDestination(DSF))
       SemaHelper->reportUnsupportedStoreDestination(DSF->getStoreExpr());
   }
 
