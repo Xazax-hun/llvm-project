@@ -904,6 +904,23 @@ bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
   return reachesMutableOwner(RD, V, /*AliasOnly=*/true);
 }
 
+static void
+collectFieldsIncludingBasesImpl(const CXXRecordDecl *RD,
+                                llvm::SmallPtrSetImpl<const CXXRecordDecl *> &Seen,
+                                llvm::SmallVectorImpl<const FieldDecl *> &Out) {
+  if (!RD || !RD->hasDefinition() || !Seen.insert(RD->getCanonicalDecl()).second)
+    return;
+  for (const CXXBaseSpecifier &B : RD->bases())
+    collectFieldsIncludingBasesImpl(B.getType()->getAsCXXRecordDecl(), Seen, Out);
+  llvm::append_range(Out, RD->fields());
+}
+
+void collectFieldsIncludingBases(const CXXRecordDecl *RD,
+                                 llvm::SmallVectorImpl<const FieldDecl *> &Out) {
+  llvm::SmallPtrSet<const CXXRecordDecl *, 4> Seen;
+  collectFieldsIncludingBasesImpl(RD, Seen, Out);
+}
+
 void forEachMemberFunction(
     const CXXRecordDecl *RD,
     llvm::function_ref<void(const CXXMethodDecl *)> Visit) {

@@ -9,6 +9,10 @@
 // dangling read silently missed (when the object enters as a parameter, so the
 // unknown-ownership-at-declaration backstop doesn't fire). The merge now also
 // recognizes a member declared in a gsl::Pointer base subobject.
+//
+// A base subobject's fields now get origins of their own, so the store is modeled
+// rather than refused: the unmodelled-store report is gone and the dangling read
+// is diagnosed precisely instead.
 
 struct [[gsl::Pointer]] ViewBase {
   const int *p; // expected-note {{this field dangles}}
@@ -21,10 +25,11 @@ int sink;
 void base_member_store(Derived &d [[clang::noescape]]) {
   {
     int local = 42;
-    // Refused as an unmodelled store, AND reported precisely: a local's borrow
-    // stored into a member of caller-owned storage dangles once we return.
-    d.p = &local; // expected-warning {{assignment through this expression is not modeled}}
-    // expected-warning@-1 {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
-  }
-  sink = *d.p;
+    // A local's borrow stored into a member of caller-owned storage dangles once
+    // we return, and the read below is a use after the local's scope.
+    // expected-warning@+2 {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
+    // expected-warning@+1 {{local variable 'local' does not live long enough}}
+    d.p = &local;
+  } // expected-note {{destroyed here}}
+  sink = *d.p; // expected-note {{later used here}}
 }

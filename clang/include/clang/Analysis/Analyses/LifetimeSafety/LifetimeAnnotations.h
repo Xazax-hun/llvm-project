@@ -225,6 +225,12 @@ bool recordAliasesMutableOwner(const CXXRecordDecl *RD);
 /// [[capture_by(this)]])`
 /// -- each escaping on the strength of being written as a template. Use this
 /// wherever a class-level check enumerates member functions.
+/// Appends the fields \p RD declares and those its bases declare, base fields
+/// first. A base subobject's members are members of the derived object too, so
+/// anything that reasons about "this record's fields" has to see them.
+void collectFieldsIncludingBases(const CXXRecordDecl *RD,
+                                 llvm::SmallVectorImpl<const FieldDecl *> &Out);
+
 void forEachMemberFunction(
     const CXXRecordDecl *RD,
     llvm::function_ref<void(const CXXMethodDecl *)> Visit);

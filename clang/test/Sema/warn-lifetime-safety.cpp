@@ -3962,14 +3962,14 @@ StoreS return_after_this_set() {
 struct BaseS { View v; };
 struct DerivedS : BaseS {};
 
-// FIXME: False negative. `d.v` accesses an inherited field. Only track
-// direct fields for now, so DerivedS's tree has no edge for `v` and the
-// loan does not propagate.
+// An inherited field is a field of the derived object too: a base subobject's
+// members get origins, so DerivedS's tree has an edge for `v` and the loan
+// propagates.
 DerivedS inherited_field() {
   DerivedS d;
   MyObj local;
-  d.v = local;
-  return d; // Should warn.
+  d.v = local; // expected-warning {{stack memory associated with local variable 'local' is returned}}
+  return d;    // expected-note {{returned here}}
 }
 
 // A store through a pointer to a local object reaches that object: the member

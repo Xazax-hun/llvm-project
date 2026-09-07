@@ -2427,19 +2427,6 @@ void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
                                     AC.getDecl()->getEndLoc());
 }
 
-/// Collects the fields \p RD declares, and those its own bases declare.
-static void
-collectFieldsIncludingBases(const CXXRecordDecl *RD,
-                            llvm::SmallPtrSetImpl<const CXXRecordDecl *> &Seen,
-                            llvm::SmallVectorImpl<const FieldDecl *> &Out) {
-  if (!RD || !RD->hasDefinition() ||
-      !Seen.insert(RD->getCanonicalDecl()).second)
-    return;
-  for (const CXXBaseSpecifier &B : RD->bases())
-    collectFieldsIncludingBases(B.getType()->getAsCXXRecordDecl(), Seen, Out);
-  llvm::append_range(Out, RD->fields());
-}
-
 void FactsGenerator::handleBaseDtor(const CFGBaseDtor &BaseDtor) {
   const CXXBaseSpecifier *BS = BaseDtor.getBaseSpecifier();
   if (!BS)
@@ -2455,10 +2442,8 @@ void FactsGenerator::handleBaseDtor(const CFGBaseDtor &BaseDtor) {
   // have origins, and those are exactly what its destructor can reach. Use
   // them, so a local whose borrow was stored into an inherited member is still
   // live here and its expiry is reported.
-  llvm::SmallPtrSet<const CXXRecordDecl *, 4> Seen;
   llvm::SmallVector<const FieldDecl *, 4> Fields;
-  collectFieldsIncludingBases(BS->getType()->getAsCXXRecordDecl(), Seen,
-                              Fields);
+  collectFieldsIncludingBases(BS->getType()->getAsCXXRecordDecl(), Fields);
   for (const FieldDecl *FD : Fields)
     if (OriginNode *Node = getOriginNode(*FD))
       CurrentBlockFacts.push_back(

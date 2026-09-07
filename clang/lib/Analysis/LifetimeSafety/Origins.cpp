@@ -149,7 +149,15 @@ bool OriginManager::hasOrigins(QualType QT) const {
   // details that must stay opaque (std::string holds private pointers), but a
   // user-written owner caching a borrow is exactly what needs modeling.
   bool TrackNonPublic = isGslOwnerType(RD) && !isLibraryOwned(RD);
-  for (const auto *FD : RD->fields())
+  // Including the BASES' fields: a base subobject's members are members of this
+  // object too, so a borrow parked in an inherited one is just as reachable. They
+  // were invisible here, so a derived owner whose only borrow-holding member came
+  // from a base looked as though it had no origins at all -- and a store into
+  // that member, and the dangling read after it, went unreported while the same
+  // member declared directly in the derived class was caught.
+  llvm::SmallVector<const FieldDecl *, 8> Fields;
+  collectFieldsIncludingBases(RD, Fields);
+  for (const auto *FD : Fields)
     if ((FD->getAccess() == AS_public || TrackNonPublic) &&
         hasOrigins(FD->getType()))
       return true;
@@ -355,7 +363,13 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
         WithinFieldDepthLimit;
     if (shouldExpandFields) {
       SmallVector<OriginNode::Edge, 4> FieldChildren;
-      for (const FieldDecl *F : RD->fields())
+      // Bases' fields too, for the reason above. isTrackedField is asked about
+      // the record being expanded, not the one that declares the field, so an
+      // inherited non-public member of a TU-local owner is tracked exactly as a
+      // directly declared one is.
+      llvm::SmallVector<const FieldDecl *, 8> AllFields;
+      collectFieldsIncludingBases(RD, AllFields);
+      for (const FieldDecl *F : AllFields)
         if (isTrackedField(RD, F)) {
           OriginNode *Sub =
               buildNodeForTypeImpl(F->getType(), Node, Visited, FieldDepth + 1);
