@@ -1693,10 +1693,46 @@ void FactsGenerator::VisitConditionalOperator(const ConditionalOperator *CO) {
   handleConditionalArms(*CO, CO->getTrueExpr(), CO->getFalseExpr());
 }
 
+/// Returns the first materialized temporary in \p E, or null. Does not descend
+/// into a nested lambda: its body is a separate function with its own temporaries.
+static const MaterializeTemporaryExpr *findMaterializedTemporary(const Expr *E) {
+  if (!E)
+    return nullptr;
+  llvm::SmallVector<const Stmt *, 16> Worklist{E};
+  while (!Worklist.empty()) {
+    const Stmt *S = Worklist.pop_back_val();
+    if (!S || (S != E && isa<LambdaExpr>(S)))
+      continue;
+    if (const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(S))
+      return MTE;
+    Worklist.append(S->child_begin(), S->child_end());
+  }
+  return nullptr;
+}
+
 void FactsGenerator::VisitBinaryConditionalOperator(
     const BinaryConditionalOperator *BCO) {
   if (!hasOrigins(BCO))
     return;
+  // Soundness: the common operand is evaluated once and every accessor for it
+  // (getCond, getTrueExpr) hands back the OpaqueValueExpr that stands for it, not
+  // the operand. The CFG's temporary-destructor pass does not descend through an
+  // opaque value, so a temporary created in the common operand gets no cleanup
+  // element and no destructor -- and therefore no Expire fact, which is this
+  // analysis's single trigger for reporting a use after a temporary dies. A
+  // borrow of such a temporary looks immortal, and use-after-scope,
+  // return-stack-addr and dangling-global all go quiet together.
+  //
+  // Asked of the construct rather than of the loans because what is missing is a
+  // CFG element, not a judgement about a value: by the time the loans could be
+  // consulted the expiry that should have been generated is simply absent, and
+  // nothing distinguishes that from a borrow that legitimately outlives the
+  // statement. Refuse until the CFG models it.
+  if (const Expr *Common = BCO->getCommon())
+    if (const MaterializeTemporaryExpr *MTE =
+            findMaterializedTemporary(Common->IgnoreParenImpCasts()))
+      CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+          UntrackedConstructReason::BinaryConditionalTemporary, MTE));
   // The GNU binary conditional `a ?: b` yields `a` when `a` is truthy, else `b`.
   // Path-isolate the two candidates the same way as the ternary, so neither
   // leaks liveness onto the other's path (see handleConditionalArms). The common

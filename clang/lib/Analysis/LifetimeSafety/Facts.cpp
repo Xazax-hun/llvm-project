@@ -190,6 +190,9 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::LambdaRefCaptureIndirection:
     OS << "LambdaRefCaptureIndirection";
     break;
+  case UntrackedConstructReason::BinaryConditionalTemporary:
+    OS << "BinaryConditionalTemporary";
+    break;
   case UntrackedConstructReason::ArrayOfIndirectionDecay:
     OS << "ArrayOfIndirectionDecay";
     break;

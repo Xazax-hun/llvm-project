@@ -692,6 +692,11 @@ public:
         << "this array of pointers (decaying to a pointer to a pointer)"
         << E->getSourceRange();
   }
+  void reportBinaryConditionalTemporary(const Expr *E) override {
+    S.Diag(E->getExprLoc(),
+           diag::warn_lifetime_safety_binary_conditional_temporary)
+        << E->getSourceRange();
+  }
   void reportUnsupportedStoreDestination(const Expr *E) override {
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_unsupported_store)
         << E->getSourceRange();

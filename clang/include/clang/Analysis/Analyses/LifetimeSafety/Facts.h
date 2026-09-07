@@ -661,6 +661,14 @@ enum class UntrackedConstructReason : uint8_t {
   /// it should carry is silently dropped. Flagging it keeps the soundness model
   /// from silently failing on a construct it does not model.
   UnmodeledExpr,
+  /// A GNU binary conditional (`a ?: b`) whose common operand materializes a
+  /// temporary. The operand is evaluated once and reached through an
+  /// OpaqueValueExpr, and the CFG's temporary-destructor pass does not descend
+  /// through that, so no cleanup and no destructor are emitted for the temporary
+  /// -- and therefore no expiry, which is the analysis's single trigger for
+  /// reporting a use after a temporary's death. A borrow of such a temporary
+  /// would look immortal, so the construct is refused instead.
+  BinaryConditionalTemporary,
   /// An inline assembly statement (`asm(...)`). The analysis does not model
   /// what
   /// the asm does: an output operand can reseat a pointer to anything, and an

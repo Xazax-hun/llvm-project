@@ -1945,6 +1945,9 @@ public:
     case UntrackedConstructReason::LambdaRefCaptureIndirection:
       SemaHelper->reportMultiLevelIndirectionCapture(E);
       break;
+    case UntrackedConstructReason::BinaryConditionalTemporary:
+      SemaHelper->reportBinaryConditionalTemporary(E);
+      break;
     case UntrackedConstructReason::ArrayOfIndirectionDecay:
       SemaHelper->reportArrayOfIndirectionDecay(E);
       break;

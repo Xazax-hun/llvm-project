@@ -11296,6 +11296,13 @@ def warn_lifetime_safety_lambda_store_into_captured_object
               "object could dangle undetected">,
       InGroup<LifetimeSafetyUnsupportedStore>,
       DefaultIgnore;
+def warn_lifetime_safety_binary_conditional_temporary
+    : Warning<"the common operand of this GNU conditional creates a temporary "
+              "whose destruction is not modeled by lifetime safety analysis, so "
+              "a borrow of that temporary would appear to outlive it and a later "
+              "dangling use could be missed">,
+      InGroup<LifetimeSafetyUnsupportedStore>,
+      DefaultIgnore;
 def warn_lifetime_safety_unmodeled_expr
     : Warning<"this expression is not modeled by lifetime safety analysis; it "
               "produces a value that can hold a borrow, but the analysis does "
