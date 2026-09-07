@@ -3784,6 +3784,15 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     const auto *Method = dyn_cast<CXXMethodDecl>(FD);
     if (!Method || !Method->isInstance())
       return false;
+    // Not for a C++23 explicit object parameter. There, argument 0 is a real
+    // parameter -- `getParamDecl(0)`, as IsArgLifetimeBound above already
+    // accounts for -- and it can be taken BY VALUE, in which case the argument is
+    // a prvalue copy with a single origin. The branch this guards assumes an
+    // implicit object argument: a glvalue whose lvalue outer origin wraps the
+    // object, so it reads `getPointeeChild()` and asserted on the length. Handled
+    // as the ordinary parameter it is instead.
+    if (Method->isExplicitObjectMemberFunction())
+      return false;
     return I == 0 &&
            isGslPointerType(Method->getFunctionObjectParameterType()) &&
            shouldTrackImplicitObjectArg(*Args[0], Method,
