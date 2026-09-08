@@ -1335,6 +1335,10 @@ void FactsGenerator::VisitReturnStmt(const ReturnStmt *RS) {
 void FactsGenerator::handleAssignment(const Expr *TargetExpr,
                                       const Expr *LHSExpr,
                                       const Expr *RHSExpr) {
+  // The destination type as SPELLED, before the casts below are stripped. Compared
+  // against the stripped lvalue's type to recognise a store into a base subobject
+  // (see WritesPartOfDestination).
+  const QualType SpelledDestTy = LHSExpr->getType().getNonReferenceType();
   LHSExpr = LHSExpr->IgnoreParenImpCasts();
   // Look through a value-preserving explicit reference cast on the destination
   // (e.g. `static_cast<int*&>(p) = ...` or the C-style `(int*&)p = ...`), which
@@ -1428,9 +1432,46 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // assigned.
   RHSNode = getRValueOrigins(RHSExpr, RHSNode);
 
+  // Whether this assignment writes only PART of the destination object. Assigning
+  // to a base subobject (`static_cast<B &>(d) = B{...}`, or the same call spelled
+  // `d.B::operator=(B{...})`) reaches the base and nothing else, but a
+  // [[gsl::Pointer]] object is a single origin, so the base subobject and the whole
+  // object ARE that one origin. Killing it discards borrows the store never touched
+  // -- including one held by a member the derived class adds -- so a genuine dangle
+  // in it went silent while the same code without the base assignment reported.
+  //
+  // Asked as "is the type being assigned the type the destination origin records?":
+  // a whole-object store answers yes, a slice of it answers no. An origin with no
+  // recorded type keeps the precise behaviour, so this cannot turn into a blanket
+  // merge on shapes that have nothing to do with base subobjects.
+  // Whether this assignment writes only PART of the destination object. Assigning
+  // to a base subobject reaches the base and nothing else, but a [[gsl::Pointer]]
+  // object is a single origin, so the base subobject and the whole object ARE that
+  // one origin -- and the casts that name the base are stripped above (the
+  // derived-to-base reference cast by the value-preserving-cast loop, the implicit
+  // one by IgnoreParenImpCasts), leaving a store that looks like it covers
+  // everything. Killing then discards borrows the store never touched, including one
+  // held by a member the derived class adds, so a genuine dangle in it went silent
+  // while the same code without the base assignment reported it.
+  //
+  // Asked by comparing the type as SPELLED at the destination against the type of
+  // the lvalue left after stripping: equal for a whole-object store, narrower for a
+  // slice of one. That keeps `static_cast<int *&>(p) = q`, whose cast the loop above
+  // exists for, a full store -- it preserves the referent type.
+  // LHSType is left null for a destination that is neither a DeclRefExpr nor a
+  // MemberExpr (an array subscript, say), so it must be checked before use.
+  const bool WritesPartOfDestination =
+      !SpelledDestTy.isNull() && !LHSType.isNull() &&
+      SpelledDestTy->getAsCXXRecordDecl() &&
+      LHSType.getNonReferenceType()->getAsCXXRecordDecl() &&
+      SpelledDestTy.getCanonicalType() !=
+          LHSType.getNonReferenceType().getCanonicalType();
+
   if (LHSUseFact) {
+    // A partial store must not kill the destination's liveness either: what it does
+    // not overwrite stays live, and is exactly what may still be dangling.
     if (LHSType->isReferenceType()) {
-      if (hasOrigins(LHSType->getPointeeType())) {
+      if (hasOrigins(LHSType->getPointeeType()) && !WritesPartOfDestination) {
         // Writing through a reference uses the binding but overwrites the
         // pointee. Model this as a Read of the outer origin (keeping the
         // binding live) and a Write of the inner origins (killing the pointee's
@@ -1446,7 +1487,7 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
           CurrentBlockFacts.push_back(WriteUF);
         }
       }
-    } else
+    } else if (!WritesPartOfDestination)
       LHSUseFact->markAsWritten();
   }
   if (!RHSNode) {
@@ -1461,7 +1502,8 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // Kill the old loans of the destination origin and flow the new loans
   // from the source origin. For a shared array element-origin we merge instead
   // of killing (see above).
-  flow(LHSNode->getPointeeChild(), RHSNode, /*Kill=*/!MergeIntoSharedElement);
+  flow(LHSNode->getPointeeChild(), RHSNode,
+       /*Kill=*/!MergeIntoSharedElement && !WritesPartOfDestination);
   killAndFlowOrigin(*TargetExpr, *LHSExpr);
 
   // Soundness: record a store into a view/pointer member so the checker can
