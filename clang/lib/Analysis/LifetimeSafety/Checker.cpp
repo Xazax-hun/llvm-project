@@ -830,6 +830,24 @@ public:
   // which a field mutation does not dangle, and which is how the object's own
   // `this`/variable origin presents -- so this also excludes the receiver
   // itself from being reported as a borrow into itself).
+  /// Conservative form for deciding whether a holder is SPARED by a mutation of
+  /// the object its loan names. Sparing must only happen when we positively know
+  /// the holder points AT the object; anything unknown has to count as pointing
+  /// INTO it, or the check trades a false positive for a hole. Measured: without
+  /// this, closures (`std::function`, a lambda) and origins carrying no recorded
+  /// type -- neither of which originBorrowsInto can classify -- were spared, and
+  /// with them went real reports for a captured reference into a container.
+  bool originMayBorrowInto(OriginID OID, const CXXRecordDecl *ObjRD) const {
+    const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
+    if (!Ty)
+      return true; // unknown: assume the worst
+    QualType QT(Ty, 0);
+    if (const CXXRecordDecl *RD = QT.getNonReferenceType()->getAsCXXRecordDecl())
+      if (RD->isLambda() || isStdCallableWrapperType(RD))
+        return true; // a closure can hold any borrow, including one inside
+    return originBorrowsInto(OID, ObjRD);
+  }
+
   bool originBorrowsInto(OriginID OID, const CXXRecordDecl *ObjRD) const {
     const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
     if (!Ty)
@@ -935,12 +953,25 @@ public:
     // `o.v` is a prefix of `o.v.a` -- so returning early made the field-precise
     // path strictly weaker than the generic one, and the member spelling of a
     // bug the local spelling catches went unreported.
-    auto IsExactInvalidated = [&](LoanID L) {
+    auto IsExactInvalidated = [&](OriginID OID, LoanID L) {
       if (MutatedField && namesFieldLast(LoanAP(L), MutatedField))
         return true;
-      for (LoanID InvalidID : DirectlyInvalidatedLoans)
-        if (LoanAP(InvalidID).isPrefixOf(LoanAP(L)))
-          return true;
+      for (LoanID InvalidID : DirectlyInvalidatedLoans) {
+        const AccessPath &IAP = LoanAP(InvalidID);
+        if (!IAP.isPrefixOf(LoanAP(L)))
+          continue;
+        // A loan naming the mutated storage EXACTLY denotes the object, and an
+        // object survives a mutation of its own contents: a reference or pointer
+        // to `v` is still valid after `v.push_back()`. Only a holder that points
+        // INTO the object is endangered.
+        //
+        // A deallocation is different -- it destroys the object, so a pointer AT
+        // it is exactly what dangles (`delete &obj;` then `p->id`).
+        if (!IOF->isDeallocation() && IAP == LoanAP(L) &&
+            !originMayBorrowInto(OID, invalidatedObjectRecord(IAP)))
+          continue;
+        return true;
+      }
       return false;
     };
     // For each live origin, check if it holds an invalidated loan and report.
@@ -956,7 +987,7 @@ public:
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
       llvm::SmallVector<LoanID, 2> Invalidated;
       for (LoanID L : HeldLoans)
-        if (IsExactInvalidated(L))
+        if (IsExactInvalidated(OID, L))
           Invalidated.push_back(L);
 
       // Conservative arm, in path terms: the borrow denotes storage that

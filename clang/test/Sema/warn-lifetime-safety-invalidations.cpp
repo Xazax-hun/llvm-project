@@ -345,26 +345,27 @@ void ParenthesizedContainerInvalidatesIterator() {
 } // namespace InvalidatingThroughContainerAliases
 
 namespace ContainerObjectAliases {
-// FIXME: Distinguish owner-borrow from content-borrow.
-void PointerParameterObjectUseIsOk(std::vector<int> *v) { // expected-warning {{parameter is later invalidated}}
-  v->push_back(42); // expected-note {{invalidated here}}
-  (void)v;          // expected-note {{later used here}}
+// A pointer or reference AT the container is not endangered by a mutation of the
+// container's CONTENTS: the object survives, only borrows into it move. So a use
+// of the alias itself is fine, and each of these is now silent -- which is what
+// the names have always claimed.
+void PointerParameterObjectUseIsOk(std::vector<int> *v) {
+  v->push_back(42);
+  (void)v; // no-warning
 }
 
-// FIXME: Distinguish owner-borrow from content-borrow.
 void LocalPointerAliasObjectUseIsOk() {
   std::vector<int> vv;
-  std::vector<int> *v = &vv; // expected-warning {{object whose reference is captured is later invalidated}}
-  v->push_back(42);          // expected-note {{invalidated here}}
-  (void)*v;                  // expected-note {{later used here}}
+  std::vector<int> *v = &vv;
+  v->push_back(42);
+  (void)*v; // no-warning
 }
 
-// FIXME: Distinguish owner-borrow from content-borrow.
 void LocalReferenceAliasObjectUseIsOk() {
   std::vector<int> vv;
-  std::vector<int> &v = vv; // expected-warning {{object whose reference is captured is later invalidated}}
-  v.push_back(42);          // expected-note {{invalidated here}}
-  (void)v;                  // expected-note {{later used here}}
+  std::vector<int> &v = vv;
+  v.push_back(42);
+  (void)v; // no-warning
 }
 } // namespace ContainerObjectAliases
 
@@ -493,12 +494,12 @@ void Invalidate1UseSIsOk() {
   s.strings2.push_back("1");
   (void)*p;
 }
-// FIXME: Distinguish owner-borrow from content-borrow.
+// A pointer AT the container survives a mutation of the container's contents.
 void PointerToContainerIsOk() {
   std::vector<std::string> s;
-  std::vector<std::string>* p = &s; // expected-warning {{object whose reference is captured is later invalidated}}
-  p->push_back("1");                // expected-note {{invalidated here}}
-  (void)*p;                         // expected-note {{later used here}}
+  std::vector<std::string>* p = &s;
+  p->push_back("1");
+  (void)*p; // no-warning
 }
 void IteratorFromPointerToContainerIsInvalidated() {
   std::vector<std::string> s;
@@ -520,13 +521,14 @@ void ChangingRegionOwnedByContainerIsOk() {
 namespace InvalidatedField {
 std::string StableString;
 
-// FIXME: Distinguish owner-borrow from interior-borrow.
+// A member pointing AT the owner is not endangered by a mutation of the owner's
+// contents; only a borrow INTO it would be.
 struct SinkOwnerBorrow {
-  std::string *dest_; // expected-note {{this field dangles}}
+  std::string *dest_;
 
-  SinkOwnerBorrow(std::string *dest, int n) : dest_(dest) { // expected-warning {{parameter which escapes to a field is later invalidated}}
+  SinkOwnerBorrow(std::string *dest, int n) : dest_(dest) {
     if (n > 0)
-      dest->clear(); // expected-note {{invalidated here}}
+      dest->clear(); // no-warning
   }
 };
 

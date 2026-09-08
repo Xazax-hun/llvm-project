@@ -3819,6 +3819,14 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         // a loan rooted at the global owner regardless of how it was reached.
         CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
             CallNode->getOriginID(), ArgNode->getOriginID(), KillSrc));
+        // The view borrows INTO the owner's storage -- as the comment above says,
+        // from the Owner's storage rather than from what the Owner itself borrows.
+        // Record that with an Interior (`.*`) step, so the loan reads "somewhere
+        // inside `s`" rather than "`s`". Without it a view built from an owner and
+        // a REFERENCE bound to the same owner carry the identical loan, and nothing
+        // downstream can tell "points into" from "points at".
+        CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
+            CallNode->getOriginID(), PathElement::getInterior(), Call));
         KillSrc = false;
       } else if (IsArgLifetimeBound(I)) {
         // Only flow the outer origin here. For lifetimebound args in
@@ -3862,21 +3870,17 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
       // Marking those changes the loan's identity for no benefit, and anything
       // keyed on loans (moved loans, diagnostic anchors) then fails to relate it
       // to the argument's own loan.
-      // ...and only when the borrowed thing HAS subobjects to be imprecise
-      // about. A borrow of a scalar (`int *choose(int*, int*)`) cannot later be
-      // refined by a member access, so `.*` would add nothing while changing the
-      // loan's identity -- which everything keyed on loans (moved loans,
-      // origin-flow chains, diagnostic anchors) then fails to match.
+      // ...for a scalar borrow too. This used to be gated on the borrowed thing
+      // having subobjects to be imprecise about, on the grounds that `.*` adds
+      // nothing where no member access can refine it. But `.*` also records
+      // "points INTO the object rather than at it", and a scalar borrow needs that
+      // just as much: `&v[0]` points into `v`, and without the step it carries
+      // `$v` -- indistinguishable from a reference to `v` itself.
       QualType RetTy = Call->getType();
-      QualType Pointee = RetTy->isPointerType() || RetTy->isReferenceType()
-                             ? RetTy->getPointeeType()
-                             : RetTy.getNonReferenceType();
       bool ResultIsBorrow = Call->isGLValue() || RetTy->isPointerType() ||
                             RetTy->isReferenceType() ||
                             isGslPointerType(RetTy.getNonReferenceType());
-      bool BorrowsARecord =
-          Pointee->getAsCXXRecordDecl() || isGslPointerType(Pointee);
-      if (ResultIsBorrow && BorrowsARecord && !isa<CXXConstructorDecl>(FD))
+      if (ResultIsBorrow && !isa<CXXConstructorDecl>(FD))
         CurrentBlockFacts.push_back(FactMgr.createFact<ProjectionFact>(
             CallNode->getOriginID(), PathElement::getInterior(), Call));
       KillSrc = false;
