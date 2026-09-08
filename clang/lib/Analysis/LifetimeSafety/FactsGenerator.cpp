@@ -788,10 +788,11 @@ void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {
                        /*IsGslConstruction=*/true);
     return;
   }
-  // `obj.operator=(arg)` is the same store as `obj = arg`, just spelled out. The
-  // operator syntax is a CXXOperatorCallExpr and reaches the assignment modelling
-  // in VisitCXXOperatorCallExpr; this spelling is an ordinary member call, so
-  // without this it was modelled as a plain call and deposited nothing.
+  // `obj.operator=(arg)` is the same store as `obj = arg`, just spelled out.
+  // The operator syntax is a CXXOperatorCallExpr and reaches the assignment
+  // modelling in VisitCXXOperatorCallExpr; this spelling is an ordinary member
+  // call, so without this it was modelled as a plain call and deposited
+  // nothing.
   if (const CXXMethodDecl *Method = MCE->getMethodDecl();
       Method && Method->getOverloadedOperator() == OO_Equal &&
       MCE->getNumArgs() == 1 &&
@@ -1782,14 +1783,15 @@ void FactsGenerator::VisitBinaryConditionalOperator(
   handleConditionalArms(*BCO, BCO->getCommon(), BCO->getFalseExpr());
 }
 
-/// Models an overloaded `operator=` call as an assignment, if its destination type
-/// is one whose assignment propagates origins. Returns whether it did.
+/// Models an overloaded `operator=` call as an assignment, if its destination
+/// type is one whose assignment propagates origins. Returns whether it did.
 ///
 /// Shared by the two spellings of the same call: the operator syntax `a = b`
-/// (a CXXOperatorCallExpr) and the explicit `a.operator=(b)` (a CXXMemberCallExpr).
-/// Only the former used to reach here, so the explicit spelling modelled no store
-/// at all -- `W().v.operator=(std::string(...))` deposited nothing, and the
-/// destructor's read of the borrow had nothing to see.
+/// (a CXXOperatorCallExpr) and the explicit `a.operator=(b)` (a
+/// CXXMemberCallExpr). Only the former used to reach here, so the explicit
+/// spelling modelled no store at all -- `W().v.operator=(std::string(...))`
+/// deposited nothing, and the destructor's read of the borrow had nothing to
+/// see.
 bool FactsGenerator::handleAssignmentOperatorCall(const CallExpr *CE,
                                                   const Expr *LHS,
                                                   const Expr *RHS) {
@@ -2074,6 +2076,10 @@ void FactsGenerator::VisitCXXBindTemporaryExpr(
 void FactsGenerator::VisitMaterializeTemporaryExpr(
     const MaterializeTemporaryExpr *MTE) {
   assert(MTE->isGLValue());
+  // Record construction order for handleFullExprCleanup. Before the bail-out below,
+  // so a temporary without origins still takes its place: its expiry is emitted
+  // regardless, and where it sits decides which destructors run after it.
+  MTEConstructionSeq.try_emplace(MTE, NextMTESeq++);
   OriginNode *MTENode = getOriginNode(*MTE);
   if (!MTENode)
     return;
@@ -2790,7 +2796,27 @@ void FactsGenerator::handleTemporaryDtor(
 
 void FactsGenerator::handleFullExprCleanup(
     const CFGFullExprCleanup &FullExprCleanup) {
-  for (const auto *MTE : FullExprCleanup.getExpiringMTEs()) {
+  // Temporaries are destroyed in reverse order of CONSTRUCTION, and the order
+  // matters: a destructor is modelled as a use of the object, so it only sees a
+  // borrow of another temporary as dangling once that temporary's expiry has been
+  // emitted. The CFG's list is in syntactic pre-order -- neither construction nor
+  // destruction order -- so whether the temporary destroyed LAST came last was
+  // accidental. `W().v.operator=(s)` put it first and went silent; the same store
+  // spelled `W().v = s` happened to put it last and was reported.
+  llvm::SmallVector<const MaterializeTemporaryExpr *, 4> Expiring(
+      FullExprCleanup.getExpiringMTEs());
+  // A temporary this visitor never saw sorts as if constructed LAST, i.e. destroyed
+  // FIRST, leaving the other destructors ordered after its expiry. That is the
+  // conservative direction: it can only add reports, never drop one.
+  auto ConstructionSeq = [&](const MaterializeTemporaryExpr *MTE) {
+    auto It = MTEConstructionSeq.find(MTE);
+    return It == MTEConstructionSeq.end() ? UINT_MAX : It->second;
+  };
+  llvm::stable_sort(Expiring, [&](const MaterializeTemporaryExpr *A,
+                                  const MaterializeTemporaryExpr *B) {
+    return ConstructionSeq(A) > ConstructionSeq(B);
+  });
+  for (const auto *MTE : Expiring) {
     // A temporary's destructor runs here and can read or mutate what the object captured,
     // exactly as a named local's can at scope exit. Emitting only the expiry left an
     // unnamed RAII guard -- `(void)Grower{&v}.vec;` -- silent, while naming it reported.

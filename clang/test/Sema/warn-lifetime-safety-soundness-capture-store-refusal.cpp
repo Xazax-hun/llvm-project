@@ -37,10 +37,14 @@ void capture_into_temporary(const int *q) {
   Sink{}.take(q); // no-warning
 }
 
-// An EXTENDED temporary does outlive the statement, so it is not exempt.
+// An EXTENDED temporary does outlive the statement, so it is not exempt -- and it
+// now resolves to an origin of its own, so the store is TRACKED rather than refused.
+// A borrow captured into one is reported precisely at the source's expiry
+// (see the extended-temporary case in
+// warn-lifetime-safety-soundness-store-into-temporary.cpp).
 void capture_into_extended_temporary(const int *q) {
   Sink &&s = Sink{};
-  s.take(q); // expected-warning {{assignment through this expression is not modeled}}
+  s.take(q); // no-warning
 }
 
 // A plain variable receiver resolves to storage, so it is tracked, not refused.

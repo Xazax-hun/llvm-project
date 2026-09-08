@@ -642,6 +642,17 @@ OriginManager::getOriginForAccessPath(const AccessPath &AP) const {
   } else if (AP.getAsPlaceholderThis()) {
     if (auto ThisOrigins = getThisOrigins())
       N = *ThisOrigins;
+  } else if (const auto *MTE = AP.getAsMaterializeTemporaryExpr()) {
+    // A temporary is storage like any other, and it has an origin node. Leaving it
+    // unresolved meant a store into a member of a temporary was routed nowhere.
+    // That was thought harmless because a non-extended temporary dies at the end of
+    // the full expression, so nothing could read the borrow afterwards -- except its
+    // OWN DESTRUCTOR, which runs at that very cleanup and is already modelled as a
+    // use of the object. `W().v = s` deposited nothing, so ~W's read of `v` had
+    // nothing to see, while the same store to a named `W w` was reported.
+    auto It = ExprToNode.find(MTE);
+    if (It != ExprToNode.end())
+      N = It->second;
   }
   if (!N)
     return nullptr;

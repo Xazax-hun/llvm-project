@@ -1,13 +1,13 @@
-// DESC: a store written as `a.operator=(b)` rather than `a = b`. The operator syntax
-// is a CXXOperatorCallExpr and reached the assignment modelling; the explicit
-// spelling is an ordinary member call and did not, so it deposited NOTHING -- no
-// FieldStore, no DynamicStore. The borrow was lost outright.
+// DESC: a store written as `a.operator=(b)` rather than `a = b`. The operator
+// syntax is a CXXOperatorCallExpr and reached the assignment modelling; the
+// explicit spelling is an ordinary member call and did not, so it deposited
+// NOTHING -- no FieldStore, no DynamicStore. The borrow was lost outright.
 //
-// Found through an owner whose destructor reads a view member: the store is into a
-// member of the object, and the destructor's read of it happens after the borrowed
-// string is gone. Only the lost-borrow sentinel remained, and only for a NAMED
-// destination -- so the temporary-receiver spelling was completely silent.
-// EXPECT-ASAN: heap-use-after-free
+// Found through an owner whose destructor reads a view member: the store is
+// into a member of the object, and the destructor's read of it happens after
+// the borrowed string is gone. Only the lost-borrow sentinel remained, and only
+// for a NAMED destination -- so the temporary-receiver spelling was completely
+// silent. EXPECT-ASAN: heap-use-after-free
 #include <string>
 #include <string_view>
 

@@ -335,10 +335,13 @@ public:
         }
         continue;
       }
-      // A temporary that is not lifetime-extended dies at the end of the full
-      // expression, so nothing can read a borrow stored into it afterwards --
-      // no loss to report, and refusing would fire on every `Widget{}.set(x)`.
-      // An EXTENDED temporary outlives the statement and is not exempt.
+      // Fallback for a temporary with no origin node of its own (its type is not
+      // tracked): one that is not lifetime-extended dies at the end of the full
+      // expression, so nothing can read a borrow stored into it afterwards -- no
+      // loss to report, and refusing would fire on every `Widget{}.set(x)`. A
+      // temporary WITH origins resolves above and is tracked instead; that is not
+      // merely a precision gain, because a non-extended temporary's own DESTRUCTOR
+      // runs at the cleanup and can read the borrow, which this exemption misses.
       if (const auto *MTE = AP.getAsMaterializeTemporaryExpr();
           MTE && !MTE->getExtendingDecl())
         continue;

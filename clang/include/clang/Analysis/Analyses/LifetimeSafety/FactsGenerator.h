@@ -310,6 +310,11 @@ private:
   // corresponding to the left-hand side is updated to be a "write", thereby
   // exempting it from the check.
   llvm::DenseMap<const Expr *, UseFact *> UseFacts;
+  /// The order in which temporaries were CONSTRUCTED, which is the order this
+  /// visitor sees them (it walks the CFG in evaluation order). Temporaries are
+  /// destroyed in the reverse of it, and handleFullExprCleanup needs that order.
+  llvm::DenseMap<const MaterializeTemporaryExpr *, unsigned> MTEConstructionSeq;
+  unsigned NextMTESeq = 0;
   const CFGBlock *CurrentBlock;
   /// Global "container of indirection" variables already flagged at a use in the
   /// current function (handleGlobalContainerOfIndirectionUse), so a global used
