@@ -460,6 +460,12 @@ public:
         << (Capturer ? Capturer->getName() : StringRef()) << Range;
   }
 
+  void reportMallocViolation(const FunctionDecl *FD,
+                            unsigned Subject) override {
+    const auto *Attr = FD->getAttr<RestrictAttr>();
+    SourceLocation Loc = Attr ? Attr->getLocation() : FD->getLocation();
+    S.Diag(Loc, diag::warn_lifetime_safety_malloc_violation) << Subject;
+  }
   void reportImmortalViolation(const FunctionDecl *FD,
                                unsigned Subject) override {
     const auto *Attr = FD->getAttr<LifetimeImmortalAttr>();

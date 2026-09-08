@@ -11140,6 +11140,16 @@ def warn_lifetime_safety_capture_by_violation
               "argument">,
       InGroup<LifetimeSafetyCaptureByViolation>,
       DefaultIgnore;
+def warn_lifetime_safety_malloc_violation
+    : Warning<"'__attribute__((malloc))' function returns a borrow of "
+              "%select{a local or temporary|a parameter|the implicit this "
+              "parameter|a global or static}0 rather than a fresh allocation; the "
+              "attribute promises the result does not alias any existing object, "
+              "so callers may keep it past the borrowed object's lifetime -- and "
+              "lifetime safety believes the promise, which suppresses the check "
+              "that would have caught the dangle">,
+      InGroup<LifetimeSafetyImmortalViolation>,
+      DefaultIgnore;
 def warn_lifetime_safety_immortal_violation
     : Warning<"'[[clang::lifetime_immortal]]' function returns a borrow of "
               "%select{a local or temporary|a parameter|the implicit this "

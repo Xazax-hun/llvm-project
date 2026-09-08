@@ -363,6 +363,9 @@ private:
   /// string_view::substr). Reported (subject 3) only when no concrete offending
   /// subject above was found, so a precise local/param/this report is preferred.
   bool ImmortalReturnsUntracked = false;
+  /// Subject index for a `__attribute__((malloc))` function found to return a
+  /// borrow of something that already existed, or none if it does not.
+  std::optional<unsigned> MallocViolation;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
@@ -536,6 +539,45 @@ public:
     // storage (immortal/heap, or a global/static variable). A borrow of a
     // parameter, the implicit object, or a local/temporary is a lie -- callers
     // trust the promise and may keep the result past that object's lifetime.
+    // `__attribute__((malloc))` promises the returned pointer does not alias any
+    // existing object -- so the call is modelled as a fresh allocation, and the
+    // lifetimebound propagation is never emitted. That makes the attribute a way to
+    // switch the check off: `malloc` on a function that actually returns a borrow of
+    // its parameter is silent, while the same function without it is reported.
+    // Verify the body, the way the immortal promise below is verified: a returned
+    // borrow must be a fresh allocation, not a borrow of anything that already
+    // existed.
+    if (isa<ReturnEscapeFact>(OEF) && FD->hasAttr<RestrictAttr>()) {
+      for (LoanID LID : EscapedLoans) {
+        const AccessPath &AP =
+            FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+        switch (AP.getKind()) {
+        case AccessPath::Kind::NewAllocation:
+        case AccessPath::Kind::Immortal:
+          continue; // genuinely fresh, or outlives everything anyway
+        case AccessPath::Kind::Unknown:
+          continue; // cannot prove either way; do not invent a report
+        case AccessPath::Kind::PlaceholderParam:
+          MallocViolation = 1;
+          break;
+        case AccessPath::Kind::PlaceholderThis:
+          MallocViolation = 2;
+          break;
+        case AccessPath::Kind::Uninitialized:
+        case AccessPath::Kind::MaterializeTemporary:
+          MallocViolation = 0;
+          break;
+        case AccessPath::Kind::ValueDecl:
+          if (const auto *VD =
+                  dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
+              VD && VD->hasGlobalStorage())
+            MallocViolation = 3;
+          else
+            MallocViolation = 0;
+          break;
+        }
+      }
+    }
     if (isa<ReturnEscapeFact>(OEF) && FD->hasAttr<LifetimeImmortalAttr>()) {
       for (LoanID LID : EscapedLoans) {
         const Loan *EL = FactMgr.getLoanMgr().getLoan(LID);
@@ -2984,6 +3026,8 @@ public:
           cast<FunctionDecl>(FD), unsigned(ImmortalViolationSubject));
     else if (ImmortalReturnsUntracked)
       SemaHelper->reportImmortalViolation(cast<FunctionDecl>(FD), /*Subject=*/3);
+    if (MallocViolation)
+      SemaHelper->reportMallocViolation(cast<FunctionDecl>(FD), *MallocViolation);
     if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
         MD && getImplicitObjectParamLifetimeBoundAttr(MD) &&
         !VerifiedLiftimeboundEscapes.contains(MD))
