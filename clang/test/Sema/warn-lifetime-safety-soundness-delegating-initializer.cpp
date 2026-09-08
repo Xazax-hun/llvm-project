@@ -36,6 +36,17 @@ struct [[gsl::Pointer(char)]] E {
   void use() const { sink = v.data()[0]; }
 };
 
+// The other consequence of modelling the store: a TEMPORARY passed to a delegated-to
+// constructor dies at the end of the mem-initializer, but the borrow it left behind
+// outlives it by the whole life of the object.
+struct [[gsl::Pointer(char)]] G {
+  string_view v;
+  G(string_view s [[clang::lifetimebound]], int) : v(s) {}
+  G() : G(string("temporary"), 0) {} // expected-warning {{local temporary object does not live long enough}}
+  // expected-note@-1 {{destroyed here}} expected-note@-1 {{later used here}}
+  void use() const { sink = v.data()[0]; }
+};
+
 //===----------------------------------------------------------------------===//
 // Must stay silent.
 //===----------------------------------------------------------------------===//
