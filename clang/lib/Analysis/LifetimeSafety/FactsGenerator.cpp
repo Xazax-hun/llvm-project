@@ -2543,10 +2543,25 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
   Ty = arrayElementType(Ty);
   const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
   // Destroying an OWNER frees what it owns, which is its job rather than an
-  // aliasing hazard -- unless it holds a type-erased callable, whose captures
-  // are invisible and may reference storage the caller borrows.
+  // aliasing hazard -- but an owner can ALSO hold a borrow into something it does
+  // not own, and its destructor can read that. `hasOrigins` is what tells the two
+  // apart now that a user owner's members are tracked: a library owner's members
+  // stay opaque and it has none, while a user owner with a view member does. So
+  // the owner exclusion is not needed to keep std::string quiet, and keeping it
+  // meant a guard whose ~T() reads a view member missed a borrowed-from object
+  // destroyed earlier in the same scope -- the reverse-declaration-order bug this
+  // whole use exists to catch, silent for exactly the types most likely to have a
+  // logging destructor.
   if (!RD || !RD->hasDefinition() || !RD->hasNonTrivialDestructor() ||
-      (isGslOwnerType(Ty) && !holdsTypeErasedCallable(Ty)) || !hasOrigins(Ty))
+      !hasOrigins(Ty))
+    return;
+  // For an OWNER, only when the borrow is in a member of the owner ITSELF, which
+  // its own destructor can read. A LIBRARY owner's members are opaque -- a
+  // std::unique_ptr's destructor destroys its pointee, and whether THAT reads a
+  // borrow is the pointee's own destructor's business, modelled where the pointee
+  // is destroyed. Without this, `unique_ptr<T> p` declared before a local that T
+  // borrows reported at scope exit even when ~T is trivial.
+  if (isGslOwnerType(Ty) && !holdsTypeErasedCallable(Ty) && isLibraryOwned(RD))
     return;
   CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Loc, Node));
   if (!destructionMayMutateAliasedOwner(Ty))
