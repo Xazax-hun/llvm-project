@@ -150,6 +150,10 @@ private:
 
   void handleCleanupFunction(const CFGCleanupFunction &CleanupFunction);
 
+  /// Models an overloaded `operator=` call as an assignment; returns whether it
+  /// did. Shared by the `a = b` and `a.operator=(b)` spellings.
+  bool handleAssignmentOperatorCall(const CallExpr *CE, const Expr *LHS,
+                                    const Expr *RHS);
   void handleFullExprCleanup(const CFGFullExprCleanup &FullExprCleanup);
 
   /// Models the destruction of a temporary whose value is discarded, which has

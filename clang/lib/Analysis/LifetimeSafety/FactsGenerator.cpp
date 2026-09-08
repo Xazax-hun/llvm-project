@@ -788,6 +788,16 @@ void FactsGenerator::VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE) {
                        /*IsGslConstruction=*/true);
     return;
   }
+  // `obj.operator=(arg)` is the same store as `obj = arg`, just spelled out. The
+  // operator syntax is a CXXOperatorCallExpr and reaches the assignment modelling
+  // in VisitCXXOperatorCallExpr; this spelling is an ordinary member call, so
+  // without this it was modelled as a plain call and deposited nothing.
+  if (const CXXMethodDecl *Method = MCE->getMethodDecl();
+      Method && Method->getOverloadedOperator() == OO_Equal &&
+      MCE->getNumArgs() == 1 &&
+      handleAssignmentOperatorCall(MCE, MCE->getImplicitObjectArgument(),
+                                   MCE->getArg(0)))
+    return;
   if (const CXXMethodDecl *Method = MCE->getMethodDecl()) {
     // Construct the argument list, with the implicit 'this' object as the
     // first argument.
@@ -1772,34 +1782,49 @@ void FactsGenerator::VisitBinaryConditionalOperator(
   handleConditionalArms(*BCO, BCO->getCommon(), BCO->getFalseExpr());
 }
 
+/// Models an overloaded `operator=` call as an assignment, if its destination type
+/// is one whose assignment propagates origins. Returns whether it did.
+///
+/// Shared by the two spellings of the same call: the operator syntax `a = b`
+/// (a CXXOperatorCallExpr) and the explicit `a.operator=(b)` (a CXXMemberCallExpr).
+/// Only the former used to reach here, so the explicit spelling modelled no store
+/// at all -- `W().v.operator=(std::string(...))` deposited nothing, and the
+/// destructor's read of the borrow had nothing to see.
+bool FactsGenerator::handleAssignmentOperatorCall(const CallExpr *CE,
+                                                  const Expr *LHS,
+                                                  const Expr *RHS) {
+  if (!hasOrigins(LHS->getType()))
+    return false;
+  QualType LHSTy = LHS->getType();
+  // Pointer-like types: assignment inherently propagates origins.
+  if (LHSTy->isPointerOrReferenceType() || isGslPointerType(LHSTy) ||
+      isGslOwnerType(LHSTy)) {
+    handleAssignment(CE, LHS, RHS);
+    return true;
+  }
+  // Standard library callable wrappers (e.g., std::function) can propagate
+  // the stored lambda's origins.
+  if (const auto *RD = LHSTy->getAsCXXRecordDecl();
+      RD && isStdCallableWrapperType(RD)) {
+    handleAssignment(CE, LHS, RHS);
+    return true;
+  }
+  // Other tracked types: only defaulted operator= propagates origins.
+  // User-defined operator= has opaque semantics, so don't handle them now.
+  if (const auto *MD = dyn_cast_or_null<CXXMethodDecl>(CE->getDirectCallee());
+      MD && MD->isDefaulted()) {
+    handleAssignment(CE, LHS, RHS);
+    return true;
+  }
+  return false;
+}
+
 void FactsGenerator::VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *OCE) {
   // Assignment operators have special "kill-then-propagate" semantics
   // and are handled separately.
   if (OCE->getOperator() == OO_Equal && OCE->getNumArgs() == 2 &&
-      hasOrigins(OCE->getArg(0)->getType())) {
-    // Pointer-like types: assignment inherently propagates origins.
-    QualType LHSTy = OCE->getArg(0)->getType();
-    if (LHSTy->isPointerOrReferenceType() || isGslPointerType(LHSTy) ||
-        isGslOwnerType(LHSTy)) {
-      handleAssignment(OCE, OCE->getArg(0), OCE->getArg(1));
-      return;
-    }
-    // Standard library callable wrappers (e.g., std::function) can propagate
-    // the stored lambda's origins.
-    if (const auto *RD = LHSTy->getAsCXXRecordDecl();
-        RD && isStdCallableWrapperType(RD)) {
-      handleAssignment(OCE, OCE->getArg(0), OCE->getArg(1));
-      return;
-    }
-    // Other tracked types: only defaulted operator= propagates origins.
-    // User-defined operator= has opaque semantics, so don't handle them now.
-    if (const auto *MD =
-            dyn_cast_or_null<CXXMethodDecl>(OCE->getDirectCallee());
-        MD && MD->isDefaulted()) {
-      handleAssignment(OCE, OCE->getArg(0), OCE->getArg(1));
-      return;
-    }
-  }
+      handleAssignmentOperatorCall(OCE, OCE->getArg(0), OCE->getArg(1)))
+    return;
 
   ArrayRef Args = {OCE->getArgs(), OCE->getNumArgs()};
   // A C++23 static `operator()` or `operator[]` is still written with object
