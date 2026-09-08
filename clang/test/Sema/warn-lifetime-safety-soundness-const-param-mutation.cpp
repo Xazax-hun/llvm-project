@@ -21,18 +21,18 @@ struct Holder { Ptr<Buf> buf; };
 
 // const& parameter: mutate *buf through the smart-pointer member.
 void via_const_ref(const Holder &x) {
-  x.buf->mutate(); // expected-warning {{mutating an owner through a pointer member of a const-qualified object or parameter}}
+  x.buf->mutate(); // expected-warning {{mutating an owner through a pointer or reference member of a const-qualified object or parameter}}
 }
 
 // const* parameter.
 void via_const_ptr(const Holder *x) {
-  x->buf->mutate(); // expected-warning {{mutating an owner through a pointer member of a const-qualified object or parameter}}
+  x->buf->mutate(); // expected-warning {{mutating an owner through a pointer or reference member of a const-qualified object or parameter}}
 }
 
 // Nested fields: the parameter's loan propagates through each member access.
 struct Outer { Holder h; };
 void via_nested(const Outer &x) {
-  x.h.buf->mutate(); // expected-warning {{mutating an owner through a pointer member of a const-qualified object or parameter}}
+  x.h.buf->mutate(); // expected-warning {{mutating an owner through a pointer or reference member of a const-qualified object or parameter}}
 }
 
 // Control: a non-const reference parameter may legitimately be mutated.

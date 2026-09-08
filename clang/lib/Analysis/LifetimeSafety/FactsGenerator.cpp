@@ -4037,7 +4037,16 @@ llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
       for (const FieldDecl *F : RD->fields()) {
         // Owners are opaque leaves (a borrow into an owner field is tracked via
         // its own field-rooted loan, not seeded here); skip them.
-        if (isMutableOwnerType(F->getType()) ||
+        //
+        // A REFERENCE member is not that. It is an alias to an owner someone else
+        // holds -- the object does not own it and the field has no storage of its
+        // own, so there is no field-rooted loan for it and skipping leaves the
+        // member with no borrow at all. Mutating through it in a const method then
+        // reached nothing, so the const-subversion report went to the lost-borrow
+        // sentinel instead, while the pointer spelling of the same design -- not an
+        // owner type, so never skipped -- was reported precisely.
+        if ((isMutableOwnerType(F->getType()) &&
+             !F->getType()->isReferenceType()) ||
             !FactMgr.getOriginMgr().hasOrigins(F->getType()))
           continue;
         if (OriginNode *FN = getOriginNode(*F))

@@ -28,11 +28,11 @@ public:
   string_view view() const [[clang::lifetimebound]] { return buf; }
   // A const method reallocating the owner through the array element pointer.
   void grow() const {
-    self[0]->push_back('z'); // expected-warning {{mutating an owner through a pointer member}} expected-note {{invalidated here}}
+    self[0]->push_back('z'); // expected-warning {{mutating an owner through a pointer or reference member}} expected-note {{invalidated here}}
   }
   // The `*this->arr[i]` deref form is covered too.
   void grow_deref() const {
-    (*self[0]).push_back('z'); // expected-warning {{mutating an owner through a pointer member}} expected-note {{invalidated here}}
+    (*self[0]).push_back('z'); // expected-warning {{mutating an owner through a pointer or reference member}} expected-note {{invalidated here}}
   }
 };
 
