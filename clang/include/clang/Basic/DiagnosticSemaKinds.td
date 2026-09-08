@@ -11470,6 +11470,18 @@ def warn_lifetime_safety_owner_captures_borrow
               "tracked">,
       InGroup<LifetimeSafetyOwnerCapture>,
       DefaultIgnore;
+def warn_lifetime_safety_owner_lifetimebound_ctor
+    : Warning<"'[[clang::lifetimebound]]' on a constructor parameter of a "
+              "[[gsl::Owner]] type is not supported by lifetime safety: on a "
+              "constructor the annotation describes the CONSTRUCTED OBJECT, so it "
+              "declares a borrow resting in an owner -- which is the same thing "
+              "'lifetime_capture_by' naming an owner is refused for. It also "
+              "silences the demand to annotate the parameter, so an owner that "
+              "goes on to FREE what it was handed leaves the caller's own pointer "
+              "dangling with nothing said. Use a '[[gsl::Pointer]]' type to hold a "
+              "borrow, or take ownership through a type that expresses it">,
+      InGroup<LifetimeSafetyOwnerCapture>,
+      DefaultIgnore;
 def warn_lifetime_safety_owner_public_pointer
     : Warning<"public data member %0 of a [[gsl::Owner]] type can hold a borrow; "
               "an owner should encapsulate its resource, and lifetime safety "

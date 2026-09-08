@@ -645,8 +645,15 @@ public:
         // return or a field in constructor.
         if (auto *ReturnEsc = dyn_cast<ReturnEscapeFact>(OEF))
           AnnotationWarningsMap.try_emplace(PVD, ReturnEsc->getReturnExpr());
+        // ...but not into an OWNER's constructor. There the annotation would
+        // declare a borrow resting in an owner, which is refused, so suggesting it
+        // would advise exactly what the owner-capture check rejects. Leave the
+        // unannotated-parameter demand standing: an owner taking a borrow it may
+        // then free has no annotation that makes it safe, and the type is what has
+        // to change.
         else if (auto *FieldEsc = dyn_cast<FieldEscapeFact>(OEF);
-                 FieldEsc && isa<CXXConstructorDecl>(FD))
+                 FieldEsc && isa<CXXConstructorDecl>(FD) &&
+                 !isGslOwnerType(cast<CXXMethodDecl>(FD)->getParent()))
           AnnotationWarningsMap.try_emplace(PVD, FieldEsc->getFieldDecl());
       }
       // TODO: Suggest lifetime_capture_by(this) for parameter escaping to a

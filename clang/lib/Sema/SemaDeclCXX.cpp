@@ -7258,6 +7258,27 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
               }
       });
     };
+    // Flag each [[clang::lifetimebound]] CONSTRUCTOR parameter. On a constructor
+    // the annotation describes the constructed object, so it declares a borrow
+    // resting in an owner -- the same statement `lifetime_capture_by` naming an
+    // owner is refused for, differently spelled. Member templates are enumerated
+    // for the same reason as above.
+    auto CheckLifetimeboundCtorParams = [&](const CXXRecordDecl *RD) {
+      lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
+        if (!isa<CXXConstructorDecl>(M))
+          return;
+        for (const ParmVarDecl *P : M->parameters())
+          if (const auto *A = P->getAttr<LifetimeBoundAttr>())
+            Diag(A->getLocation(),
+                 diag::warn_lifetime_safety_owner_lifetimebound_ctor)
+                << A->getRange();
+      });
+    };
+    bool CheckLbCtor = !getDiagnostics().isIgnored(
+        diag::warn_lifetime_safety_owner_lifetimebound_ctor,
+        Record->getLocation());
+    if (CheckLbCtor)
+      CheckLifetimeboundCtorParams(Record);
     if (CheckPubPtr)
       CheckPublicBorrowFields(Record);
     // Own methods' capture_by(this) is reported in SemaDeclAttr; only inherited
