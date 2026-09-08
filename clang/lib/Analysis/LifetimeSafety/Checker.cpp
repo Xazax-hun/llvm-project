@@ -680,6 +680,15 @@ public:
         bool IsThis = AP.getAsPlaceholderThis() != nullptr;
         const auto *VD = AP.getAsValueDecl();
         bool IsField = VD && isa<FieldDecl>(VD);
+        // A member's origin is seeded at entry with an Uninitialized loan naming
+        // that field -- that IS the borrow the caller left in the member, and it
+        // is what a read of the member yields. It is a field borrow for this
+        // purpose just as much as a ValueDecl-rooted one, but its path kind is
+        // Uninitialized, so getAsValueDecl() returns null and it was classified as
+        // neither. So `g = q;` -- publishing a member's borrow to a global -- was
+        // silent, while the same store of a LOCAL's borrow was reported.
+        if (!IsField)
+          IsField = isa_and_present<FieldDecl>(AP.getAsUninitialized());
         if (IsThis || IsField) {
           SourceLocation Loc = L->getIssuingExpr()
                                    ? L->getIssuingExpr()->getExprLoc()
