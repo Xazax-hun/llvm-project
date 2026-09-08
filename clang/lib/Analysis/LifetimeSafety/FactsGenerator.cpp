@@ -1111,10 +1111,25 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     return;
   case CK_UncheckedDerivedToBase:
   case CK_DerivedToBase:
-    // It is possible that the derived class and base class have different
-    // gsl::Pointer annotations. Skip if their origin shape differ.
-    if (Dest && Src && Dest->getLength() == Src->getLength())
-      flow(Dest, Src, /*Kill=*/true);
+    // An UPCAST denotes the same object as its operand, exactly as the downcast
+    // below does, so the object's loan must carry through. The shapes can differ
+    // (the derived and base classes may have different gsl::Pointer annotations, or
+    // the base may hold no origins at all), and the mismatch used to be skipped
+    // silently -- so a member of a base subobject reached through the implicit
+    // `this` upcast started from an EMPTY origin. A view member bound to an owner
+    // member of a SIBLING base then carried no loan, and the self-referential store
+    // went unrecorded, while the identical store with the owner as a direct member
+    // was reported.
+    //
+    // Same treatment as the downcast: carry the outer object loan and seed the
+    // deeper levels with an Unknown loan, so a borrow this flow cannot carry
+    // surfaces as -Wlifetime-safety-lost-loan rather than vanishing.
+    if (Dest && Src) {
+      if (Dest->getLength() == Src->getLength())
+        flow(Dest, Src, /*Kill=*/true);
+      else
+        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
+    }
     return;
   case CK_BaseToDerived:
   case CK_Dynamic:
