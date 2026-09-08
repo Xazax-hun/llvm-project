@@ -712,10 +712,21 @@ void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
     // escaped parameter loan. The escaped loans are inspected by checkAnnotations
     // and only turn into a diagnostic for a noescape argument; a lifetimebound or
     // unannotated one is handled by its own (unchanged) path.
-    if (CII->isBaseInitializer()) {
-      QualType BaseTy(CII->getBaseClass(), 0);
+    //
+    // A DELEGATING initializer (`: E(init)`) is the same store, and a more direct
+    // one: the target constructor initializes THIS VERY OBJECT, not a subobject of
+    // it. Testing only for a base let a delegating one fall through to the bare
+    // return below, so a [[clang::noescape]] parameter forwarded to a delegated-to
+    // constructor that stores it came to rest in the object with nothing said --
+    // while the same parameter stored directly by this constructor was reported.
+    if (CII->isBaseInitializer() || CII->isDelegatingInitializer()) {
+      // What the initializer writes into: the base subobject, or -- when
+      // delegating -- the whole object, whose type is the constructed type.
+      QualType DestTy = CII->isBaseInitializer()
+                            ? QualType(CII->getBaseClass(), 0)
+                            : CII->getInit()->getType();
       const Expr *Init = CII->getInit();
-      if (Init && FactMgr.getOriginMgr().hasOrigins(BaseTy) &&
+      if (Init && FactMgr.getOriginMgr().hasOrigins(DestTy) &&
           FactMgr.getOriginMgr().hasOrigins(Init) &&
           FactMgr.getOriginMgr().getThisOrigins())
         if (OriginNode *InitNode = getOriginNode(*Init)) {
