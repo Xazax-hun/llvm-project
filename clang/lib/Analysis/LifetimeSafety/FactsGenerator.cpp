@@ -3364,13 +3364,6 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
         CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
             CapturingOriginNode->getOriginID(),
             CapturedOriginNode->getOriginID(), Args[I]));
-      // KillDest=false because we cannot know if previous captures are being
-      // replaced or accumulated. Multiple successive captures into the same
-      // destination must all be tracked, so captured lifetimes are always
-      // merged.
-      CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
-          Dest->getOriginID(), CapturedOriginNode->getOriginID(),
-          /*KillDest=*/false));
 
       // Soundness: capturing the argument into the receiver object (`this`) is a
       // store into that object. If the argument borrows a member of the
@@ -3402,6 +3395,20 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
               FactMgr.createFact<CapturedByThisEscapeFact>(
                   CapturedOriginNode->getOriginID(), Args[I]));
       }
+      // Emitted LAST, after both stores above. The flow merges the payload into
+      // the destination origin, so anything that reads the destination's loans to
+      // ask "which object does this store land in?" has to run first, or it finds
+      // the payload sitting among them and mistakes the store for a store into the
+      // payload's own storage. The DynamicStore was already ordered this way; the
+      // FieldStore needs it too.
+      //
+      // KillDest=false because we cannot know if previous captures are being
+      // replaced or accumulated. Multiple successive captures into the same
+      // destination must all be tracked, so captured lifetimes are always
+      // merged.
+      CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+          Dest->getOriginID(), CapturedOriginNode->getOriginID(),
+          /*KillDest=*/false));
     }
   }
 }
