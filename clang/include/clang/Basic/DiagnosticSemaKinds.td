@@ -11473,6 +11473,16 @@ def warn_lifetime_safety_const_cast
               "object">,
       InGroup<LifetimeSafetyConstSubversion>,
       DefaultIgnore;
+def warn_lifetime_safety_capture_into_borrowless_object
+    : Warning<"this argument is declared 'lifetime_capture_by', but the capturing "
+              "object's type has no member the borrow could rest in, so lifetime "
+              "safety cannot model the capture and a later dangling use would be "
+              "missed. A DERIVED class may well hold it -- reaching the object "
+              "through a base-typed reference is how this arises in practice -- but "
+              "the analysis follows the static type; declare the capture on the "
+              "class that actually holds the borrow">,
+      InGroup<LifetimeSafetyOwnerCapture>,
+      DefaultIgnore;
 def warn_lifetime_safety_owner_captures_borrow
     : Warning<"'lifetime_capture_by(%0)' names a [[gsl::Owner]] type, which is "
               "not supported by lifetime safety: an owner is meant to own its "

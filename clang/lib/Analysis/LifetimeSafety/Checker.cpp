@@ -2088,6 +2088,9 @@ public:
     case UntrackedConstructReason::LambdaRefCaptureIndirection:
       SemaHelper->reportMultiLevelIndirectionCapture(E);
       break;
+    case UntrackedConstructReason::CaptureIntoBorrowlessObject:
+      SemaHelper->reportCaptureIntoBorrowlessObject(E);
+      break;
     case UntrackedConstructReason::BinaryConditionalTemporary:
       SemaHelper->reportBinaryConditionalTemporary(E);
       break;

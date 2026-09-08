@@ -661,6 +661,10 @@ enum class UntrackedConstructReason : uint8_t {
   /// it should carry is silently dropped. Flagging it keeps the soundness model
   /// from silently failing on a construct it does not model.
   UnmodeledExpr,
+  /// A `lifetime_capture_by` whose capturing object has no origin for the borrow
+  /// to rest in -- a class with no borrow-holding member. The capture would be
+  /// dropped, so no later dangling use could be connected to it.
+  CaptureIntoBorrowlessObject,
   /// A GNU binary conditional (`a ?: b`) whose common operand materializes a
   /// temporary. The operand is evaluated once and reached through an
   /// OpaqueValueExpr, and the CFG's temporary-destructor pass does not descend

@@ -198,6 +198,7 @@ public:
   // of non-immortal storage. `Subject` selects the borrowed entity: 0 = a
   // local/temporary, 1 = a parameter, 2 = the implicit this parameter.
   virtual void reportMallocViolation(const FunctionDecl *FD, unsigned Subject) {}
+  virtual void reportCaptureIntoBorrowlessObject(const Expr *E) {}
   virtual void reportImmortalViolation(const FunctionDecl *FD,
                                        unsigned Subject) {}
 

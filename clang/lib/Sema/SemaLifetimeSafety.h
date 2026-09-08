@@ -460,6 +460,11 @@ public:
         << (Capturer ? Capturer->getName() : StringRef()) << Range;
   }
 
+  void reportCaptureIntoBorrowlessObject(const Expr *E) override {
+    S.Diag(E->getExprLoc(),
+           diag::warn_lifetime_safety_capture_into_borrowless_object)
+        << E->getSourceRange();
+  }
   void reportMallocViolation(const FunctionDecl *FD,
                             unsigned Subject) override {
     const auto *Attr = FD->getAttr<RestrictAttr>();

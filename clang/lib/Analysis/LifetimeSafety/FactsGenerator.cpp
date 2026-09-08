@@ -3359,8 +3359,21 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
 
       OriginNode *CapturingOriginNode = getOriginNode(*CapturedByArg);
       OriginNode *Dest = getRValueOrigins(CapturedByArg, CapturingOriginNode);
-      if (!Dest)
+      if (!Dest) {
+        // Soundness: the annotation promises the borrow comes to rest in the
+        // capturing object, but that object has no origin for it to rest in -- a
+        // class with no borrow-holding member has none -- so the capture would be
+        // dropped here and no later dangling use could be connected to it.
+        //
+        // A DERIVED class may well hold the borrow, and reaching the object
+        // through a base-typed reference is how this is met in practice: the depth
+        // refusal that covers a view out-parameter measures the STATIC type, and a
+        // plain base measures one level, so it does not fire. Refuse instead of
+        // dropping.
+        CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+            UntrackedConstructReason::CaptureIntoBorrowlessObject, Args[I]));
         continue;
+      }
       // Route the capture by the loans the capturer's LVALUE holds. Those name
       // the object that will hold the borrow, whatever expression designated it
       // -- so an inherited method's receiver, which arrives as a derived-to-base
