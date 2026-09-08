@@ -723,6 +723,26 @@ void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
           CurrentBlockFacts.push_back(
               FactMgr.createFact<CapturedByThisEscapeFact>(
                   InitNode->getOriginID(), Init));
+          // ...and actually deposit the borrow in the object, which the escape
+          // fact above does not do -- it only lets the annotation verifier see
+          // an escaped parameter loan. The member path flows the initializer
+          // into the member; without the same for a base, a borrow initialized
+          // into a base subobject rests nowhere, so a TEMPORARY passed to a
+          // base constructor died unobserved and the destructor's read of it
+          // was missed, while the identical initializer of a MEMBER of the same
+          // type was reported.
+          //
+          // Deposited on the `this` origin itself, which is where a
+          // whole-object store lands: `getOriginForAccessPath($this)` resolves
+          // to it, so that is the origin the exit ObjectEscape and the
+          // annotation checks read. Landing on the pointee instead is live --
+          // the exit use covers both levels -- but invisible to those checks.
+          //
+          // Merged, not killed: several base initializers can contribute, and
+          // the object may already hold a borrow.
+          CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+              (*FactMgr.getOriginMgr().getThisOrigins())->getOriginID(),
+              InitNode->getOriginID(), /*KillDest=*/false));
         }
     }
     return;
