@@ -114,17 +114,30 @@ template <class T> struct [[gsl::Pointer]] ConstSpan {
 void mutate_span(MutSpan<Str> s);
 void read_span(ConstSpan<Str> s);
 
+// The borrow has to be one INTO the owner, which is what this case is about. A
+// pointer AT an element (`Str *p = &base[0]`) is not endangered by a mutation of
+// that element's own contents -- the element object survives, only borrows inside
+// it move -- so it is deliberately not reported. Mutating the CONTAINER, which can
+// move the element itself, still is.
 void mutable_owner_span_warns(Str *base) { // expected-warning {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
-  Str *p = &base[0];
+  int *q = base[0].data();
   MutSpan<Str> s(base);
   mutate_span(s); // expected-note {{assumed to be invalidated by this operation}}
-  (void)p;
+  (void)q;
 }
 
 void const_owner_span_silent(Str *base) {
-  Str *p = &base[0];
+  int *q = base[0].data();
   ConstSpan<Str> s(base);
   read_span(s); // no-warning
+  (void)q;
+}
+
+// A pointer AT an element, with only that element's contents mutated: spared.
+void pointer_at_element_silent(Str *base) {
+  Str *p = &base[0];
+  MutSpan<Str> s(base);
+  mutate_span(s); // no-warning
   (void)p;
 }
 
@@ -530,3 +543,46 @@ void callable_guard_without_borrow() {
   v.push_back(42);
   { OwnerWithCallable g{[&v] { v.push_back(1); }}; } // no-warning
 }
+
+//===----------------------------------------------------------------------===//
+// An object survives a mutation of its own contents, on the ASSUMED path too.
+//
+// The precise invalidation check already spared a holder that points AT the
+// mutated object; the assumed path had its own live-origin loop and did not, so
+// any use of the receiver after the mutation reported it -- a second mutation, a
+// const read, even a borrow taken AFTER the call, which cannot have been
+// invalidated by it.
+//===----------------------------------------------------------------------===//
+
+namespace ReceiverSurvivesOwnMutation {
+struct [[gsl::Owner(int)]] Buf {
+  void grow();                                   // non-const: assumed to mutate
+  const int *data() const [[clang::lifetimebound]];
+};
+
+// A borrow taken after the mutation is necessarily fresh.
+void borrow_after(Buf &b [[clang::noescape]]) {
+  b.grow();
+  const int *p = b.data();
+  (void)*p; // no-warning
+}
+
+// Two mutations: the receiver is not a borrow into itself.
+void two_mutations(Buf &b [[clang::noescape]]) {
+  b.grow();
+  b.grow(); // no-warning
+}
+
+// A const read of the receiver after the mutation.
+void read_after(Buf &b [[clang::noescape]]) {
+  b.grow();
+  (void)*b.data(); // no-warning
+}
+
+// The genuine case, which must keep reporting: the borrow predates the mutation.
+void borrow_before(Buf &b [[clang::noescape]]) { // expected-warning {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  const int *p = b.data();
+  b.grow();  // expected-note {{assumed to be invalidated by this operation}}
+  (void)*p;
+}
+} // namespace ReceiverSurvivesOwnMutation

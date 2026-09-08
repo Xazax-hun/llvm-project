@@ -1416,10 +1416,23 @@ public:
     } else {
       llvm::append_range(MatchLoans, DirectlyInvalidatedLoans);
     }
-    auto IsInvalidated = [&](const Loan *L) {
+    auto IsInvalidated = [&](OriginID OID, const Loan *L) {
       for (LoanID InvalidID : MatchLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
+        // A loan naming the mutated storage EXACTLY denotes the object, and an
+        // object survives a mutation of its own contents -- the same rule the
+        // precise invalidation check applies. Without it, any use of the receiver
+        // after the mutation reported it: a second mutation, a const read, even a
+        // borrow taken AFTER the call, which cannot have been invalidated by it.
+        //
+        // The exemption is granted only on positively recognising a pointer or
+        // reference AT the mutated record, so a view, a closure, or an origin
+        // whose type is unknown still reports. A deallocation is exempt from the
+        // exemption: it destroys the object, so a pointer at it is what dangles.
+        if (!IOF->isDeallocation() && AP == L->getAccessPath() &&
+            !originMayBorrowInto(OID, invalidatedObjectRecord(AP)))
+          continue;
         // See IsExactInvalidated: containment, not equality.
         if (AP.isPrefixOf(L->getAccessPath()))
           return true;
@@ -1462,7 +1475,7 @@ public:
       const Expr *FallbackUse = nullptr;
       for (LoanID LiveLoanID : LoanPropagation.getLoans(OID, IOF)) {
         const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
-        if (!IsInvalidated(L))
+        if (!IsInvalidated(OID, L))
           continue;
         if (L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam()) {
           // Precise anchor: prefer it and stop looking.
