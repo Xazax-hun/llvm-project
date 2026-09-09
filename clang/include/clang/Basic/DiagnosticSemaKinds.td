@@ -2339,6 +2339,12 @@ def warn_lifetime_safety_override_param_adds_lifetimebound : Warning<
   "overridden method; a call through the base class would not enforce that the "
   "returned borrow's lifetime is bound to it">,
   InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_default_arg_temporary : Warning<
+  "a default argument that creates a temporary is not modeled by lifetime safety "
+  "analysis; the temporary dies at the end of this full-expression while the "
+  "parameter's annotation lets the borrow outlive the call, so a resulting dangle "
+  "would not be reported">,
+  InGroup<LifetimeSafetyUnannotatedIndirection>, DefaultIgnore;
 def warn_lifetime_safety_capture_by_missing_on_first_decl : Warning<
   "'[[clang::lifetime_capture_by]]' on parameter %0 is missing from the first "
   "declaration of this function; a call is checked against the declaration in "

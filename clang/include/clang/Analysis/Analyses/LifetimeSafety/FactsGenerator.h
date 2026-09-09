@@ -207,6 +207,8 @@ private:
   // Soundness ("safe programming model"): flags call arguments bound to
   // origin-carrying parameters that carry no lifetime annotation and are not
   // modeled via GSL recognition.
+  void handleDefaultArgTemporaries(const FunctionDecl *FD,
+                                   llvm::ArrayRef<const Expr *> Args);
   void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args);
 

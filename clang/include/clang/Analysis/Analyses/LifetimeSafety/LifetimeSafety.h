@@ -261,6 +261,9 @@ public:
   // call through a function or member-function pointer), which the analysis
   // cannot model.
   virtual void reportIndirectCall(const Expr *CallExpr) {}
+  // Reports a default argument that materializes a temporary the analysis cannot
+  // see, bound to a parameter whose annotation lets the borrow outlive the call.
+  virtual void reportDefaultArgTemporary(const Expr *E) {}
 
   // Reports an argument bound to a pointer/reference parameter that carries no
   // lifetime annotation, so the analysis cannot tell whether the borrow escapes.

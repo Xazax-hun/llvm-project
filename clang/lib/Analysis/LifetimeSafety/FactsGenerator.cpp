@@ -335,6 +335,21 @@ static bool capturesThis(const CXXRecordDecl *Closure) {
   return ThisCapture != nullptr;
 }
 
+/// Whether \p E builds a temporary object, i.e. one whose lifetime ends with the
+/// full-expression that contains it.
+static bool containsMaterializedTemporary(const Expr *E) {
+  llvm::SmallVector<const Stmt *, 8> Work{E};
+  while (!Work.empty()) {
+    const Stmt *S = Work.pop_back_val();
+    if (!S)
+      continue;
+    if (isa<MaterializeTemporaryExpr>(S) || isa<CXXBindTemporaryExpr>(S))
+      return true;
+    Work.append(S->child_begin(), S->child_end());
+  }
+  return false;
+}
+
 static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
   // An explicit promise from the author covers user-defined owners, whose
   // accessors the name-based allow-list below cannot recognize.
@@ -669,6 +684,12 @@ void FactsGenerator::handleGlobalContainerOfIndirectionUse(const Expr *UseExpr,
 }
 
 void FactsGenerator::VisitCXXConstructExpr(const CXXConstructExpr *CCE) {
+  // Before the dispatch below: several of these paths return early without
+  // reaching handleFunctionCall (a gsl::Pointer construction, a defaulted
+  // copy/move), and a default argument is just as invisible there. The checker
+  // dedups per expression, so the ordinary path asking twice costs nothing.
+  handleDefaultArgTemporaries(CCE->getConstructor(),
+                              {CCE->getArgs(), CCE->getNumArgs()});
   if (isGslPointerType(CCE->getType())) {
     handleGSLPointerConstruction(CCE);
     return;
@@ -3730,6 +3751,42 @@ static bool isComparisonOperator(const FunctionDecl *FD) {
 // pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
 // are not modeled via GSL recognition. The analysis cannot tell whether such a
 // borrow escapes the call. Runs independently of the call's return type.
+/// Soundness: a DEFAULT ARGUMENT that materializes a temporary. The expression
+/// belongs to the callee's declaration rather than to the caller, so the CFG does
+/// not contain it -- adding it would make one Expr appear at every call site
+/// (PR13385) -- and the analysis therefore never sees the temporary: no loan is
+/// issued for it and no expiry fires, so the borrow it hands over looks immortal.
+/// `h = Holder();` was silent where the identical `h = Holder(std::string(...))`
+/// was reported precisely.
+///
+/// Narrow on both counts, because a default argument is ordinary and common:
+///  - only when the argument actually materializes a TEMPORARY (a literal, a
+///    global, or `nullptr` creates nothing that can die), and
+///  - only when the parameter's annotation lets the borrow OUTLIVE the call
+///    ('lifetimebound' / 'lifetime_capture_by'). Passed to a plain parameter the
+///    borrow cannot escape the callee, and if the callee stores it anyway that is
+///    reported in the callee, against its own annotations.
+void FactsGenerator::handleDefaultArgTemporaries(
+    const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
+  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+  bool IsInstance =
+      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  for (unsigned I = 0; I < Args.size(); ++I) {
+    const auto *DAE = dyn_cast_or_null<CXXDefaultArgExpr>(Args[I]);
+    if (!DAE)
+      continue;
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
+    if (!PVD || (!PVD->hasAttr<clang::LifetimeBoundAttr>() &&
+                 !PVD->hasAttr<clang::LifetimeCaptureByAttr>()))
+      continue;
+    const Expr *Init = DAE->getExpr();
+    if (!Init || !containsMaterializedTemporary(Init))
+      continue;
+    CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
+        UntrackedConstructReason::DefaultArgTemporary, DAE));
+  }
+}
+
 void FactsGenerator::handleUnannotatedIndirectionArgs(
     const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
@@ -4003,6 +4060,7 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   handleImplicitObjectFieldUses(Call, FD);
   handleLifetimeCaptureBy(FD, Args);
   handleUnannotatedIndirectionArgs(FD, Args);
+  handleDefaultArgTemporaries(FD, Args);
   handleMoveSilencing(Call, FD, Args);
   if (!CallNode)
     return;

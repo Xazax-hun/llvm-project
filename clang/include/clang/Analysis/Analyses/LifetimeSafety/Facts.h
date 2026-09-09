@@ -560,6 +560,13 @@ enum class UntrackedConstructReason : uint8_t {
   /// unknown (it can hold a borrow but is annotated neither [[gsl::Owner]] nor
   /// [[gsl::Pointer]]), e.g. a call returning such a type or a local of one.
   UnknownOwnership,
+  /// A DEFAULT ARGUMENT that materializes a temporary, bound to a parameter whose
+  /// annotation lets the borrow outlive the call. The expression belongs to the
+  /// callee's declaration rather than to the caller, so the CFG does not contain it
+  /// (adding it would make one Expr appear at every call site) -- the temporary is
+  /// therefore never seen, never expires, and the borrow it hands over looks
+  /// immortal.
+  DefaultArgTemporary,
   /// A `throw` or `try`/`catch`. Exception control flow (unwinding, running
   /// destructors and resuming in a handler) is not modeled, so lifetime errors
   /// on exception paths may be missed.

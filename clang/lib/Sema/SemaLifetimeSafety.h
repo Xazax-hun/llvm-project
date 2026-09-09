@@ -59,6 +59,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_bailout,
       diag::warn_lifetime_safety_indirect_call,
       diag::warn_lifetime_safety_unannotated_indirection,
+      diag::warn_lifetime_safety_default_arg_temporary,
       diag::warn_lifetime_safety_unannotated_param,
       diag::warn_lifetime_safety_unannotated_this_return,
       diag::warn_lifetime_safety_this_escapes_to_global,
@@ -655,6 +656,11 @@ public:
       return;
     S.Diag(FD->getLocation(), diag::warn_lifetime_safety_bailout)
         << static_cast<unsigned>(Reason);
+  }
+
+  void reportDefaultArgTemporary(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_default_arg_temporary)
+        << E->getSourceRange();
   }
 
   void reportIndirectCall(const Expr *CallExpr) override {

@@ -2102,6 +2102,9 @@ public:
     case UntrackedConstructReason::IndirectCall:
       SemaHelper->reportIndirectCall(E);
       break;
+    case UntrackedConstructReason::DefaultArgTemporary:
+      SemaHelper->reportDefaultArgTemporary(E);
+      break;
     case UntrackedConstructReason::UnannotatedIndirection:
       SemaHelper->reportUnannotatedIndirection(E);
       break;
