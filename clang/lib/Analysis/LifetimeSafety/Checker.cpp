@@ -1174,18 +1174,37 @@ public:
         Input = dyn_cast_if_present<FieldDecl>(AP.getAsUninitialized());
       if (!Input && !AP.getAsPlaceholderThis())
         continue;
-      // A parameter's own promise is violated only by invalidating THAT
-      // parameter; the method's promise is violated by invalidating any input.
+      // Each promise is violated only by invalidating what IT covers.
+      //
+      // On a method the promise is about the IMPLICIT OBJECT -- that is what the
+      // attribute says, and it is all the call site acts on: an argument is still
+      // assumed invalidated there whatever the method is annotated with. Verifying
+      // that the method invalidates no PARAMETER either therefore demanded more
+      // than the annotation claims and more than anything relies on, and reported
+      // a method that reallocates an argument while leaving the object alone.
+      //
+      // A borrow-holding MEMBER of the object still counts as the object: for a
+      // view, the borrows the object hands out point into what the member points
+      // at, so invalidating through one does invalidate borrows into the object.
+      //
+      // A parameter's own promise is violated only by invalidating that parameter.
       const auto *PVD = dyn_cast_or_null<ParmVarDecl>(Input);
       const bool ViolatesParamPromise =
           PVD && PVD->hasAttr<LifetimeNonInvalidatingAttr>();
-      if (!MethodPromise && !ViolatesParamPromise)
+      // For a C++23 explicit object member function the object IS a parameter, so
+      // the object is not always spelled `$this`.
+      const bool InputIsObject =
+          AP.getAsPlaceholderThis() || isa_and_present<FieldDecl>(Input) ||
+          (PVD && MD && MD->isExplicitObjectMemberFunction() &&
+           MD->getNumParams() > 0 && MD->getParamDecl(0) == PVD);
+      const bool ViolatesMethodPromise = MethodPromise && InputIsObject;
+      if (!ViolatesMethodPromise && !ViolatesParamPromise)
         continue;
       const Stmt *S = IOF->getInvalidationStmt();
       SourceLocation Loc = S ? S->getBeginLoc() : SourceLocation();
       // Anchor the report on whichever promise it contradicts, and report each
       // promise once.
-      if (ViolatesParamPromise && !MethodPromise) {
+      if (ViolatesParamPromise && !ViolatesMethodPromise) {
         if (ReportedNonInvalidating.insert(PVD).second)
           SemaHelper->reportNonInvalidatingParamViolation(PVD, Loc);
         continue; // another parameter's promise may be violated too

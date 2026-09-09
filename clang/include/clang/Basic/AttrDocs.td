@@ -4774,11 +4774,15 @@ The two forms are independent and may be combined. On a method the promise cover
 every caller-visible input; on a parameter it covers only that parameter, so an
 unannotated sibling parameter is still conservatively assumed to be invalidated.
 
-The promise is verified against the body. A method that invalidates one of its
-inputs -- the implicit object or a parameter -- is reported under
-``-Wlifetime-safety-non-invalidating-violation``, and so is a function that
-invalidates a parameter carrying the annotation, whether the analysis sees the
-mutation directly (a container mutation, a ``delete``) or merely assumes it from
+Each form is verified against the body, and each covers exactly what it claims. On
+a method the claim is about the implicit object, so a method that invalidates the
+object -- directly, or by reaching through a borrow-holding member of it -- is
+reported under ``-Wlifetime-safety-non-invalidating-violation``; reallocating a
+*parameter* contradicts nothing, since the call site still assumes an argument is
+invalidated whatever the method is annotated with. On a parameter the claim is
+about that parameter, and invalidating it is reported. Either is reported whether
+the analysis sees the mutation directly (a container mutation, a ``delete``) or
+merely assumes it from
 a non-const call it did not examine. Verification is essential rather than
 cosmetic: the attribute suppresses the invalidation at every *call site*, so an
 untrue promise silently hides a use-after-free in the caller, where a borrow

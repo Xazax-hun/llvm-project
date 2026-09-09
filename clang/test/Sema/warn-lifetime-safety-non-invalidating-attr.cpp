@@ -100,9 +100,21 @@ struct [[gsl::Owner]] Basin {
     v.push_back(1); // expected-note {{invalidated here}}
   }
 
-  // A parameter is an input too, and is named in the diagnostic.
-  // expected-warning@+1 {{invalidates parameter 'out', which it promises not to invalidate}}
-  [[clang::lifetime_non_invalidating]] void fill(vector<int> &out [[clang::noescape]]) {
+  // On a METHOD the promise is about the implicit object, and that is all the call
+  // site acts on: an argument is still assumed invalidated there whatever the method
+  // is annotated with. So reallocating a PARAMETER contradicts nothing -- demanding
+  // otherwise asked for more than the annotation claims and more than anything
+  // relies on.
+  [[clang::lifetime_non_invalidating]] void fill(vector<int> &out [[clang::noescape]]) { // no-warning
+    out.push_back(1);
+  }
+
+  // A parameter that makes the promise ITSELF is verified, and named.
+  // (The parameter also draws the ordinary annotation demand, which is unrelated.)
+  // expected-warning@+3 {{this function invalidates parameter 'out', which its '[[clang::lifetime_non_invalidating]]' annotation promises not to invalidate}}
+  // expected-warning@+2 {{parameter that can hold a borrow is not annotated for lifetime safety}}
+  [[clang::lifetime_non_invalidating]] void fill_promised(
+      vector<int> &out [[clang::lifetime_non_invalidating]]) {
     out.push_back(1); // expected-note {{invalidated here}}
   }
 };

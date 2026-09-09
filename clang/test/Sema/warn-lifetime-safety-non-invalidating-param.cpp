@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -Wno-unused \
+// RUN: %clang_cc1 -fsyntax-only -std=c++23 -Wlifetime-safety-soundness -Wno-unused \
 // RUN:   -Wno-lifetime-safety-unannotated-indirection -verify %s
 //
 // The unannotated-indirection demand is switched off: every `vector<int> &`
@@ -92,6 +92,41 @@ void local_only(vector<int> &v [[clang::lifetime_non_invalidating]]) { // no-war
   tmp.push_back(1);
   sink = (int)v.size();
 }
+
+//===----------------------------------------------------------------------===//
+// The METHOD form is about the implicit object, and only that.
+//===----------------------------------------------------------------------===//
+
+struct Holder {
+  int counter = 0;
+  vector<int> own;
+
+  // Leaves the object alone and reallocates an ARGUMENT. The call site still
+  // assumes the argument is invalidated (see the caller below), so this
+  // contradicts nothing the annotation claims.
+  [[clang::lifetime_non_invalidating]] void tick(vector<int> &v) { // no-warning
+    counter += 1;
+    v.push_back(1);
+  }
+};
+
+void method_promise_covers_the_object(Holder &h [[clang::noescape]],
+                                      vector<int> &w [[clang::noescape]]) { // expected-warning {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  int *ph = &h.own[0];
+  int *pw = &w[0];
+  h.tick(w);   // expected-note {{assumed to be invalidated by this operation}}
+  sink = *ph;  // no-warning: the object was promised untouched
+  sink = *pw;  // the argument was not, and is reported above
+}
+
+// For a C++23 explicit object member function the object IS a parameter, so the
+// method promise still has to recognise it as the object.
+struct Deducing {
+  vector<int> own;
+  [[clang::lifetime_non_invalidating]] void grow(this Deducing &self) { // expected-warning {{invalidates parameter 'self', which it promises not to invalidate}}
+    self.own.push_back(1); // expected-note {{invalidated here}}
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // Subjects: a member function or a parameter, and nothing else.
