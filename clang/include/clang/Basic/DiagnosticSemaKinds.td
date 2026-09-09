@@ -2339,6 +2339,14 @@ def warn_lifetime_safety_override_param_adds_lifetimebound : Warning<
   "overridden method; a call through the base class would not enforce that the "
   "returned borrow's lifetime is bound to it">,
   InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_capture_by_missing_on_first_decl : Warning<
+  "'[[clang::lifetime_capture_by]]' on parameter %0 is missing from the first "
+  "declaration of this function; a call is checked against the declaration in "
+  "scope, so one that precedes this may pass an argument it must not let escape "
+  "and have it captured with nothing reported">,
+  InGroup<LifetimeSafetyCaptureByViolation>, DefaultIgnore;
+def note_lifetime_safety_capture_by_missing_first_decl : Note<
+  "first declaration of the parameter is here">;
 def warn_lifetime_safety_override_param_adds_capture_by : Warning<
   "overriding parameter %0 adds '[[clang::lifetime_capture_by]]' not present on "
   "the overridden method; a call through the base class is checked against the "

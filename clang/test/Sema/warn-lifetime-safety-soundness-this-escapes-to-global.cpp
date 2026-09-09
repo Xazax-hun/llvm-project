@@ -93,15 +93,15 @@ void captures_unknown_decl_only(int *a [[clang::lifetime_capture_by(unknown)]]);
 // The declaration is where the annotation is written, so that is where it is
 // reported -- and reported once, not once per redeclaration.
 void captures_global_split(int *a [[clang::lifetime_capture_by(global)]]); // expected-warning {{'lifetime_capture_by(global)' is not supported by the safe programming model}}
-// The definition repeats the signature without the attribute, so ITS parameter
-// really is unannotated -- the annotation does not carry across to it.
-void captures_global_split(int *a) { g_p = a; } // expected-warning {{not annotated for lifetime safety}}
+// The definition repeats the signature without the attribute, but the annotation is
+// propagated to it, so its parameter is annotated too and draws no second demand.
+void captures_global_split(int *a) { g_p = a; } // no-warning
 
 // A member function declared in the class and defined out of line.
 struct SplitMember {
   void take(int *a [[clang::lifetime_capture_by(unknown)]]); // expected-warning {{'lifetime_capture_by(unknown)' is not supported by the safe programming model}}
 };
-void SplitMember::take(int *a) { (void)a; } // expected-warning {{not annotated for lifetime safety}}
+void SplitMember::take(int *a) { (void)a; } // no-warning
 
 // A function template is reported once, on the pattern -- not again per
 // instantiation.

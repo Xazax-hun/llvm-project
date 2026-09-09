@@ -3469,6 +3469,21 @@ static void mergeParamDeclAttributes(ParmVarDecl *newDecl,
            diag::note_carries_dependency_missing_first_decl) << 1/*Param*/;
   }
 
+  // A '[[clang::lifetime_capture_by]]' added on a LATER declaration is invisible to
+  // every call already checked against an earlier one: that declaration promises no
+  // capture, so a caller hands over an argument it must not let escape and the
+  // definition parks it. Nothing is reported at the call, and nothing in the body
+  // either, which does exactly what its own annotation permits. Same rule as
+  // carries_dependency above -- the first declaration has to specify it.
+  if (const auto *CBA = newDecl->getAttr<LifetimeCaptureByAttr>();
+      CBA && !oldDecl->hasAttr<LifetimeCaptureByAttr>()) {
+    S.Diag(CBA->getLocation(),
+           diag::warn_lifetime_safety_capture_by_missing_on_first_decl)
+        << newDecl;
+    S.Diag(oldDecl->getLocation(),
+           diag::note_lifetime_safety_capture_by_missing_first_decl);
+  }
+
   propagateAttributes(
       newDecl, oldDecl, [&S](ParmVarDecl *To, const ParmVarDecl *From) {
         unsigned found = 0;
@@ -3485,6 +3500,11 @@ static void mergeParamDeclAttributes(ParmVarDecl *newDecl,
         // every call site while the DEFINITION's parameter never carries it -- so
         // the body is never verified and an untrue promise is silent.
         found += propagateAttribute<LifetimeNonInvalidatingAttr>(To, From, S);
+        // And '[[clang::lifetime_capture_by]]': without it, a promise written on the
+        // in-class declaration does not reach the out-of-line definition, whose
+        // parameter then looks unannotated -- it draws the annotation demand and its
+        // body is not checked against the promise it was given.
+        found += propagateAttribute<LifetimeCaptureByAttr>(To, From, S);
         return found;
       });
 }

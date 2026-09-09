@@ -71,3 +71,40 @@ struct [[gsl::Pointer(char)]] Drops : CapturingBase {
     sink = payload.data()[0];
   }
 };
+
+//===----------------------------------------------------------------------===//
+// The same hole without a virtual: a later DECLARATION adding the capture.
+//===----------------------------------------------------------------------===//
+
+// A call is checked against the declaration in scope, so an attribute added on the
+// out-of-line definition is invisible to every call that precedes it -- and the
+// definition's body does exactly what its own annotation permits, so neither end
+// reports. C++ has the same rule for carries_dependency: the first declaration has
+// to specify it.
+struct [[gsl::Pointer(char)]] Split {
+  string_view held;
+  void pick(string_view a); // expected-note {{first declaration of the parameter is here}}
+};
+
+// expected-warning@+1 {{'[[clang::lifetime_capture_by]]' on parameter 'a' is missing from the first declaration of this function}}
+void Split::pick(string_view a [[clang::lifetime_capture_by(this)]]) { held = a; }
+
+// Written on the in-class declaration and not repeated: propagated to the
+// definition, so the definition's parameter is annotated too and its body is checked
+// against the promise rather than demanding an annotation of its own.
+struct [[gsl::Pointer(char)]] SplitHonest {
+  string_view held;
+  void pick(string_view a [[clang::lifetime_capture_by(this)]]);
+};
+
+void SplitHonest::pick(string_view a) { held = a; } // no-warning
+
+// Written on both is fine.
+struct [[gsl::Pointer(char)]] SplitRepeats {
+  string_view held;
+  void pick(string_view a [[clang::lifetime_capture_by(this)]]);
+};
+
+void SplitRepeats::pick(string_view a [[clang::lifetime_capture_by(this)]]) { // no-warning
+  held = a;
+}
