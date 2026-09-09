@@ -309,6 +309,11 @@ using EscapingTarget = LifetimeSafetySemaHelper::EscapingTarget;
 class LifetimeChecker {
 private:
   llvm::DenseMap<LoanID, PendingWarning> FinalWarningsMap;
+  /// Whole-object stores of a local into a caller-owned object, keyed by the
+  /// local's loan. Issued after the walk so the expiry path, which gives a better
+  /// report when it can see the dangling read, wins.
+  llvm::SmallVector<std::tuple<LoanID, const ValueDecl *, const Expr *>, 2>
+      LocalEscapesIntoCallerObject;
   llvm::DenseMap<AnnotationTarget, EscapingTarget> AnnotationWarningsMap;
   llvm::DenseMap<const ParmVarDecl *, EscapingTarget> NoescapeWarningsMap;
   /// A noescape parameter whose borrow is stored into another parameter's
@@ -485,6 +490,7 @@ public:
         else if (const auto *DSF = F->getAs<DynamicStoreFact>()) {
           checkDynamicStore(DSF);
           checkNoescapeStoreThroughLValue(DSF);
+          checkLocalEscapesIntoCallerObjectStore(DSF);
         }
     issuePendingWarnings();
     issueAssumedInvalidations();
@@ -2454,6 +2460,56 @@ public:
   /// The destination's loans must be read from BEFORE the store: afterwards the
   /// lvalue also holds the payload, whose own loans are parameter placeholders
   /// -- which would make the destination look like a parameter.
+  /// Soundness: a LOCAL of this call stored into an object the CALLER owns by a
+  /// WHOLE-OBJECT store. The destination outlives the call and the local does not,
+  /// so this always dangles -- and no liveness question is needed, exactly as for
+  /// the named-member spelling in checkLocalEscapesIntoCallerObject.
+  ///
+  /// That check is driven by a FieldStore and needs a MemberExpr to name the field,
+  /// so it cannot see `dst = Box::wrap(buf)`: a whole-object store names no member.
+  /// The borrow lands in the caller's object all the same, and the read is in the
+  /// caller, so nothing here keeps it live and expiry never fires either.
+  ///
+  /// The destination's loans are read from BEFORE the store, for the same reason as
+  /// the noescape check below: afterwards the lvalue also holds the payload.
+  void checkLocalEscapesIntoCallerObjectStore(const DynamicStoreFact *DSF) {
+    if (!SemaHelper)
+      return;
+    // Only a PARAMETER destination. A store into `this` is covered by the field-
+    // and object-escape paths, and a store into a local is no escape -- the local's
+    // own expiry checks it.
+    bool CallerOwned = false;
+    for (LoanID LID : LoanPropagation.getPreStoreDestinationLoans(DSF))
+      if (FactMgr.getLoanMgr()
+              .getLoan(LID)
+              ->getAccessPath()
+              .getAsPlaceholderParam()) {
+        CallerOwned = true;
+        break;
+      }
+    if (!CallerOwned)
+      return;
+    // A store into a NAMED member emits both facts, and the FieldStore path owns
+    // that case -- it can name the field, which makes for a better diagnostic. This
+    // one is for the whole-object store, which names none.
+    if (isa_and_present<MemberExpr>(DSF->getStoreExpr()))
+      return;
+    for (LoanID SL : LoanPropagation.getLoans(DSF->getSrcOrigin(), DSF)) {
+      const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
+      const auto *VD =
+          dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
+      // A static or global outlives the call and is no hazard.
+      if (!VD || !VD->hasLocalStorage())
+        continue;
+      // A reference or pointer PARAMETER denotes storage the caller owns, so its
+      // escape is the noescape question answered below -- not a dangling local.
+      if (isa<ParmVarDecl>(VD) && VD->getType()->isPointerOrReferenceType())
+        continue;
+      LocalEscapesIntoCallerObject.emplace_back(SL, VD, DSF->getStoreExpr());
+      return;
+    }
+  }
+
   void checkNoescapeStoreThroughLValue(const DynamicStoreFact *DSF) {
     if (!SemaHelper)
       return;
@@ -2777,6 +2833,14 @@ public:
   void issuePendingWarnings() {
     if (!SemaHelper)
       return;
+    // This is a backstop for the case the expiry path cannot see: the destination
+    // is the caller's, so nothing in THIS function reads the borrow and no expiry
+    // fires. When the caller-side read does happen to be in this function, expiry
+    // reports it -- with the dangling use pointed at -- so yield to it rather than
+    // say the same thing twice.
+    for (auto [LID, Local, StoreExpr] : LocalEscapesIntoCallerObject)
+      if (!FinalWarningsMap.contains(LID))
+        SemaHelper->reportLocalEscapesIntoCallerObject(Local, StoreExpr);
     // Maps a base loan to its Interior projection, so the dedupe below can look
     // along the edge in both directions.
     llvm::DenseMap<LoanID, LoanID> InteriorProjectionOf;

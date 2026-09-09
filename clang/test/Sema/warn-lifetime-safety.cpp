@@ -1159,8 +1159,11 @@ void test_variadic() {
 }
 } // namespace VariadicTemplatedParamsUAR
 
-// FIXME: Fails to diagnose UAF when a reference to a by-value param escapes via an out-param.
+// A by-value parameter's storage dies with the call, so a borrow of it left in a
+// caller-owned out-parameter dangles exactly as a local's would. (Was a FIXME: the
+// whole-object store names no member, so the field-store path could not see it.)
 void uaf_from_by_value_param_failing(MyObj param, View* out_p) {
+  // expected-warning@+1 {{stack memory associated with 'param' escapes into an object the caller owns}}
   *out_p = Identity(param);
 }
 

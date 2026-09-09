@@ -91,6 +91,11 @@ public:
                                     const Expr *ReturnExpr,
                                     const Expr *MovedExpr) {}
 
+  // Reports a local of this call stored into an object the CALLER owns by a
+  // whole-object store, which names no field.
+  virtual void reportLocalEscapesIntoCallerObject(const ValueDecl *Local,
+                                                  const Expr *StoreExpr) {}
+
   virtual void reportDanglingField(const Expr *IssueExpr,
                                    const FieldDecl *Field,
                                    const Expr *MovedExpr,

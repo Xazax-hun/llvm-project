@@ -11104,6 +11104,11 @@ def warn_lifetime_safety_dangling_field
     : Warning<"stack memory associated with %0 escapes to the %1 which will dangle">,
       InGroup<LifetimeSafetyDanglingField>,
       DefaultIgnore;
+def warn_lifetime_safety_dangling_caller_object
+    : Warning<"stack memory associated with %0 escapes into an object the caller "
+              "owns, which will dangle once this call returns">,
+      InGroup<LifetimeSafetyDanglingField>,
+      DefaultIgnore;
 def warn_lifetime_safety_dangling_field_moved
     : Warning<"stack memory associated with %0 may escape to the %1 which will dangle. "
       "This could be a false positive as the storage may have been moved. "

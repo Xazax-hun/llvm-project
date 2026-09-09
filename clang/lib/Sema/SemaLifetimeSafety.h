@@ -36,6 +36,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_return_stack_addr_moved,
       diag::warn_lifetime_safety_invalidation,
       diag::warn_lifetime_safety_dangling_field,
+      diag::warn_lifetime_safety_dangling_caller_object,
       diag::warn_lifetime_safety_dangling_field_moved,
       diag::warn_lifetime_safety_dangling_global,
       diag::warn_lifetime_safety_dangling_global_moved,
@@ -591,6 +592,13 @@ public:
     S.Diag(EscapeExpr->getBeginLoc(),
            diag::note_lifetime_safety_suggestion_returned_here)
         << EscapeExpr->getSourceRange();
+  }
+
+  void reportLocalEscapesIntoCallerObject(const ValueDecl *Local,
+                                          const Expr *StoreExpr) override {
+    S.Diag(StoreExpr->getExprLoc(),
+           diag::warn_lifetime_safety_dangling_caller_object)
+        << Local << StoreExpr->getSourceRange();
   }
 
   void reportNoescapeStoreIntoParam(const ParmVarDecl *ParmWithNoescape,
