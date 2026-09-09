@@ -3478,6 +3478,13 @@ static void mergeParamDeclAttributes(ParmVarDecl *newDecl,
         // 'this' parameter, as the attribute is applied to the function type in
         // that case.
         found += propagateAttribute<LifetimeBoundAttr>(To, From, S);
+        // Same for '[[clang::lifetime_non_invalidating]]' on a parameter: it is an
+        // InheritableAttr (it also applies to a function) rather than an
+        // InheritableParamAttr, so it is not covered above. Without propagating it,
+        // the promise on one declaration suppresses the assumed invalidation at
+        // every call site while the DEFINITION's parameter never carries it -- so
+        // the body is never verified and an untrue promise is silent.
+        found += propagateAttribute<LifetimeNonInvalidatingAttr>(To, From, S);
         return found;
       });
 }

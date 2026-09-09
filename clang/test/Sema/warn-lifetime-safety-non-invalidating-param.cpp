@@ -129,6 +129,46 @@ struct Deducing {
 };
 
 //===----------------------------------------------------------------------===//
+// The promise is consumed at the call site against the STATICALLY resolved
+// callee, so every declaration that a call can resolve to must carry it.
+//===----------------------------------------------------------------------===//
+
+// A virtual override that drops it is a hole: the call through the base
+// suppresses the invalidation, and the override's body carries no promise to
+// verify. Requiring the override to repeat it also routes its body through the
+// verifier -- the same rule the method-level promise already follows.
+struct VBase {
+  virtual ~VBase() = default;
+  virtual void touch(vector<int> &v [[clang::lifetime_non_invalidating]]) const {}
+};
+
+struct VDerived : VBase {
+  // expected-warning@+2 {{this override drops the '[[clang::lifetime_non_invalidating]]' promise on parameter 'v'}}
+  // expected-note@-5 {{overridden virtual function is here}}
+  void touch(vector<int> &v) const override { v.push_back(42); }
+};
+
+// Repeating it is accepted, and then the body IS verified.
+struct VHonest : VBase {
+  // expected-warning@+1 {{this function invalidates parameter 'v', which its '[[clang::lifetime_non_invalidating]]' annotation promises not to invalidate}}
+  void touch(vector<int> &v [[clang::lifetime_non_invalidating]]) const override {
+    v.push_back(42); // expected-note {{invalidated here}}
+  }
+};
+
+// A redeclaration needs no `override` to lose it. The attribute is an
+// InheritableAttr rather than an InheritableParamAttr, so it is not propagated to
+// a later declaration's parameter by default; without propagating it the promise
+// on one declaration suppressed every call site while the DEFINITION's parameter
+// never carried it, so the body was never verified.
+void tickle(vector<int> &v [[clang::lifetime_non_invalidating]]);
+
+// expected-warning@-2 {{this function invalidates parameter 'v', which its '[[clang::lifetime_non_invalidating]]' annotation promises not to invalidate}}
+void tickle(vector<int> &v) {
+  v.push_back(1); // expected-note {{invalidated here}}
+}
+
+//===----------------------------------------------------------------------===//
 // Subjects: a member function or a parameter, and nothing else.
 //===----------------------------------------------------------------------===//
 

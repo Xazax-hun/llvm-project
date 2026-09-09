@@ -19142,9 +19142,12 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
           diag::warn_lifetime_safety_override_of_destruction_order_safe,
           New->getLocation()) ||
       !Diags.isIgnored(diag::warn_lifetime_safety_override_of_non_invalidating,
-                       New->getLocation())) {
+                       New->getLocation()) ||
+      !Diags.isIgnored(
+          diag::warn_lifetime_safety_override_param_drops_non_invalidating,
+          New->getLocation())) {
     for (unsigned I = 0, E = Old->getNumParams();
-         I != E && I < New->getNumParams(); ++I)
+         I != E && I < New->getNumParams(); ++I) {
       if (New->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
           !Old->getParamDecl(I)->hasAttr<LifetimeBoundAttr>()) {
         Diag(New->getParamDecl(I)->getLocation(),
@@ -19152,6 +19155,19 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
             << New->getParamDecl(I);
         Diag(Old->getLocation(), diag::note_overridden_virtual_function);
       }
+      // A parameter's '[[clang::lifetime_non_invalidating]]' promise is consumed
+      // at the call site against the statically resolved callee, exactly as the
+      // method-level one below is, so an override that drops it and reallocates
+      // that argument is a hole: the call through the base suppresses the
+      // invalidation, and the override's body carries no promise to verify.
+      if (Old->getParamDecl(I)->hasAttr<LifetimeNonInvalidatingAttr>() &&
+          !New->getParamDecl(I)->hasAttr<LifetimeNonInvalidatingAttr>()) {
+        Diag(New->getParamDecl(I)->getLocation(),
+             diag::warn_lifetime_safety_override_param_drops_non_invalidating)
+            << New->getParamDecl(I);
+        Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+      }
+    }
     // An override that binds its return to the object ('[[clang::lifetimebound]]')
     // when the overridden method does not is invisible to callers dispatching
     // through the base class. (When the base is 'lifetime_immortal' the override

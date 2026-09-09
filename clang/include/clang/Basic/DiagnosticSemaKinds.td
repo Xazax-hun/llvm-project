@@ -2362,6 +2362,12 @@ def warn_lifetime_safety_override_of_non_invalidating : Warning<
   "invalidate anything, so a borrow the caller took beforehand would be left "
   "silently dangling by this override">,
   InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_param_drops_non_invalidating : Warning<
+  "this override drops the '[[clang::lifetime_non_invalidating]]' promise on "
+  "parameter %0; a call through the base class is assumed not to invalidate that "
+  "argument, so a borrow the caller took beforehand would be left silently "
+  "dangling by this override">,
+  InGroup<LifetimeSafetyNonInvalidatingViolation>, DefaultIgnore;
 def warn_lifetime_safety_non_invalidating_unverifiable : Warning<
   "'[[clang::lifetime_non_invalidating]]' on this %select{defaulted|declared}0 "
   "method cannot be verified: the promise suppresses invalidation at every call "
