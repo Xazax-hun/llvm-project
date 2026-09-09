@@ -19145,13 +19145,29 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
                        New->getLocation()) ||
       !Diags.isIgnored(
           diag::warn_lifetime_safety_override_param_drops_non_invalidating,
-          New->getLocation())) {
+          New->getLocation()) ||
+      !Diags.isIgnored(diag::warn_lifetime_safety_override_param_adds_capture_by,
+                       New->getLocation())) {
     for (unsigned I = 0, E = Old->getNumParams();
          I != E && I < New->getNumParams(); ++I) {
       if (New->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
           !Old->getParamDecl(I)->hasAttr<LifetimeBoundAttr>()) {
         Diag(New->getParamDecl(I)->getLocation(),
              diag::warn_lifetime_safety_override_param_adds_lifetimebound)
+            << New->getParamDecl(I);
+        Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+      }
+      // Adding '[[clang::lifetime_capture_by]]' is the same kind of hole as adding
+      // lifetimebound above, and a worse one: the base declares that the callee
+      // merely borrows for the call, so a caller dispatching through it hands over
+      // an argument it must not let escape -- and the override parks it in the
+      // object. The call site is checked against the base, so nothing is reported
+      // there, and the override's own body is doing exactly what its annotation
+      // permits, so nothing is reported here either.
+      if (New->getParamDecl(I)->hasAttr<LifetimeCaptureByAttr>() &&
+          !Old->getParamDecl(I)->hasAttr<LifetimeCaptureByAttr>()) {
+        Diag(New->getParamDecl(I)->getLocation(),
+             diag::warn_lifetime_safety_override_param_adds_capture_by)
             << New->getParamDecl(I);
         Diag(Old->getLocation(), diag::note_overridden_virtual_function);
       }
