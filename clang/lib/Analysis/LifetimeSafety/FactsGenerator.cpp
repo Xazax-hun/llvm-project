@@ -3282,6 +3282,14 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD)
       continue;
+    // An explicit promise from the author that this call does not invalidate
+    // borrows into what this parameter refers to. The same statement the method
+    // form makes about the implicit object, made about one parameter -- and the
+    // only escape hatch a FREE function has, since the name-based allow-list
+    // below describes std methods and cannot speak for a user's function.
+    // Verified against the body by checkNonInvalidatingPromise.
+    if (PVD->hasAttr<LifetimeNonInvalidatingAttr>())
+      continue;
     // The parameter's *static* type does not always reveal an owner the call may
     // mutate: passing `*this` to a parameter typed as a base erases the
     // reachability edge, and the callee reaches the derived object again through a

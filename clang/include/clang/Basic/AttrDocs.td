@@ -4754,9 +4754,30 @@ Like ``lifetime_immortal``, this attribute appertains to the function itself, so
 it is written *before* the declaration (unlike ``lifetimebound``, which applies to
 a parameter or the implicit object and follows the parameter list).
 
+The attribute may also be written on a **parameter**, where it makes the same
+statement about what that parameter refers to: the call does not invalidate
+borrows into it. This is the only form available to a free function, which has no
+implicit object to annotate:
+
+.. code-block:: c++
+
+    // Writes elements in place; never reallocates.
+    void normalize(std::vector<int> &v [[clang::lifetime_non_invalidating]]);
+
+    void f(std::vector<int> &data [[clang::noescape]]) {
+      int *p = &data[0];
+      normalize(data);   // no assumed-invalidation for `data`
+      use(*p);
+    }
+
+The two forms are independent and may be combined. On a method the promise covers
+every caller-visible input; on a parameter it covers only that parameter, so an
+unannotated sibling parameter is still conservatively assumed to be invalidated.
+
 The promise is verified against the body. A method that invalidates one of its
 inputs -- the implicit object or a parameter -- is reported under
-``-Wlifetime-safety-non-invalidating-violation``, whether the analysis sees the
+``-Wlifetime-safety-non-invalidating-violation``, and so is a function that
+invalidates a parameter carrying the annotation, whether the analysis sees the
 mutation directly (a container mutation, a ``delete``) or merely assumes it from
 a non-const call it did not examine. Verification is essential rather than
 cosmetic: the attribute suppresses the invalidation at every *call site*, so an

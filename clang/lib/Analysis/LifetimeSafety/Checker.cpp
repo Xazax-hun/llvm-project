@@ -402,7 +402,7 @@ private:
   /// Methods already reported for breaking their non-invalidating promise; the
   /// diagnostic is about the annotation, so one report per method suffices even
   /// when the body invalidates an input more than once.
-  llvm::DenseSet<const CXXMethodDecl *> ReportedNonInvalidating;
+  llvm::DenseSet<const Decl *> ReportedNonInvalidating;
   /// Assumed-invalidation candidates collected during the fact walk, emitted
   /// after the precise warnings are finalized.
   llvm::SmallVector<std::tuple<LoanID, const Stmt *, const Expr *>>
@@ -1136,8 +1136,19 @@ public:
   void checkNonInvalidatingPromise(const InvalidateOriginFact *IOF) {
     if (!SemaHelper)
       return;
-    const auto *MD = dyn_cast_or_null<CXXMethodDecl>(FD);
-    if (!MD || !MD->hasAttr<LifetimeNonInvalidatingAttr>())
+    // The promise comes in two forms. On a METHOD it covers every caller-visible
+    // input; on a PARAMETER it covers just what that parameter refers to, which is
+    // the only form a free function has.
+    const auto *EnclosingFD = dyn_cast_or_null<FunctionDecl>(FD);
+    if (!EnclosingFD)
+      return;
+    const auto *MD = dyn_cast<CXXMethodDecl>(EnclosingFD);
+    const bool MethodPromise = MD && MD->hasAttr<LifetimeNonInvalidatingAttr>();
+    const bool AnyParamPromise =
+        llvm::any_of(EnclosingFD->parameters(), [](const ParmVarDecl *P) {
+          return P->hasAttr<LifetimeNonInvalidatingAttr>();
+        });
+    if (!MethodPromise && !AnyParamPromise)
       return;
     // Assumed invalidations are NOT exempt. Exempting them would reopen the very
     // hole this check closes: the attribute's whole effect is to suppress the
@@ -1163,11 +1174,25 @@ public:
         Input = dyn_cast_if_present<FieldDecl>(AP.getAsUninitialized());
       if (!Input && !AP.getAsPlaceholderThis())
         continue;
+      // A parameter's own promise is violated only by invalidating THAT
+      // parameter; the method's promise is violated by invalidating any input.
+      const auto *PVD = dyn_cast_or_null<ParmVarDecl>(Input);
+      const bool ViolatesParamPromise =
+          PVD && PVD->hasAttr<LifetimeNonInvalidatingAttr>();
+      if (!MethodPromise && !ViolatesParamPromise)
+        continue;
+      const Stmt *S = IOF->getInvalidationStmt();
+      SourceLocation Loc = S ? S->getBeginLoc() : SourceLocation();
+      // Anchor the report on whichever promise it contradicts, and report each
+      // promise once.
+      if (ViolatesParamPromise && !MethodPromise) {
+        if (ReportedNonInvalidating.insert(PVD).second)
+          SemaHelper->reportNonInvalidatingParamViolation(PVD, Loc);
+        continue; // another parameter's promise may be violated too
+      }
       if (!ReportedNonInvalidating.insert(MD).second)
         return; // one report per method is enough
-      const Stmt *S = IOF->getInvalidationStmt();
-      SemaHelper->reportNonInvalidatingViolation(
-          MD, Input, S ? S->getBeginLoc() : SourceLocation());
+      SemaHelper->reportNonInvalidatingViolation(MD, Input, Loc);
       return;
     }
   }

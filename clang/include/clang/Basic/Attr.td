@@ -2178,7 +2178,9 @@ def DestructionOrderSafe : InheritableAttr {
 
 def LifetimeNonInvalidating : InheritableAttr {
   let Spellings = [Clang<"lifetime_non_invalidating", 0>];
-  let Subjects = SubjectList<[CXXMethod], ErrorDiag>;
+  // On a method: the call invalidates no borrow into the object. On a parameter:
+  // the call invalidates no borrow into what that parameter refers to.
+  let Subjects = SubjectList<[CXXMethod, ParmVar], ErrorDiag>;
   let Documentation = [LifetimeNonInvalidatingDocs];
   let SimpleHandler = 1;
 }

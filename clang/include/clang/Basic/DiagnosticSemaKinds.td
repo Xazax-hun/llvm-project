@@ -11168,6 +11168,14 @@ def warn_lifetime_safety_immortal_violation
       InGroup<LifetimeSafetyImmortalViolation>,
       DefaultIgnore;
 
+def warn_lifetime_safety_non_invalidating_param_violation
+    : Warning<"this function invalidates parameter %0, which its "
+              "'[[clang::lifetime_non_invalidating]]' annotation promises not to "
+              "invalidate; the promise suppresses this operation at every call "
+              "site, so a borrow the caller took beforehand is left silently "
+              "dangling">,
+      InGroup<LifetimeSafetyNonInvalidatingViolation>,
+      DefaultIgnore;
 def warn_lifetime_safety_non_invalidating_violation
     : Warning<"'[[clang::lifetime_non_invalidating]]' method invalidates "
               "%select{the implicit this parameter|parameter %1|the object "

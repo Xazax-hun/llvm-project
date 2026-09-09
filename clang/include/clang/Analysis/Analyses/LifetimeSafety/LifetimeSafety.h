@@ -205,6 +205,10 @@ public:
   virtual void reportImmortalViolation(const FunctionDecl *FD,
                                        unsigned Subject) {}
 
+  // Reports a [[clang::lifetime_non_invalidating]] PARAMETER that the body
+  // invalidates.
+  virtual void reportNonInvalidatingParamViolation(const ParmVarDecl *PVD,
+                                                   SourceLocation Loc) {}
   // Reports a [[clang::lifetime_non_invalidating]] method whose body invalidates
   // one of the function's inputs. `Input` is the offending parameter, or the
   // borrow-holding field whose pointee was invalidated, or null when the

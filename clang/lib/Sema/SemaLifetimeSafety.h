@@ -44,6 +44,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_capture_by_violation,
       diag::warn_lifetime_safety_immortal_violation,
       diag::warn_lifetime_safety_non_invalidating_violation,
+      diag::warn_lifetime_safety_non_invalidating_param_violation,
       diag::warn_lifetime_safety_cross_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_intra_tu_misplaced_lifetimebound,
       diag::warn_lifetime_safety_invalidated_field,
@@ -482,6 +483,17 @@ public:
     const auto *Attr = FD->getAttr<LifetimeImmortalAttr>();
     SourceLocation Loc = Attr ? Attr->getLocation() : FD->getLocation();
     S.Diag(Loc, diag::warn_lifetime_safety_immortal_violation) << Subject;
+  }
+
+  void reportNonInvalidatingParamViolation(const ParmVarDecl *PVD,
+                                           SourceLocation Loc) override {
+    // Anchor at the attribute: that is the claim being contradicted.
+    const auto *Attr = PVD->getAttr<LifetimeNonInvalidatingAttr>();
+    S.Diag(Attr ? Attr->getLocation() : PVD->getLocation(),
+           diag::warn_lifetime_safety_non_invalidating_param_violation)
+        << PVD;
+    if (Loc.isValid())
+      S.Diag(Loc, diag::note_lifetime_safety_invalidated_here);
   }
 
   void reportNonInvalidatingViolation(const CXXMethodDecl *MD,
