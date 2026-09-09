@@ -2131,6 +2131,15 @@ void FactsGenerator::handleGslAggregateInit(
       RD ? RD->field_begin() : RecordDecl::field_iterator();
   RecordDecl::field_iterator FieldEnd =
       RD ? RD->field_end() : RecordDecl::field_iterator();
+  // An UNNAMED BIT-FIELD is in `fields()` but takes no initializer, so zipping the
+  // two lists positionally drifts at the first one and every later initializer is
+  // attributed to the wrong member. That silently dropped a borrow bound to a
+  // reference member behind one, since the reference handling below is keyed on the
+  // field. (A NAMED bit-field does take an initializer and must not be skipped.)
+  auto SkipUninitializableFields = [&] {
+    while (FieldIt != FieldEnd && FieldIt->isUnnamedBitField())
+      ++FieldIt;
+  };
   bool First = true;
   unsigned Index = 0;
   for (const Expr *Init : Inits) {
@@ -2138,9 +2147,12 @@ void FactsGenerator::handleGslAggregateInit(
     // (a base may itself be a [[gsl::Pointer]] carrying a borrow) without
     // advancing the field iterator.
     const FieldDecl *FD = nullptr;
-    if (Index++ >= NumBaseInits && CanZipFields && FieldIt != FieldEnd) {
-      FD = *FieldIt;
-      ++FieldIt;
+    if (Index++ >= NumBaseInits && CanZipFields) {
+      SkipUninitializableFields();
+      if (FieldIt != FieldEnd) {
+        FD = *FieldIt;
+        ++FieldIt;
+      }
     }
     // A reference member (`const T& r`) binds to the initializer's lvalue
     // storage -- a borrow of it, like `&lvalue`. The init expression is the
