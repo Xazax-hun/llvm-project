@@ -105,24 +105,43 @@ void FactsGenerator::flow(OriginNode *Dst, OriginNode *Src, bool Kill,
 void FactsGenerator::flowSingleLevelWithUnknownDepth(OriginNode *Dst,
                                                      OriginNode *Src,
                                                      const Expr *LoanExpr,
-                                                     bool Kill) {
+                                                     bool Kill,
+                                                     bool MarkLostWhenShallower) {
   if (!Dst || !Src)
     return;
+  auto SeedUnknown = [&](OriginNode *N) {
+    const Loan *L = FactMgr.getLoanMgr().createLoan(
+        AccessPath::Unknown(LoanExpr), LoanExpr);
+    CurrentBlockFacts.push_back(
+        FactMgr.createFact<IssueFact>(L->getID(), N->getOriginID()));
+  };
+  // The destination can be SHALLOWER than the source and have no deeper level at
+  // all to mark: converting `Derived *` to a `Base *` whose pointee holds no
+  // origins drops whatever borrow the object carried, and the loop below -- which
+  // walks only the DESTINATION's deeper levels -- would record nothing. Worse than
+  // silent: the flow fills the destination with the object's own loan, masking the
+  // empty-origin sentinel that refuses the read. Mark the destination itself.
+  //
+  // Seeded BEFORE the flow, which then MERGES rather than replaces: an IssueFact
+  // sets an origin's loan set outright, so marking after the flow would discard
+  // the very loan it just carried -- and a base-member access reached through the
+  // upcast (`this` -> base, then `.member`) would project off Unknown instead of
+  // the object, losing a report rather than adding one.
+  const bool DropsLevels = MarkLostWhenShallower &&
+                           Src->getLength() > Dst->getLength() &&
+                           !Dst->getPointeeChild();
+  if (DropsLevels)
+    SeedUnknown(Dst);
   // The intentional single-level flow: only the top-level (outer) origin.
-  CurrentBlockFacts.push_back(
-      FactMgr.createFact<OriginFlowFact>(Dst->getOriginID(),
-                                         Src->getOriginID(), Kill));
+  CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+      Dst->getOriginID(), Src->getOriginID(), Kill && !DropsLevels));
   // Seed any deeper levels of the destination that the shallow flow did not
   // populate with an Unknown loan, so an inner borrow this flow could not carry
   // is reported as lost (the Unknown loan survives joins) rather than read from
   // a silently-empty origin a control-flow merge could mask.
   for (OriginNode *Inner = Dst->getPointeeChild(); Inner;
-       Inner = Inner->getPointeeChild()) {
-    const Loan *L = FactMgr.getLoanMgr().createLoan(
-        AccessPath::Unknown(LoanExpr), LoanExpr);
-    CurrentBlockFacts.push_back(
-        FactMgr.createFact<IssueFact>(L->getID(), Inner->getOriginID()));
-  }
+       Inner = Inner->getPointeeChild())
+    SeedUnknown(Inner);
 }
 
 /// Creates a loan for the storage path of a given declaration reference.
@@ -1146,7 +1165,8 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
       if (Dest->getLength() == Src->getLength())
         flow(Dest, Src, /*Kill=*/true);
       else
-        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
+        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true,
+                                        /*MarkLostWhenShallower=*/true);
     }
     return;
   case CK_BaseToDerived:
@@ -1165,7 +1185,8 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
       if (Dest->getLength() == Src->getLength())
         flow(Dest, Src, /*Kill=*/true);
       else
-        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
+        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true,
+                                        /*MarkLostWhenShallower=*/true);
     }
     return;
   case CK_ArrayToPointerDecay:
@@ -1249,7 +1270,8 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     // precisely, so a genuinely borrow-free result stays empty (no false
     // positive); only an unmodeled deeper indirection is flagged.
     if (Dest && Src)
-      flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true);
+      flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true,
+                                      /*MarkLostWhenShallower=*/true);
     return;
   }
 }

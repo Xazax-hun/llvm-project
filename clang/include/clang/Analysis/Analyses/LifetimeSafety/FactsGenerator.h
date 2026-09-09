@@ -114,8 +114,16 @@ private:
   /// the inner borrow is only caught by the empty-set lost-loan heuristic, which
   /// a control-flow merge can mask. The Unknown loan survives dataflow joins, so
   /// the inner borrow reliably trips lost-loan instead.
+  /// \p MarkLostWhenShallower additionally marks the destination itself when it
+  /// is shallower than the source and has no deeper level to mark. Set for a
+  /// CONVERSION, where the two describe the same object and a level the
+  /// destination lacks is a borrow genuinely dropped; not for a
+  /// [[clang::lifetimebound]] return, where a shallower result is the normal
+  /// shape (it borrows into the argument, which the outer loan plus the Interior
+  /// step already says).
   void flowSingleLevelWithUnknownDepth(OriginNode *Dst, OriginNode *Src,
-                                       const Expr *LoanExpr, bool Kill);
+                                       const Expr *LoanExpr, bool Kill,
+                                       bool MarkLostWhenShallower = false);
 
   /// Handles assignment for both BinaryOperator and CXXOperatorCallExpr.
   ///
