@@ -154,10 +154,44 @@ static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
         // than one fact at a time.
         break;
       }
+      // Every fact below READS an origin that some earlier block may have
+      // written, so each has to register it -- the same reason spelled out for
+      // OriginEscapes and DynamicStore above. Leaving one out makes an origin
+      // mentioned nowhere else in its block look block-local, and its loans are
+      // dropped at the boundary: the fact then sees an empty origin and decides
+      // there is nothing to say.
+      //
+      // InvalidateOrigin is how this was found. A structured binding expands
+      // every use to the SAME MemberExpr, so one origin carries the member
+      // across the whole function; with the mutation inside a loop, the
+      // invalidation names an origin projected in an earlier block, saw no loans,
+      // and reported nothing -- while the identical loop written `rec.samples`
+      // re-projects in the loop body and was reported.
+      case Fact::Kind::InvalidateOrigin:
+        CheckOrigin(F->getAs<InvalidateOriginFact>()->getInvalidatedOrigin());
+        break;
+      case Fact::Kind::Projection:
+        CheckOrigin(F->getAs<ProjectionFact>()->getOriginID());
+        break;
+      case Fact::Kind::FieldStore: {
+        const auto *FS = F->getAs<FieldStoreFact>();
+        CheckOrigin(FS->getStoredOrigin());
+        CheckOrigin(FS->getContainerOrigin());
+        break;
+      }
+      case Fact::Kind::ArgumentOverlap: {
+        const auto *AO = F->getAs<ArgOverlapFact>();
+        for (OriginID OID : AO->getMutatingOrigins())
+          CheckOrigin(OID);
+        for (OriginID OID : AO->getBorrowOrigins())
+          CheckOrigin(OID);
+        break;
+      }
+      // These name no origin.
       case Fact::Kind::MovedOrigin:
       case Fact::Kind::Expire:
       case Fact::Kind::TestPoint:
-      case Fact::Kind::InvalidateOrigin:
+      case Fact::Kind::UntrackedConstruct:
         break;
       }
     }
