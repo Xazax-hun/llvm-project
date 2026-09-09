@@ -812,6 +812,11 @@ class FieldStoreFact : public Fact {
   OriginID StoredOrigin;
   /// The origin of the member's enclosing object (`obj` / `this`).
   OriginID ContainerOrigin;
+  /// Whether the destination is a BASE subobject rather than a data member. The
+  /// two are the same kind of store, but a base is initialized before the members
+  /// and destroyed after them, so binding one to a member is a stronger statement
+  /// than binding a member to a sibling -- and the diagnostics differ.
+  bool IntoBase;
 
 public:
   static bool classof(const Fact *F) {
@@ -819,13 +824,14 @@ public:
   }
 
   FieldStoreFact(const Expr *StoreExpr, OriginID StoredOrigin,
-                 OriginID ContainerOrigin)
+                 OriginID ContainerOrigin, bool IntoBase = false)
       : Fact(Kind::FieldStore), StoreExpr(StoreExpr), StoredOrigin(StoredOrigin),
-        ContainerOrigin(ContainerOrigin) {}
+        ContainerOrigin(ContainerOrigin), IntoBase(IntoBase) {}
 
   const Expr *getStoreExpr() const { return StoreExpr; }
   OriginID getStoredOrigin() const { return StoredOrigin; }
   OriginID getContainerOrigin() const { return ContainerOrigin; }
+  bool isIntoBase() const { return IntoBase; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

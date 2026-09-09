@@ -862,6 +862,10 @@ public:
     S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_self_referential)
         << E->getType() << E->getSourceRange();
   }
+  void reportBaseBorrowsMember(const Expr *E) override {
+    S.Diag(E->getExprLoc(), diag::warn_lifetime_safety_base_borrows_member)
+        << E->getType() << E->getSourceRange();
+  }
 
 private:
   std::pair<SourceLocation, StringRef>

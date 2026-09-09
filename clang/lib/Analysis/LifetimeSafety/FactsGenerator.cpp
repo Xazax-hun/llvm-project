@@ -751,6 +751,24 @@ void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
           //
           // Merged, not killed: several base initializers can contribute, and
           // the object may already hold a borrow.
+          // Recorded as a store INTO the object, which is what lets the checker
+          // recognise a self-referential one. A base subobject is a borrow-holding
+          // subobject of `this` exactly as a member is, so a base initialized from
+          // a member of the derived class binds the object to itself -- the
+          // flush-on-destroy mixin bug: bases are initialized BEFORE members and
+          // destroyed AFTER them, so the base borrows a member that is not
+          // constructed yet and reads it once it is gone. The member spelling of
+          // the same relationship was reported all along.
+          //
+          // Emitted BEFORE the flow below, because that flow merges into the `this`
+          // origin -- which is this store's own CONTAINER. Afterwards the container
+          // holds what the store just deposited, so the check comparing the stored
+          // value against the container's loans compares the value with itself: a
+          // base initialized from a global or a parameter matched and reported.
+          CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
+              Init, InitNode->getOriginID(),
+              (*FactMgr.getOriginMgr().getThisOrigins())->getOriginID(),
+              /*IntoBase=*/CII->isBaseInitializer()));
           CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
               (*FactMgr.getOriginMgr().getThisOrigins())->getOriginID(),
               InitNode->getOriginID(), /*KillDest=*/false));

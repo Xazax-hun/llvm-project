@@ -11468,6 +11468,13 @@ def warn_lifetime_safety_self_referential
               "invalidate this view, which lifetime safety cannot track">,
       InGroup<LifetimeSafetySelfReferential>,
       DefaultIgnore;
+def warn_lifetime_safety_base_borrows_member
+    : Warning<"base class %0 is initialized with a member of the derived object; a "
+              "base is initialized before the members and destroyed after them, so "
+              "the borrow refers to a member that is not constructed yet and "
+              "outlives it">,
+      InGroup<LifetimeSafetySelfReferential>,
+      DefaultIgnore;
 def warn_lifetime_safety_mutable_field
     : Warning<"'mutable' field %0 can be modified by a const member function; "
               "lifetime safety assumes const member functions do not invalidate "

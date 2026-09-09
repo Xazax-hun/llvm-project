@@ -2201,7 +2201,16 @@ public:
       }
       if (SharesObject && BorrowsMember &&
           ReportedSelfRefStores.insert(FSF->getStoreExpr()).second) {
-        SemaHelper->reportSelfReferentialBorrow(FSF->getStoreExpr());
+        // A base bound to a member is the same relationship, but the hazard is
+        // not the generic "mutating or moving the object can invalidate this":
+        // a base is initialized BEFORE the members and destroyed AFTER them, so
+        // the borrow is already wrong at construction and read again after the
+        // member is gone, with nothing moved or mutated. Saying otherwise reads
+        // as a false positive to anyone who never moves the object.
+        if (FSF->isIntoBase())
+          SemaHelper->reportBaseBorrowsMember(FSF->getStoreExpr());
+        else
+          SemaHelper->reportSelfReferentialBorrow(FSF->getStoreExpr());
         return;
       }
     }

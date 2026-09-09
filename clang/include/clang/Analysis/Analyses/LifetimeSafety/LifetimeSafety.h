@@ -456,6 +456,8 @@ public:
   // moving the object invalidates the view, which the intra-procedural analysis
   // cannot track across calls.
   virtual void reportSelfReferentialBorrow(const Expr *E) {}
+  // Reports a base subobject initialized with a member of the derived object.
+  virtual void reportBaseBorrowsMember(const Expr *E) {}
 };
 
 /// The main entry point for the analysis.
