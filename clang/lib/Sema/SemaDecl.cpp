@@ -3475,14 +3475,23 @@ static void mergeParamDeclAttributes(ParmVarDecl *newDecl,
   // definition parks it. Nothing is reported at the call, and nothing in the body
   // either, which does exactly what its own annotation permits. Same rule as
   // carries_dependency above -- the first declaration has to specify it.
-  if (const auto *CBA = newDecl->getAttr<LifetimeCaptureByAttr>();
-      CBA && !oldDecl->hasAttr<LifetimeCaptureByAttr>()) {
-    S.Diag(CBA->getLocation(),
-           diag::warn_lifetime_safety_capture_by_missing_on_first_decl)
-        << newDecl;
+  auto RequireOnFirstDecl = [&](const Attr *A) {
+    if (!A)
+      return;
+    S.Diag(A->getLocation(),
+           diag::warn_lifetime_safety_param_attr_missing_on_first_decl)
+        << A << newDecl;
     S.Diag(oldDecl->getLocation(),
            diag::note_lifetime_safety_capture_by_missing_first_decl);
-  }
+  };
+  if (!oldDecl->hasAttr<LifetimeCaptureByAttr>())
+    RequireOnFirstDecl(newDecl->getAttr<LifetimeCaptureByAttr>());
+  // Same for '[[clang::lifetime_non_invalidating]]'. Adding it on a later
+  // declaration -- including one that FOLLOWS the definition -- suppresses the
+  // assumed invalidation at every call checked against it, while the definition's
+  // parameter never carries the promise and so is never verified against it.
+  if (!oldDecl->hasAttr<LifetimeNonInvalidatingAttr>())
+    RequireOnFirstDecl(newDecl->getAttr<LifetimeNonInvalidatingAttr>());
 
   propagateAttributes(
       newDecl, oldDecl, [&S](ParmVarDecl *To, const ParmVarDecl *From) {

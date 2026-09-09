@@ -3,6 +3,7 @@
 
 #include "Inputs/lifetime-analysis.h"
 using std::string_view;
+using std::vector;
 
 // A call is checked against the STATICALLY resolved callee, so an override that adds
 // a lifetime contract the base does not declare is invisible to every caller
@@ -83,10 +84,10 @@ struct [[gsl::Pointer(char)]] Drops : CapturingBase {
 // to specify it.
 struct [[gsl::Pointer(char)]] Split {
   string_view held;
-  void pick(string_view a); // expected-note {{first declaration of the parameter is here}}
+  void pick(string_view a); // expected-note {{previous declaration of the parameter is here}}
 };
 
-// expected-warning@+1 {{'[[clang::lifetime_capture_by]]' on parameter 'a' is missing from the first declaration of this function}}
+// expected-warning@+1 {{'clang::lifetime_capture_by' on parameter 'a' is missing from the first declaration of this function}}
 void Split::pick(string_view a [[clang::lifetime_capture_by(this)]]) { held = a; }
 
 // Written on the in-class declaration and not repeated: propagated to the
@@ -107,4 +108,32 @@ struct [[gsl::Pointer(char)]] SplitRepeats {
 
 void SplitRepeats::pick(string_view a [[clang::lifetime_capture_by(this)]]) { // no-warning
   held = a;
+}
+
+//===----------------------------------------------------------------------===//
+// The same rule for '[[clang::lifetime_non_invalidating]]', including a
+// redeclaration that FOLLOWS the definition.
+//===----------------------------------------------------------------------===//
+
+// Adding it later suppresses the assumed invalidation at every call checked against
+// that declaration, while the definition's parameter never carries the promise and
+// so is never verified against it.
+void grow(vector<int> &v);
+void grow(vector<int> &v) { v.push_back(1); } // expected-note {{previous declaration of the parameter is here}}
+// expected-warning@+1 {{'clang::lifetime_non_invalidating' on parameter 'v' is missing from the first declaration of this function}}
+void grow(vector<int> &v [[clang::lifetime_non_invalidating]]);
+
+// On the first declaration and not repeated: propagated to the definition, whose
+// body is then verified against it.
+// The report anchors at the attribute -- the claim being contradicted -- which here
+// is on the declaration, not on the definition.
+// expected-warning@+1 {{this function invalidates parameter 'v', which its '[[clang::lifetime_non_invalidating]]' annotation promises not to invalidate}}
+void steady(vector<int> &v [[clang::lifetime_non_invalidating]]);
+void steady(vector<int> &v) {
+  v.push_back(1); // expected-note {{invalidated here}}
+}
+
+// A definition that is the only declaration IS the first one.
+void solo(vector<int> &v [[clang::lifetime_non_invalidating]]) { // expected-warning {{this function invalidates parameter 'v'}}
+  v.push_back(1); // expected-note {{invalidated here}}
 }

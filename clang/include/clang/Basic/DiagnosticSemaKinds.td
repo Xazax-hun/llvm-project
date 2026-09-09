@@ -2345,14 +2345,14 @@ def warn_lifetime_safety_default_arg_temporary : Warning<
   "parameter's annotation lets the borrow outlive the call, so a resulting dangle "
   "would not be reported">,
   InGroup<LifetimeSafetyUnannotatedIndirection>, DefaultIgnore;
-def warn_lifetime_safety_capture_by_missing_on_first_decl : Warning<
-  "'[[clang::lifetime_capture_by]]' on parameter %0 is missing from the first "
-  "declaration of this function; a call is checked against the declaration in "
-  "scope, so one that precedes this may pass an argument it must not let escape "
-  "and have it captured with nothing reported">,
+def warn_lifetime_safety_param_attr_missing_on_first_decl : Warning<
+  "%0 on parameter %1 is missing from the first declaration of this function; a "
+  "call is checked against the declaration in scope, so one that precedes this is "
+  "not told about the contract and the promise is never verified against the "
+  "definition">,
   InGroup<LifetimeSafetyCaptureByViolation>, DefaultIgnore;
 def note_lifetime_safety_capture_by_missing_first_decl : Note<
-  "first declaration of the parameter is here">;
+  "previous declaration of the parameter is here">;
 def warn_lifetime_safety_override_param_adds_capture_by : Warning<
   "overriding parameter %0 adds '[[clang::lifetime_capture_by]]' not present on "
   "the overridden method; a call through the base class is checked against the "
