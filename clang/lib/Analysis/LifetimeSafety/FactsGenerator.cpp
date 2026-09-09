@@ -1542,6 +1542,22 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // Kill the old loans of the destination origin and flow the new loans
   // from the source origin. For a shared array element-origin we merge instead
   // of killing (see above).
+  // A whole-object assignment through a REFERENCE writes the caller's object just
+  // as `*ptr = ...` does, but the destination resolves statically here, so only the
+  // flow above was emitted and no store fact existed for the store-site checks to
+  // see. The pointer spelling goes through the routed path and does emit one, so
+  // `*dst = Box::wrap(s)` reported a [[clang::noescape]] argument coming to rest in
+  // the caller's object while the reference spelling `dst = Box::wrap(s)` -- same
+  // annotations, same escape -- said nothing.
+  //
+  // The fact only records where the store lands; the deposit itself is still the
+  // flow below, and routing through the destination's own loans reaches the same
+  // origin.
+  if (!LHSType.isNull() && LHSType->isReferenceType() &&
+      hasOrigins(LHSType->getPointeeType()) && !WritesPartOfDestination)
+    if (OriginNode *Src = getRValueOrigins(RHSExpr, getOriginNode(*RHSExpr)))
+      CurrentBlockFacts.push_back(FactMgr.createFact<DynamicStoreFact>(
+          LHSNode->getOriginID(), Src->getOriginID(), cast<Expr>(LHSExpr)));
   flow(LHSNode->getPointeeChild(), RHSNode,
        /*Kill=*/!MergeIntoSharedElement && !WritesPartOfDestination);
   killAndFlowOrigin(*TargetExpr, *LHSExpr);
