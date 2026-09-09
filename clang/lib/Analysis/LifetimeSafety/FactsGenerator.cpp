@@ -1285,7 +1285,16 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
     // its sub-expression (x). This fact will cause the dataflow analysis
     // to propagate any loans held by the sub-expression's origin to the
     // origin of this UnaryOperator expression.
-    killAndFlowOrigin(*UO, *SubExpr);
+    // Taking the address of a C++23 EXPLICIT OBJECT member function yields a plain
+    // function pointer (`void (*)(S)`), not a pointer-to-member, so the result has
+    // an origin -- while the operand, a reference to the function itself, has none.
+    // `flow` asserts on that pairing, since a destination without a matching source
+    // is normally a shape bug. Here it is not: a source with no origins holds no
+    // borrow, so there is nothing to propagate and the destination correctly stays
+    // empty. (An ordinary member function is a pointer-to-member and gives neither
+    // side origins; a static or free function gives both.)
+    if (getOriginNode(*SubExpr))
+      killAndFlowOrigin(*UO, *SubExpr);
     // Soundness: taking the address of an indirection (`&p` where `p` is a
     // pointer or a view) forms a second level of indirection that the analysis
     // cannot fully model -- the same single-indirection rule the model enforces

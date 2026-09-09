@@ -83,3 +83,48 @@ const int *from_immortal() {
   V v{&kImmortal};
   return v.by_value(); // no-warning
 }
+
+//===----------------------------------------------------------------------===//
+// Taking the ADDRESS of an explicit object member function.
+//===----------------------------------------------------------------------===//
+
+// `&S::get` on an explicit object member function yields a plain function pointer
+// (`void (*)(S)`), not a pointer-to-member. The result therefore has an origin while
+// the operand -- a reference to the function itself -- has none, and flowing one into
+// the other asserted ("Dst is non-null but Src is null"). A source with no origins
+// holds no borrow, so there is nothing to propagate and the destination correctly
+// stays empty. An ordinary member function is a pointer-to-member and gives neither
+// side origins; a static or free function gives both.
+namespace address_of_explicit_object {
+struct S {
+  void get(this S) {}
+  // expected-warning@+1 {{parameter that can hold a borrow is not annotated for lifetime safety}}
+  void byref(this S &) {}
+  void mem() {}      // ordinary member: pointer-to-member
+  static void st() {}
+};
+
+// These carry no borrow, so there is nothing to diagnose -- the point is that none
+// of them trips the assertion.
+auto a1 = &S::get;    // no-warning
+auto a2 = &S::byref;  // no-warning
+auto a3 = &S::mem;    // no-warning
+auto a4 = &S::st;     // no-warning
+void (*a5)(S) = &S::get; // no-warning
+
+// The object type holding a borrow does not change the answer: a function pointer
+// carries none either way.
+struct [[gsl::Pointer(char)]] V {
+  const char *s;
+  const char *ret(this V self [[clang::lifetimebound]]) { return self.s; }
+};
+
+auto a6 = &V::ret; // no-warning
+
+void in_body() {
+  // (A local initialized from one holds no borrow, so it draws the sentinel; that is
+  // the ordinary treatment of an untracked value, not this fix.)
+  auto p = &S::get;
+  (void)p; // expected-warning {{lifetime safety cannot track local variable 'p' here}}
+}
+} // namespace address_of_explicit_object
