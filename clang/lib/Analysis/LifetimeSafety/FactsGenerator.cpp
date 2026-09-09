@@ -327,6 +327,14 @@ static bool isSetjmpLongjmp(const FunctionDecl *FD) {
 /// (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...) from being treated as
 /// mutating. The std allow-list is by name and so cannot cover user types; those
 /// use the attribute.
+/// Whether \p Closure, a lambda's closure type, captured `this`.
+static bool capturesThis(const CXXRecordDecl *Closure) {
+  llvm::DenseMap<const ValueDecl *, FieldDecl *> Captures;
+  FieldDecl *ThisCapture = nullptr;
+  Closure->getCaptureFields(Captures, ThisCapture);
+  return ThisCapture != nullptr;
+}
+
 static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
   // An explicit promise from the author covers user-defined owners, whose
   // accessors the name-based allow-list below cannot recognize.
@@ -3292,6 +3300,24 @@ void FactsGenerator::handleAssumedInvalidatingCall(
         invalidateEnclosingObjects(L, RecvGate);
       }
   }
+  // Calling a lambda that captured `this` can mutate the enclosing object, through
+  // any member the body reaches. The closure is the receiver, so only IT is
+  // invalidated above -- and the body is analyzed as its own function, where the
+  // captured `this` is not the object either. So the mutation was attributed to
+  // nothing: `void warm() const { [this]{ pv->push_back(1); }(); }` subverted
+  // `const` while the identical unwrapped statement was reported.
+  //
+  // Assumed, like every other call whose effect on an owner cannot be seen: the
+  // body may not mutate anything, and then this costs a false positive rather than
+  // a missed reallocation.
+  if (const CXXRecordDecl *Closure =
+          Args.empty() || !Args[0]
+              ? nullptr
+              : Args[0]->getType().getNonReferenceType()->getAsCXXRecordDecl();
+      Closure && Closure->isLambda())
+    if (capturesThis(Closure))
+      if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+        invalidate((*ThisOrigins)->getOriginID(), OwnerLoanGate::ReachableOwner);
   // The implicit object argument (I == 0 for implicit-this instance methods) is
   // intentionally skipped below -- it is handled by case (1) above. (For a C++23
   // explicit object member function the object IS a parameter, handled uniformly
