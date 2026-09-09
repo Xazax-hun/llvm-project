@@ -1713,6 +1713,36 @@ safely deallocated with the standard ``free()``.
   ``ownership_takes``, this takes 2 arguments: the allocation type, and the
   index of the parameter whose ownership will be taken over (counting from 1).
 
+For a non-static member function, ``ownership_takes`` may name the implicit
+object parameter, which is index 1 (the first declared parameter is then index
+2). It means the call deallocates the object it is called on -- the ``delete
+this`` of an intrusive reference count:
+
+.. code-block:: c++
+
+  class Node {
+  public:
+    void deref() const __attribute__((ownership_takes(RefCounted, 1))) {
+      if (!--m_refCount)
+        delete this;
+    }
+  private:
+    mutable unsigned m_refCount { 1 };
+  };
+
+Clang's lifetime safety analysis (``-Wlifetime-safety``) understands this form:
+it treats such a call as destroying the object, exactly as an explicit
+destructor call would, so a borrow taken into the object before the call and
+used after it is reported. Inside the body it allows the object to be
+deallocated, and checks that the body really does deallocate it -- an annotated
+function that never frees the object is diagnosed under
+``-Wlifetime-safety-immortal-violation``, because callers would otherwise be
+told the object is gone when it is not.
+
+``ownership_holds`` and ``ownership_returns`` may not name the implicit object
+parameter: the former has no meaning for an object the callee is already called
+on, and the latter indexes an allocation size.
+
 The annotations ``ownership_takes`` and ``ownership_holds`` both prevent memory
 leak reports (concerning the specified parameter); the difference between them
 is that using taken memory is a use-after-free error, while using held memory

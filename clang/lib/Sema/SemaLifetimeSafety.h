@@ -465,6 +465,12 @@ public:
            diag::warn_lifetime_safety_capture_into_borrowless_object)
         << E->getSourceRange();
   }
+  void reportOwnershipTakesThisViolation(const FunctionDecl *FD) override {
+    S.Diag(FD->getLocation(),
+           diag::warn_lifetime_safety_ownership_takes_this_violation)
+        << FD->getSourceRange();
+  }
+
   void reportMallocViolation(const FunctionDecl *FD,
                             unsigned Subject) override {
     const auto *Attr = FD->getAttr<RestrictAttr>();

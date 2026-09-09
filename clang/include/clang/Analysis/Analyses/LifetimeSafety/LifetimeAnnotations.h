@@ -295,6 +295,13 @@ bool isStringSourceType(QualType T);
 // not escape.
 bool isStlContainerType(const CXXRecordDecl *RD);
 
+/// Returns true if \p FD is a non-static member function declared
+/// `__attribute__((ownership_takes(<module>, 1)))`, i.e. the attribute names the
+/// implicit object parameter: calling it deallocates the object it is called on.
+/// This is the intrusive reference count's `deref()`, whose body ends in
+/// `delete this`.
+bool takesOwnershipOfThis(const FunctionDecl &FD);
+
 // Returns true if the function destroys its first argument
 // (e.g., destructors via implicit 'this', std::destroy_at).
 bool destructsFirstArg(const FunctionDecl &FD);

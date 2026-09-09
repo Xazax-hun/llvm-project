@@ -366,6 +366,9 @@ private:
   /// Subject index for a `__attribute__((malloc))` function found to return a
   /// borrow of something that already existed, or none if it does not.
   std::optional<unsigned> MallocViolation;
+  /// Whether the body was seen to deallocate the implicit object. Verifies the
+  /// `ownership_takes` promise below.
+  bool DeallocatesThis = false;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
@@ -453,8 +456,10 @@ public:
             checkAssumedInvalidation(IOF);
           else {
             checkInvalidation(IOF);
-            if (IOF->isDeallocation())
+            if (IOF->isDeallocation()) {
               checkNakedDeallocation(IOF);
+              noteDeallocationOfThis(IOF);
+            }
           }
         }
         else if (const auto *OEF = F->getAs<OriginEscapesFact>()) {
@@ -1191,6 +1196,24 @@ public:
       }
     if (!Safe)
       SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
+  }
+
+  /// Records whether this deallocation frees the implicit object, which is what
+  /// verifies an `ownership_takes` naming `this`.
+  ///
+  /// Asked of the LOANS rather than of the syntax, so it holds however the object
+  /// is spelled at the `delete`. The canonical form launders it through two casts
+  /// -- `delete const_cast<T *>(static_cast<const T *>(this))` -- and a
+  /// delegating one frees it in a callee, which reaches here as that call's own
+  /// deallocation fact carrying the same loan.
+  void noteDeallocationOfThis(const InvalidateOriginFact *IOF) {
+    if (DeallocatesThis)
+      return;
+    for (LoanID LID : LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF))
+      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().getAsPlaceholderThis()) {
+        DeallocatesThis = true;
+        return;
+      }
   }
 
   /// Soundness check: a member function whose object the analysis trusts as
@@ -3031,6 +3054,15 @@ public:
       SemaHelper->reportImmortalViolation(cast<FunctionDecl>(FD), /*Subject=*/3);
     if (MallocViolation)
       SemaHelper->reportMallocViolation(cast<FunctionDecl>(FD), *MallocViolation);
+    // Verify an `ownership_takes` naming the implicit object against the body, the
+    // way the immortal and malloc promises above are verified. The attribute makes
+    // callers treat the object as destroyed by the call, and makes this body exempt
+    // from the checks that assume the object outlives it -- so an untrue promise
+    // both hides a borrow stranded in the object here and invents a destruction in
+    // every caller. A destructor needs no such check: there the object really is
+    // gone.
+    if (takesOwnershipOfThis(*cast<FunctionDecl>(FD)) && !DeallocatesThis)
+      SemaHelper->reportOwnershipTakesThisViolation(cast<FunctionDecl>(FD));
     if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
         MD && getImplicitObjectParamLifetimeBoundAttr(MD) &&
         !VerifiedLiftimeboundEscapes.contains(MD))

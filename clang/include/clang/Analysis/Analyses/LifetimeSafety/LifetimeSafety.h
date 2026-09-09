@@ -198,6 +198,9 @@ public:
   // of non-immortal storage. `Subject` selects the borrowed entity: 0 = a
   // local/temporary, 1 = a parameter, 2 = the implicit this parameter.
   virtual void reportMallocViolation(const FunctionDecl *FD, unsigned Subject) {}
+  // Reports a member function declared `ownership_takes(<module>, 1)` -- naming
+  // the implicit object -- whose body never deallocates that object.
+  virtual void reportOwnershipTakesThisViolation(const FunctionDecl *FD) {}
   virtual void reportCaptureIntoBorrowlessObject(const Expr *E) {}
   virtual void reportImmortalViolation(const FunctionDecl *FD,
                                        unsigned Subject) {}

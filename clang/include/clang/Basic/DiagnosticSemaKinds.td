@@ -11140,6 +11140,14 @@ def warn_lifetime_safety_capture_by_violation
               "argument">,
       InGroup<LifetimeSafetyCaptureByViolation>,
       DefaultIgnore;
+def warn_lifetime_safety_ownership_takes_this_violation
+    : Warning<"'__attribute__((ownership_takes))' names the implicit object "
+              "parameter but this function never deallocates the object; the "
+              "attribute makes every caller treat the object as destroyed by the "
+              "call, and exempts this body from the checks that assume the object "
+              "outlives it, so a borrow left in the object here goes unreported">,
+      InGroup<LifetimeSafetyImmortalViolation>,
+      DefaultIgnore;
 def warn_lifetime_safety_malloc_violation
     : Warning<"'__attribute__((malloc))' function returns a borrow of "
               "%select{a local or temporary|a parameter|the implicit this "

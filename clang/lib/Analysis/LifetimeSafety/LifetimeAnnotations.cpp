@@ -1151,8 +1151,27 @@ bool isStlContainerType(const CXXRecordDecl *RD) {
   return Containers.contains(getName(*RD));
 }
 
+bool takesOwnershipOfThis(const FunctionDecl &FD) {
+  const auto *MD = dyn_cast<CXXMethodDecl>(&FD);
+  if (!MD || !MD->isImplicitObjectMemberFunction())
+    return false;
+  // Source index 1 is the implicit object parameter of such a function; Sema
+  // only accepts it for the `takes` kind.
+  for (const auto *OA : FD.specific_attrs<OwnershipAttr>())
+    if (OA->getOwnKind() == OwnershipAttr::Takes)
+      for (const ParamIdx &Idx : OA->args())
+        if (Idx.getSourceIndex() == 1)
+          return true;
+  return false;
+}
+
 bool destructsFirstArg(const FunctionDecl &FD) {
   if (isa<CXXDestructorDecl>(FD))
+    return true;
+  // A member function that takes ownership of `this` deallocates the object it
+  // is called on, so a call to it destroys the object exactly as a destructor
+  // call would. For a member call the implicit object is the first argument.
+  if (takesOwnershipOfThis(FD))
     return true;
   // `std::destroy_at(p)` runs p's destructor.
   if (isInStlNamespace(&FD) && getName(FD) == "destroy_at")

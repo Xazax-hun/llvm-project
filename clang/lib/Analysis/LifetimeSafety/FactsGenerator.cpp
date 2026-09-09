@@ -2892,7 +2892,14 @@ void FactsGenerator::handleExitBlock() {
   // cleanup (`~Box() { delete pv; }`) look like it strands a borrow in `pv`, and
   // keeps every field origin spuriously live back through the destructor body.
   // Globals still escape from a destructor, so only the field facts are skipped.
-  const bool InDestructor = isa<CXXDestructorDecl>(AC.getDecl());
+  //
+  // A member function that takes ownership of `this` ends with the object
+  // destroyed too, so the same reasoning applies to it.
+  const auto *AnalyzedFD = dyn_cast_if_present<FunctionDecl>(AC.getDecl());
+  const bool DestroysObject =
+      isa<CXXDestructorDecl>(AC.getDecl()) ||
+      (AnalyzedFD && takesOwnershipOfThis(*AnalyzedFD));
+  const bool InDestructor = DestroysObject;
   for (const Origin &O : FactMgr.getOriginMgr().getOrigins())
     if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl())) {
       // Create FieldEscapeFacts for all field origins that remain live at exit.
@@ -2934,7 +2941,15 @@ void FactsGenerator::handleExitBlock() {
   // captured local going out of scope while still held by the object. The `this`
   // placeholder loan never expires, so this adds no false positive for an object
   // that only holds caller-scoped borrows.
-  if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins()) {
+  //
+  // Not for a function that DESTROYS the object, though: there is nothing left to
+  // read at exit. A destructor already deletes members without this firing, but a
+  // method that takes ownership of `this` deletes the object itself, and the
+  // implicit use then read what the `delete this` had just freed -- reporting the
+  // canonical intrusive `deref()` as a use-after-free. The same goes for the
+  // escape: an object that does not outlive the call strands nothing.
+  if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins();
+      ThisOrigins && !DestroysObject) {
     CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
         AC.getDecl()->getEndLoc(), *ThisOrigins));
     // The object outlives the call, so a borrow resting in it at exit escapes

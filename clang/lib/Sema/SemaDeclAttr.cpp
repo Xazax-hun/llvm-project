@@ -1581,16 +1581,33 @@ static void handleOwnershipAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   for (unsigned i = 1; i < AL.getNumArgs(); ++i) {
     Expr *Ex = AL.getArgAsExpr(i);
     ParamIdx Idx;
-    if (!S.checkFunctionOrMethodParameterIndex(D, AL, i, Ex, Idx))
+    // `ownership_takes` may name the implicit object parameter of a non-static
+    // member function, meaning the callee deallocates the object it is called
+    // on -- the `delete this` in an intrusive reference count's `deref()`. The
+    // other two kinds have no meaning for `this`: `ownership_returns` indexes a
+    // size parameter, and a function cannot merely "hold" the object it is
+    // already called on.
+    bool CanIndexImplicitThis = K == OwnershipAttr::Takes;
+    if (!S.checkFunctionOrMethodParameterIndex(D, AL, i, Ex, Idx,
+                                               CanIndexImplicitThis))
       return;
 
+    // The implicit object parameter is `this`, which is always a pointer, so it
+    // satisfies the check below without consulting the parameter list --
+    // getASTIndex() asserts on an index naming it.
+    bool IndexesImplicitThis =
+        hasImplicitObjectParameter(D) && Idx.getSourceIndex() == 1;
+
     // Is the function argument a pointer type?
-    QualType T = getFunctionOrMethodParamType(D, Idx.getASTIndex());
+    QualType T = IndexesImplicitThis
+                     ? QualType()
+                     : getFunctionOrMethodParamType(D, Idx.getASTIndex());
     int Err = -1;  // No error
     switch (K) {
       case OwnershipAttr::Takes:
       case OwnershipAttr::Holds:
-        if (!T->isAnyPointerType() && !T->isBlockPointerType())
+        if (!IndexesImplicitThis && !T->isAnyPointerType() &&
+            !T->isBlockPointerType())
           Err = 0;
         break;
       case OwnershipAttr::Returns:
