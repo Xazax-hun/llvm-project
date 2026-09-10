@@ -125,6 +125,14 @@ Stmt *AnalysisDeclContext::getBody(bool &IsAutosynthesized) const {
     if (VD->isFileVarDecl() || isa<ParmVarDecl>(VD))
       return const_cast<Stmt *>(dyn_cast_or_null<Stmt>(VD->getInit()));
   }
+  // A DEFAULT MEMBER INITIALIZER is code too, and for a class that is only ever
+  // aggregate-initialized it is the only place that code appears -- no constructor
+  // is ever generated to carry it.
+  else if (const auto *FD = dyn_cast_or_null<FieldDecl>(D)) {
+    if (FD->hasInClassInitializer())
+      return const_cast<Stmt *>(
+          dyn_cast_or_null<Stmt>(FD->getInClassInitializer()));
+  }
 
   llvm_unreachable("unknown code decl");
 }

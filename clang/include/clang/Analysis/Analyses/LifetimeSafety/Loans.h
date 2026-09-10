@@ -148,6 +148,13 @@ public:
   static AccessPath Placeholder(const CXXMethodDecl *MD) {
     return AccessPath(Kind::PlaceholderThis, MD);
   }
+  /// The object under construction while analyzing a DEFAULT MEMBER INITIALIZER on
+  /// its own -- there is no method there, so the field whose initializer is being
+  /// analyzed identifies the object instead. Same kind: it denotes the same thing,
+  /// the caller-scope object the initializer runs on.
+  static AccessPath Placeholder(const FieldDecl *FD) {
+    return AccessPath(Kind::PlaceholderThis, FD);
+  }
   /// Storage that lives for the whole program, identified by the
   /// `[[clang::lifetime_immortal]]` function whose return value created it.
   static AccessPath Immortal(const FunctionDecl *FD) {
@@ -229,10 +236,26 @@ public:
                ? cast<const clang::ValueDecl>(cast<const clang::Decl *>(Root))
                : nullptr;
   }
+  /// Whether this denotes the implicit object, however it is identified. Use this
+  /// rather than `getAsPlaceholderThis() != nullptr`, which additionally asks for a
+  /// METHOD and is null while a default member initializer is analyzed on its own.
+  bool isPlaceholderThis() const { return K == Kind::PlaceholderThis; }
+  /// The method whose implicit object this denotes, or null when there is none --
+  /// a default member initializer analyzed on its own. Sites that need a method to
+  /// anchor a diagnostic at, or to read an annotation from, want this.
   const CXXMethodDecl *getAsPlaceholderThis() const {
     return K == Kind::PlaceholderThis
-               ? cast<const CXXMethodDecl>(cast<const clang::Decl *>(Root))
+               ? dyn_cast<const CXXMethodDecl>(cast<const clang::Decl *>(Root))
                : nullptr;
+  }
+  /// The record this object is of, whichever way it is identified.
+  const CXXRecordDecl *getPlaceholderThisRecord() const {
+    if (K != Kind::PlaceholderThis)
+      return nullptr;
+    const auto *D = cast<const clang::Decl *>(Root);
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(D))
+      return MD->getParent();
+    return dyn_cast<CXXRecordDecl>(cast<FieldDecl>(D)->getParent());
   }
   const CXXNewExpr *getAsNewAllocation() const {
     return K == Kind::NewAllocation

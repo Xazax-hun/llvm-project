@@ -2992,6 +2992,20 @@ void FactsGenerator::handleFullExprCleanup(
 }
 
 void FactsGenerator::handleExitBlock() {
+  // A DEFAULT MEMBER INITIALIZER analyzed on its own is a store into its own field,
+  // exactly as the member initializer a constructor derives from it is
+  // (handleCXXCtorInitializer). Recording it is what lets the checker see a
+  // self-referential object -- one whose view member is bound to a sibling member --
+  // for a class that is only ever aggregate-initialized and so has no constructor to
+  // carry the initializer.
+  if (const auto *Field = dyn_cast_if_present<FieldDecl>(AC.getDecl()))
+    if (const Expr *Init = Field->getInClassInitializer())
+      if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins())
+        if (OriginNode *InitNode = getOriginNode(*Init))
+          CurrentBlockFacts.push_back(FactMgr.createFact<FieldStoreFact>(
+              Init, getRValueOrigins(Init, InitNode)->getOriginID(),
+              (*ThisOrigins)->getOriginID()));
+
   // A field does not outlive a DESTRUCTOR: by the time one returns the object is
   // gone, so nothing can read its members afterwards and "this borrow escapes to
   // a field" is vacuous there. Emitting the fact anyway makes a destructor's own
@@ -4338,8 +4352,22 @@ void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
 // parameter at the function's entry.
 llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
   const auto *FD = dyn_cast<FunctionDecl>(AC.getDecl());
-  if (!FD)
-    return {};
+  // A DEFAULT MEMBER INITIALIZER analyzed on its own has no function, but it does
+  // have an object: seed `this` so a read of a sibling member has a root, which is
+  // what the checks comparing a borrow against the enclosing object need.
+  if (!FD) {
+    const auto *Field = dyn_cast<FieldDecl>(AC.getDecl());
+    if (!Field)
+      return {};
+    llvm::SmallVector<Fact *> Facts;
+    if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins()) {
+      const Loan *L = FactMgr.getLoanMgr().createLoan(
+          AccessPath::Placeholder(Field), /*IssuingExpr=*/nullptr);
+      Facts.push_back(FactMgr.createFact<IssueFact>(
+          L->getID(), (*ThisOrigins)->getOriginID()));
+    }
+    return Facts;
+  }
 
   llvm::SmallVector<Fact *> PlaceholderLoanFacts;
   if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins()) {

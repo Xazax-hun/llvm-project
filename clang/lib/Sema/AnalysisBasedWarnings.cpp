@@ -4466,6 +4466,38 @@ static void LifetimeSafetyFileVarInitAnalysis(
     /// Analyzing it once, here, is well defined: a default argument cannot name a local
     /// or another parameter, so only globals, static members and its own temporaries are
     /// in scope, and those mean the same thing from here as from any call site.
+    /// A DEFAULT MEMBER INITIALIZER is code owned by a declaration, exactly like a
+    /// default argument above. It is normally carried by whichever constructor runs
+    /// it, and analyzed there -- but a class that is only ever AGGREGATE-initialized
+    /// has no constructor at all, so the initializer's code appears in no CFG and a
+    /// hazard written in it is invisible. `struct A { std::string t; std::string_view
+    /// v = t; };` used as `A a{...}` was silent, while the same class with `A() =
+    /// default;` reported a self-referential member.
+    ///
+    /// Analyzed only when NO constructor of the record is defined in this
+    /// translation unit: otherwise the constructor carries the initializer and
+    /// reports it, and analyzing it again here would say the same thing twice.
+    bool VisitFieldDecl(FieldDecl *FD) override {
+      if (!FD->hasInClassInitializer() ||
+          FD->getDeclContext()->isDependentContext())
+        return true;
+      const auto *RD = dyn_cast<CXXRecordDecl>(FD->getParent());
+      if (!RD || !RD->hasDefinition())
+        return true;
+      // A COPY or MOVE constructor copies the member rather than running its
+      // initializer, so it carries nothing; any other defined constructor does run
+      // it, and reports there. Only when none exists is this the initializer's sole
+      // home -- which is the aggregate-only case.
+      for (const CXXConstructorDecl *C : RD->ctors())
+        if (C->isDefined() && !C->isCopyOrMoveConstructor())
+          return true;
+      // Nothing that can hold a borrow, nothing to say.
+      if (!typeMayHoldBorrow(FD->getType()))
+        return true;
+      analyze(FD);
+      return true;
+    }
+
     bool VisitFunctionDecl(FunctionDecl *FD) override {
       analyzeDefaultArguments(FD);
       return true;
@@ -4511,7 +4543,7 @@ static void LifetimeSafetyFileVarInitAnalysis(
       }
     }
 
-    void analyze(const VarDecl *VD) {
+    void analyze(const Decl *VD) {
       if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
         return;
       if (!Seen.insert(VD->getCanonicalDecl()).second)

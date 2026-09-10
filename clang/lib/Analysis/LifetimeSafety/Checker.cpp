@@ -93,8 +93,8 @@ static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
       T = T->getPointeeType();
     return T->getAsCXXRecordDecl();
   };
-  if (const CXXMethodDecl *MD = AP.getAsPlaceholderThis())
-    return MD->getParent();
+  if (const CXXRecordDecl *RD = AP.getPlaceholderThisRecord())
+    return RD;
   // A parameter placeholder names the object the caller passed. Like `$this` it
   // designates a whole object, so invalidating it reaches that object's owner
   // fields. getAsValueDecl() is gated on Kind::ValueDecl and returns null for a
@@ -730,7 +730,7 @@ public:
       // store is otherwise silently accepted even though the global outlives the
       // caller's object. Flag it here.
       if (const auto *GlobalEsc = dyn_cast<GlobalEscapeFact>(OEF)) {
-        bool IsThis = AP.getAsPlaceholderThis() != nullptr;
+        bool IsThis = AP.isPlaceholderThis();
         const auto *VD = AP.getAsValueDecl();
         bool IsField = VD && isa<FieldDecl>(VD);
         // A member's origin is seeded at entry with an Uninitialized loan naming
@@ -1178,7 +1178,7 @@ public:
       // every call site.
       if (!Input)
         Input = dyn_cast_if_present<FieldDecl>(AP.getAsUninitialized());
-      if (!Input && !AP.getAsPlaceholderThis())
+      if (!Input && !AP.isPlaceholderThis())
         continue;
       // Each promise is violated only by invalidating what IT covers.
       //
@@ -1200,7 +1200,7 @@ public:
       // For a C++23 explicit object member function the object IS a parameter, so
       // the object is not always spelled `$this`.
       const bool InputIsObject =
-          AP.getAsPlaceholderThis() || isa_and_present<FieldDecl>(Input) ||
+          AP.isPlaceholderThis() || isa_and_present<FieldDecl>(Input) ||
           (PVD && MD && MD->isExplicitObjectMemberFunction() &&
            MD->getNumParams() > 0 && MD->getParamDecl(0) == PVD);
       const bool ViolatesMethodPromise = MethodPromise && InputIsObject;
@@ -1260,7 +1260,7 @@ public:
     if (DeallocatesThis)
       return;
     for (LoanID LID : LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF))
-      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().getAsPlaceholderThis()) {
+      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().isPlaceholderThis()) {
         DeallocatesThis = true;
         return;
       }
@@ -1311,8 +1311,8 @@ public:
                                 const ParmVarDecl *Self) const {
     for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
-      if (const CXXMethodDecl *PThis = AP.getAsPlaceholderThis()) {
-        if (PThis->getParent()->getCanonicalDecl() == Record->getCanonicalDecl())
+      if (const CXXRecordDecl *PRD = AP.getPlaceholderThisRecord()) {
+        if (PRD->getCanonicalDecl() == Record->getCanonicalDecl())
           return true;
       } else if (const ParmVarDecl *PParam = AP.getAsPlaceholderParam()) {
         if (PParam == Self)
@@ -2521,7 +2521,7 @@ public:
     bool DestIsThis = false;
     for (LoanID LID : LoanPropagation.getPreStoreDestinationLoans(DSF)) {
       const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      if (AP.getAsPlaceholderThis())
+      if (AP.isPlaceholderThis())
         DestIsThis = true;
       else if (const ParmVarDecl *PVD = AP.getAsPlaceholderParam())
         DestParam = PVD;

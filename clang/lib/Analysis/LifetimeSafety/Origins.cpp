@@ -218,6 +218,14 @@ OriginManager::OriginManager(const AnalysisDeclContext &AC)
 }
 
 void OriginManager::initializeThisOrigins(const Decl *D) {
+  // Analyzing a DEFAULT MEMBER INITIALIZER on its own: its `this` is the object
+  // under construction, identified by the field rather than by a method.
+  if (const auto *FD = llvm::dyn_cast_or_null<FieldDecl>(D)) {
+    if (const auto *RD = llvm::dyn_cast<CXXRecordDecl>(FD->getParent()))
+      ThisOrigins = buildNodeForType(
+          AST.getPointerType(AST.getCanonicalTagType(RD)), FD);
+    return;
+  }
   const auto *MD = llvm::dyn_cast_or_null<CXXMethodDecl>(D);
   if (!MD || !MD->isInstance())
     return;
