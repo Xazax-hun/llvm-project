@@ -59,11 +59,41 @@ void Loan::dump(llvm::raw_ostream &OS) const {
 Loan *LoanManager::getOrCreateProjectedLoan(LoanID BaseLoanID,
                                             PathElement Element,
                                             const Expr *ProjectingExpr) {
+  const Loan *BaseLoan = getLoan(BaseLoanID);
+  // A projection extends a path by one element, and the result is projected again
+  // whenever the expression that produced it is re-evaluated. Around a LOOP that
+  // never settles: `p = p->next()` with a [[clang::lifetimebound]] accessor turns
+  // `n` into `n.*`, then `n.*.*`, ... -- a fresh loan each time, so the memo below
+  // never hits and the dataflow has no fixpoint to reach. It did not terminate.
+  //
+  // Cap the depth and saturate instead. Beyond the cap the element is replaced by
+  // an Interior (`.*`) step, and extending a path that already ends in one at the
+  // cap yields the same loan -- so projection becomes idempotent and the loan set
+  // is finite. `.*` is a may-match wildcard, so it denotes at least what the
+  // precise element would have: the collapse can only make paths look like they
+  // may alias more, which costs precision and never a missed report.
+  const auto &BaseElements = BaseLoan->getAccessPath().getElements();
+  // Two consecutive `.*` say nothing more than one. An Interior step absorbs ANY
+  // number of elements on either side of a comparison (elementsMayPrefixFrom), so
+  // `a.*.*` denotes exactly what `a.*` does: "somewhere inside a". Collapsing them
+  // is therefore EXACT, not an approximation -- and it is what makes projection
+  // idempotent for the shape that did not terminate, where every step is `.*`.
+  if (Element.isInterior() && !BaseElements.empty() &&
+      BaseElements.back().isInterior())
+    return const_cast<Loan *>(BaseLoan);
+  // A MIXED sequence still grows without bound -- `.*`, `.*.next`, `.*.next.*`, ...
+  // never repeats, so the collapse above never fires and there is no fixpoint. Cap
+  // the depth and saturate into a wildcard: `.*` denotes at least what the precise
+  // element would have, so this costs precision and never a missed report.
+  if (BaseElements.size() >= MaxProjectionDepth) {
+    if (BaseElements.back().isInterior())
+      return const_cast<Loan *>(BaseLoan);
+    Element = PathElement::getInterior();
+  }
   ProjectionCacheKey Key = {BaseLoanID, Element};
   auto [It, Inserted] = LoanProjectionCache.try_emplace(Key, nullptr);
   if (!Inserted)
     return It->second;
-  const Loan *BaseLoan = getLoan(BaseLoanID);
   AccessPath ExtendedPath(BaseLoan->getAccessPath(), Element);
   // Keep the base's issuing expression when it has one: it names the storage
   // being borrowed (`Y{}.a` is a borrow of the temporary `Y{}`), which is what

@@ -379,6 +379,12 @@ public:
   /// `ProjectingExpr`. Memoized: projecting the same loan with the same element
   /// must yield the same LoanID, or the loan-propagation dataflow would never
   /// reach a fixpoint.
+  /// How deep an access path may get before further projection saturates into a
+  /// single Interior (`.*`) step. Without a bound, a loop whose body projects the
+  /// result of the previous iteration produces a new, longer loan every time and
+  /// the dataflow never converges.
+  static constexpr unsigned MaxProjectionDepth = 8;
+
   Loan *getOrCreateProjectedLoan(LoanID BaseLoanID, PathElement Element,
                                  const Expr *ProjectingExpr);
 
