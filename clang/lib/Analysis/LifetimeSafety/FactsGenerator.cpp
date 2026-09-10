@@ -3013,13 +3013,14 @@ void FactsGenerator::handleExitBlock() {
   // keeps every field origin spuriously live back through the destructor body.
   // Globals still escape from a destructor, so only the field facts are skipped.
   //
-  // A member function that takes ownership of `this` ends with the object
-  // destroyed too, so the same reasoning applies to it.
-  const auto *AnalyzedFD = dyn_cast_if_present<FunctionDecl>(AC.getDecl());
-  const bool DestroysObject =
-      isa<CXXDestructorDecl>(AC.getDecl()) ||
-      (AnalyzedFD && takesOwnershipOfThis(*AnalyzedFD));
-  const bool InDestructor = DestroysObject;
+  // A function that takes ownership of `this` is NOT the same thing. It CAUSES the
+  // object's destruction; the destructor still runs afterwards, and it can read a
+  // member. A borrow stranded in one is therefore not vacuous there -- the
+  // refcount-release idiom that parks a local in a member and then deletes the
+  // object reads that member in `~T()`, which is exactly the bug this carve-out
+  // would hide. Only a destructor, the last thing that runs on the object, may skip
+  // the field facts.
+  const bool InDestructor = isa<CXXDestructorDecl>(AC.getDecl());
   for (const Origin &O : FactMgr.getOriginMgr().getOrigins())
     if (auto *FD = dyn_cast_if_present<FieldDecl>(O.getDecl())) {
       // Create FieldEscapeFacts for all field origins that remain live at exit.
@@ -3069,7 +3070,7 @@ void FactsGenerator::handleExitBlock() {
   // canonical intrusive `deref()` as a use-after-free. The same goes for the
   // escape: an object that does not outlive the call strands nothing.
   if (auto ThisOrigins = FactMgr.getOriginMgr().getThisOrigins();
-      ThisOrigins && !DestroysObject) {
+      ThisOrigins && !InDestructor) {
     CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(
         AC.getDecl()->getEndLoc(), *ThisOrigins));
     // The object outlives the call, so a borrow resting in it at exit escapes

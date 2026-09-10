@@ -374,6 +374,9 @@ private:
   /// Whether the body was seen to deallocate the implicit object. Verifies the
   /// `ownership_takes` promise below.
   bool DeallocatesThis = false;
+  /// Whether the body handed the object to something this analysis cannot see
+  /// through, so whether it is deallocated cannot be decided here.
+  bool ObjectHandedOff = false;
   /// Source locations already reported as lost-loan, to avoid duplicate
   /// soundness warnings when several uses (e.g. a DeclRefExpr and its
   /// lvalue-to-rvalue cast) share a location.
@@ -457,8 +460,10 @@ public:
           // yields an *assumed* invalidation, which is exactly the
           // `g_scene.killAll()` form.
           checkMutableGlobalMutation(IOF);
-          if (IOF->isAssumed())
+          if (IOF->isAssumed()) {
             checkAssumedInvalidation(IOF);
+            noteOpaqueObjectHandoff(IOF);
+          }
           else {
             checkInvalidation(IOF);
             if (IOF->isDeallocation()) {
@@ -1055,9 +1060,22 @@ public:
         continue;
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
       llvm::SmallVector<LoanID, 2> Invalidated;
-      for (LoanID L : HeldLoans)
+      for (LoanID L : HeldLoans) {
+        // A function declared `ownership_takes` on its implicit object says it
+        // deallocates that object, so reporting that the object was deallocated in
+        // it is reporting what the annotation licenses. The `this` placeholder is
+        // held live to function exit by the implicit use there, so without this the
+        // `delete this` at the heart of the idiom read as a use-after-free of the
+        // object. Only the OBJECT's own storage is exempt: a borrow the object
+        // holds, or a member it strands, is still reported -- the destructor runs
+        // after this function and can read one.
+        if (IOF->isDeallocation() && LoanAP(L).isPlaceholderThis() &&
+            isa<FunctionDecl>(FD) &&
+            takesOwnershipOfThis(*cast<FunctionDecl>(FD)))
+          continue;
         if (IsExactInvalidated(OID, L))
           Invalidated.push_back(L);
+      }
 
       // Conservative arm, in path terms: the borrow denotes storage that
       // *encloses* what is being invalidated. A borrow of `d` may point
@@ -1256,6 +1274,24 @@ public:
   /// -- `delete const_cast<T *>(static_cast<const T *>(this))` -- and a
   /// delegating one frees it in a callee, which reaches here as that call's own
   /// deallocation fact carrying the same loan.
+  /// Records that the object was handed to something this analysis cannot see
+  /// through -- a call that may do anything to it, including destroy it. An ASSUMED
+  /// invalidation naming the object is exactly that situation.
+  ///
+  /// The `ownership_takes` verification below must then say nothing: the release
+  /// idiom routinely defers the destruction (`ensureOnMainThread([this]{ delete
+  /// this; })`), and the delete happens in a body analyzed on its own, so demanding
+  /// to see it here reported a promise as unkept that is kept elsewhere.
+  void noteOpaqueObjectHandoff(const InvalidateOriginFact *IOF) {
+    if (ObjectHandedOff)
+      return;
+    for (LoanID LID : LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF))
+      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().isPlaceholderThis()) {
+        ObjectHandedOff = true;
+        return;
+      }
+  }
+
   void noteDeallocationOfThis(const InvalidateOriginFact *IOF) {
     if (DeallocatesThis)
       return;
@@ -3181,7 +3217,8 @@ public:
     // both hides a borrow stranded in the object here and invents a destruction in
     // every caller. A destructor needs no such check: there the object really is
     // gone.
-    if (takesOwnershipOfThis(*cast<FunctionDecl>(FD)) && !DeallocatesThis)
+    if (takesOwnershipOfThis(*cast<FunctionDecl>(FD)) && !DeallocatesThis &&
+        !ObjectHandedOff)
       SemaHelper->reportOwnershipTakesThisViolation(cast<FunctionDecl>(FD));
     if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
         MD && getImplicitObjectParamLifetimeBoundAttr(MD) &&
