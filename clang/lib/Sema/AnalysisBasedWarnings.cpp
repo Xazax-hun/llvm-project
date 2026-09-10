@@ -4195,6 +4195,19 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
         const FunctionDecl *Def = nullptr;
         if (M->isDefined(Def) && Def && !Def->isDefaulted())
           return;
+        // For a method of a class template, ask the PATTERN the same question.
+        // An instantiated member function that is never odr-used has no body
+        // instantiated, so isDefined() is false on it -- but the body is written
+        // right there in the template, which is what "a body in this
+        // translation unit" means and what the verifier walks. Without this, any
+        // uninstantiated method of an instantiated class template looked
+        // body-less and the promise looked unverifiable.
+        if (const FunctionDecl *Pattern = M->getTemplateInstantiationPattern()) {
+          const FunctionDecl *PatternDef = nullptr;
+          if (Pattern->isDefined(PatternDef) && PatternDef &&
+              !PatternDef->isDefaulted())
+            return;
+        }
         S.Diag(M->getLocation(),
                diag::warn_lifetime_safety_non_invalidating_unverifiable)
             << ((Def && Def->isDefaulted()) || M->isDefaulted() ? 0 : 1)

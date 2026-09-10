@@ -278,6 +278,33 @@ struct [[gsl::Owner]] DefaultedOutOfLine {
 DefaultedOutOfLine &
 DefaultedOutOfLine::operator=(const DefaultedOutOfLine &) = default;
 
+// A method of a class TEMPLATE whose body is written inline. An instantiated
+// member function that is never odr-used has no body instantiated, so asking
+// isDefined() of the instantiation alone says "no body" -- but the body is right
+// here, which is what "in this translation unit" means. The pattern has to be
+// asked too, or every uninstantiated method of an instantiated class template
+// looks unverifiable.
+template <typename T> struct [[gsl::Owner]] TemplatePool {
+  vector<T> v;
+  [[clang::lifetime_non_invalidating]] T &at(unsigned i) [[clang::lifetimebound]] {
+    return v[i];
+  }
+  // Out-of-line body, same question asked of the pattern's definition.
+  [[clang::lifetime_non_invalidating]] T &front() [[clang::lifetimebound]];
+};
+template <typename T> T &TemplatePool<T>::front() { return v[0]; }
+
+// Instantiating the class does NOT instantiate the method bodies.
+TemplatePool<int> g_template_pool;
+
+// Still refused when the template's method really has no body here.
+template <typename T> struct [[gsl::Owner]] TemplatePoolNoBody {
+  vector<T> v;
+  // expected-warning@+1 {{cannot be verified}}
+  [[clang::lifetime_non_invalidating]] void grow();
+};
+TemplatePoolNoBody<int> g_template_pool_no_body;
+
 // Declared here, defined in ANOTHER translation unit: nothing to verify.
 struct [[gsl::Owner]] DefinedElsewhere {
   vector<int> v;
