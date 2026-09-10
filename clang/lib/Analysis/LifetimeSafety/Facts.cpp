@@ -20,7 +20,8 @@ namespace clang::lifetimes::internal {
 /// was ISSUED into some origin that flows into it, so walking the flow edges
 /// backwards from the lvalue's origin and collecting the loans issued anywhere
 /// in that reachable set gives a superset of the loans it can hold. Each such
-/// loan names the storage the store can land in, and that storage has an origin.
+/// loan names the storage the store can land in, and that storage has an
+/// origin.
 ///
 /// Marking only these keeps the block-local fast path for everything else. The
 /// cheaper approximations are both far too coarse in practice: marking every
@@ -108,19 +109,34 @@ void FactManager::computePersistentOrigins(const CFG &C) {
         CheckOrigin(OF->getSrcOriginID());
         break;
       }
-      case Fact::Kind::Use:
-        for (const OriginNode *Cur = F->getAs<UseFact>()->getUsedOrigins(); Cur;
-             Cur = Cur->getPointeeChild())
+      case Fact::Kind::Use: {
+        // Walk the WHOLE origin subtree, field edges included -- not just the
+        // pointee chain. LiveOrigins' transfer for this fact marks every node
+        // under `children()` live, so a node it can mark has to be registered
+        // here too: liveness now travels in the persistent half only, and a
+        // field child named nowhere else in this block would be classified
+        // block-local, have its liveness dropped at the block boundary, and
+        // stop reaching an expiry in the block that issued its loan.
+        llvm::SmallVector<const OriginNode *> Work{
+            F->getAs<UseFact>()->getUsedOrigins()};
+        while (!Work.empty()) {
+          const OriginNode *Cur = Work.pop_back_val();
+          if (!Cur)
+            continue;
           CheckOrigin(Cur->getOriginID());
+          for (const OriginNode::Edge &E : Cur->children())
+            Work.push_back(E.Child);
+        }
         break;
+      }
       case Fact::Kind::KillOrigin:
         CheckOrigin(F->getAs<KillOriginFact>()->getKilledOrigin());
         break;
       case Fact::Kind::OriginEscapes:
         // An origin that escapes (via return/field/global) is defined in some
         // earlier block and read here at the escape point; it spans blocks and
-        // must participate in joins. Omitting it misclassifies an origin that is
-        // only conditionally assigned and escapes at the exit block as
+        // must participate in joins. Omitting it misclassifies an origin that
+        // is only conditionally assigned and escapes at the exit block as
         // block-local, dropping its loans at the join before the escape/expiry
         // check (e.g. a conditional store of a stack address to a global).
         CheckOrigin(F->getAs<OriginEscapesFact>()->getEscapedOriginID());
@@ -151,9 +167,9 @@ void FactManager::computePersistentOrigins(const CFG &C) {
       // InvalidateOrigin is how this was found. A structured binding expands
       // every use to the SAME MemberExpr, so one origin carries the member
       // across the whole function; with the mutation inside a loop, the
-      // invalidation names an origin projected in an earlier block, saw no loans,
-      // and reported nothing -- while the identical loop written `rec.samples`
-      // re-projects in the loop body and was reported.
+      // invalidation names an origin projected in an earlier block, saw no
+      // loans, and reported nothing -- while the identical loop written
+      // `rec.samples` re-projects in the loop body and was reported.
       case Fact::Kind::InvalidateOrigin:
         CheckOrigin(F->getAs<InvalidateOriginFact>()->getInvalidatedOrigin());
         break;
@@ -188,7 +204,6 @@ void FactManager::computePersistentOrigins(const CFG &C) {
   // may be in a different block from every other mention of the destination.
   collectDynamicStoreDestinations(FactMgr, C, PersistentOrigins);
 }
-
 
 void Fact::dump(llvm::raw_ostream &OS, const LoanManager &,
                 const OriginManager &) const {

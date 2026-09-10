@@ -161,12 +161,11 @@ public:
     const auto &LiveOriginsAnalysis = Runner.getAnalysis().getLiveOrigins();
     const auto &LoanPropagation = Runner.getAnalysis().getLoanPropagation();
 
-    LivenessMap LiveOriginsMap = LiveOriginsAnalysis.getLiveOriginsAt(P);
-
     LoanSet::Factory F;
     LoanSet Result = F.getEmptySet();
 
-    for (const auto &[OID, LI] : LiveOriginsMap) {
+    for (const auto &[OID, LI] :
+         LiveOriginsAnalysis.getLiveOriginsAt(P).allLive()) {
       LoanSet Loans = LoanPropagation.getLoans(OID, P);
       Result = clang::lifetimes::internal::utils::join(Result, Loans, F);
     }
@@ -203,7 +202,8 @@ public:
     if (!PP)
       return std::nullopt;
     std::vector<std::pair<OriginID, LivenessKind>> Result;
-    for (auto &[OID, Info] : Analysis.getLiveOrigins().getLiveOriginsAt(PP))
+    for (auto &[OID, Info] :
+         Analysis.getLiveOrigins().getLiveOriginsAt(PP).allLive())
       Result.push_back({OID, Info.Kind});
     return Result;
   }

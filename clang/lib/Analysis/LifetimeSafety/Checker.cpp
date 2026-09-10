@@ -865,8 +865,8 @@ public:
 
   void checkExpiry(const ExpireFact *EF) {
     const AccessPath &ExpiredPath = EF->getAccessPath();
-    LivenessMap Origins = LiveOrigins.getLiveOriginsAt(EF);
-    for (auto &[OID, LiveInfo] : Origins) {
+    for (auto &[OID, LiveInfo] :
+         LiveOrigins.getLiveOriginsAt(EF).allLive()) {
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, EF);
       for (LoanID HeldLoanID : HeldLoans) {
         const Loan *HeldLoan = FactMgr.getLoanMgr().getLoan(HeldLoanID);
@@ -1049,8 +1049,8 @@ public:
       return false;
     };
     // For each live origin, check if it holds an invalidated loan and report.
-    LivenessMap Origins = LiveOrigins.getLiveOriginsAt(IOF);
-    for (auto &[OID, LiveInfo] : Origins) {
+    for (auto &[OID, LiveInfo] :
+         LiveOrigins.getLiveOriginsAt(IOF).allLive()) {
       // Skip the invalidating call's own result: a borrow the call returns is
       // taken after whatever the call does, so that call cannot have invalidated
       // it. It is nonetheless live here and carries the receiver's loan (that is
@@ -1602,7 +1602,8 @@ public:
       }
       return false;
     };
-    for (auto &[OID, LiveInfo] : LiveOrigins.getLiveOriginsAt(IOF)) {
+    for (auto &[OID, LiveInfo] :
+         LiveOrigins.getLiveOriginsAt(IOF).allLive()) {
       // Skip the invalidating call's own result. A borrow the call returns is
       // taken *after* whatever the call does, so that call cannot have
       // invalidated it -- yet it is live here and carries the receiver's loan

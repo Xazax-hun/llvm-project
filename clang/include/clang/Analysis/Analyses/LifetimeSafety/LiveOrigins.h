@@ -75,6 +75,28 @@ struct LivenessInfo {
 
 using LivenessMap = utils::MapTy<OriginID, LivenessInfo>;
 
+/// The live origins at a program point, in the two halves the analysis keeps
+/// apart: those that cross block boundaries and those confined to one block.
+///
+/// Deliberately not iterable as one range: a block-local origin can still be
+/// live at a point inside its own block, so a consumer that visited only
+/// `Persistent` would silently lose reports. Use `allLive()` unless you have a
+/// reason to name a half.
+struct LiveOriginSet {
+  LivenessMap Persistent;
+  LivenessMap BlockLocal;
+
+  /// Every live origin, from both halves. This is what a consumer asking
+  /// "what is live here?" wants.
+  llvm::SmallVector<std::pair<OriginID, LivenessInfo>> allLive() const {
+    llvm::SmallVector<std::pair<OriginID, LivenessInfo>> Result;
+    for (const LivenessMap &Live : {Persistent, BlockLocal})
+      for (const auto &[OID, Info] : Live)
+        Result.emplace_back(OID, Info);
+    return Result;
+  }
+};
+
 class LiveOriginsAnalysis {
 public:
   LiveOriginsAnalysis(const CFG &C, AnalysisDeclContext &AC, FactManager &F,
@@ -83,7 +105,7 @@ public:
 
   /// Returns the set of origins that are live at a specific program point,
   /// along with the the details of the liveness.
-  LivenessMap getLiveOriginsAt(ProgramPoint P) const;
+  LiveOriginSet getLiveOriginsAt(ProgramPoint P) const;
 
   // Dump liveness values on all test points in the program.
   void dump(llvm::raw_ostream &OS,

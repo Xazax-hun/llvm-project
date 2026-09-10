@@ -18,39 +18,44 @@ namespace {
 /// It tracks which origins are live, why they're live (which UseFact),
 /// and the confidence level of that liveness.
 struct Lattice {
-  LivenessMap LiveOrigins;
+  /// Origins referenced from more than one block. Participates in joins.
+  LivenessMap Persistent;
+  /// Origins confined to a single block. Discarded at block boundaries.
+  LivenessMap BlockLocal;
 
-  Lattice() : LiveOrigins(nullptr) {};
+  Lattice() : Persistent(nullptr), BlockLocal(nullptr) {};
 
-  explicit Lattice(LivenessMap L) : LiveOrigins(L) {}
+  Lattice(LivenessMap Persistent, LivenessMap BlockLocal)
+      : Persistent(Persistent), BlockLocal(BlockLocal) {}
 
   bool operator==(const Lattice &Other) const {
-    return LiveOrigins == Other.LiveOrigins;
+    return Persistent == Other.Persistent && BlockLocal == Other.BlockLocal;
   }
 
   bool operator!=(const Lattice &Other) const { return !(*this == Other); }
 
   void dump(llvm::raw_ostream &OS, const OriginManager &OM) const {
-    if (LiveOrigins.isEmpty())
+    if (Persistent.isEmpty() && BlockLocal.isEmpty())
       OS << "  <empty>\n";
-    for (const auto &Entry : LiveOrigins) {
-      OriginID OID = Entry.first;
-      const LivenessInfo &Info = Entry.second;
-      OS << "  ";
-      OM.dump(OID, OS);
-      OS << " is ";
-      switch (Info.Kind) {
-      case LivenessKind::Must:
-        OS << "definitely";
-        break;
-      case LivenessKind::Maybe:
-        OS << "maybe";
-        break;
-      case LivenessKind::Dead:
-        llvm_unreachable("liveness kind of live origins should not be dead.");
+    for (const LivenessMap &Live : {Persistent, BlockLocal})
+      for (const auto &Entry : Live) {
+        OriginID OID = Entry.first;
+        const LivenessInfo &Info = Entry.second;
+        OS << "  ";
+        OM.dump(OID, OS);
+        OS << " is ";
+        switch (Info.Kind) {
+        case LivenessKind::Must:
+          OS << "definitely";
+          break;
+        case LivenessKind::Maybe:
+          OS << "maybe";
+          break;
+        case LivenessKind::Dead:
+          llvm_unreachable("liveness kind of live origins should not be dead.");
+        }
+        OS << " live at this point\n";
       }
-      OS << " live at this point\n";
-    }
   }
 };
 
@@ -80,18 +85,36 @@ class AnalysisImpl
 public:
   AnalysisImpl(const CFG &C, AnalysisDeclContext &AC, FactManager &F,
                LivenessMap::Factory &SF)
-      : DataflowAnalysis(C, AC, F), FactMgr(F), Factory(SF) {}
+      : DataflowAnalysis(C, AC, F), FactMgr(F), Factory(SF),
+        PersistentOrigins(F.getPersistentOrigins(C)) {}
   using DataflowAnalysis<AnalysisImpl, Lattice, Direction::Backward>::transfer;
 
   StringRef getAnalysisName() const { return "LiveOrigins"; }
 
-  Lattice getInitialState() { return Lattice(Factory.getEmptyMap()); }
+  Lattice getInitialState() {
+    return Lattice(Factory.getEmptyMap(), Factory.getEmptyMap());
+  }
+
+  /// An origin referenced from a single block need not be live outside it.
+  ///
+  /// Loans only ever enter an origin through a fact naming it as a destination --
+  /// an Issue, an OriginFlow destination, a Projection, or a dynamic store's
+  /// resolved destination -- and every one of those makes the origin persistent
+  /// when it appears in another block (see FactManager::computePersistentOrigins).
+  /// So a block-local origin holds no loans anywhere outside its own block, and
+  /// every consumer of liveness intersects it with the origin's loans. Dropping
+  /// these here keeps them out of the joins and out of the block-entry state
+  /// comparison.
+  Lattice transferAtBlockExit(Lattice L) {
+    return Lattice(L.Persistent, Factory.getEmptyMap());
+  }
 
   /// Merges two lattices by combining liveness information.
   /// When the same origin has different confidence levels, we take the lower
   /// one.
   Lattice join(Lattice L1, Lattice L2) const {
-    LivenessMap Merged = L1.LiveOrigins;
+    assert(L1.BlockLocal.isEmpty() && L2.BlockLocal.isEmpty() &&
+           "block-local origins must not reach a block boundary");
     // Take the earliest Fact to make the join hermetic and commutative.
     auto CombineCausingFact = [](CausingFactType A,
                                  CausingFactType B) -> CausingFactType {
@@ -120,11 +143,12 @@ public:
       return LivenessInfo(CombineCausingFact(L1->CausingFact, L2->CausingFact),
                           CombineLivenessKind(L1->Kind, L2->Kind));
     };
-    return Lattice(utils::join(
-        L1.LiveOrigins, L2.LiveOrigins, Factory, CombineLivenessInfo,
-        // A symmetric join is required here. If an origin is live on one
-        // branch but not the other, its confidence must be demoted to `Maybe`.
-        utils::JoinKind::Symmetric));
+    // A symmetric join is required here. If an origin is live on one branch but
+    // not the other, its confidence must be demoted to `Maybe`.
+    LivenessMap Joined =
+        utils::join(L1.Persistent, L2.Persistent, Factory, CombineLivenessInfo,
+                    utils::JoinKind::Symmetric);
+    return Lattice(Joined, Factory.getEmptyMap());
   }
 
   /// A read operation makes the origin live with definite confidence, as it
@@ -144,14 +168,12 @@ public:
     OriginID OID = Cur->getOriginID();
     Lattice Out = In;
     // Write kills liveness.
-    if (UF.isWritten()) {
-      Out = Lattice(Factory.remove(Out.LiveOrigins, OID));
-    } else {
+    if (UF.isWritten())
+      Out = removeLive(Out, OID);
+    else
       // Read makes origin live with definite confidence (dominates this
       // point).
-      Out = Lattice(Factory.add(Out.LiveOrigins, OID,
-                                LivenessInfo(&UF, LivenessKind::Must)));
-    }
+      Out = addLive(Out, OID, LivenessInfo(&UF, LivenessKind::Must));
     for (const OriginNode::Edge &E : Cur->children())
       Out = transferUseSubtree(Out, UF, E.Child);
     return Out;
@@ -160,14 +182,13 @@ public:
   /// An escaping origin (e.g., via return) makes the origin live with definite
   /// confidence, as it dominates this program point.
   Lattice transfer(Lattice In, const OriginEscapesFact &OEF) {
-    OriginID OID = OEF.getEscapedOriginID();
-    return Lattice(Factory.add(In.LiveOrigins, OID,
-                               LivenessInfo(&OEF, LivenessKind::Must)));
+    return addLive(In, OEF.getEscapedOriginID(),
+                   LivenessInfo(&OEF, LivenessKind::Must));
   }
 
   /// Issuing a new loan to an origin kills its liveness.
   Lattice transfer(Lattice In, const IssueFact &IF) {
-    return Lattice(Factory.remove(In.LiveOrigins, IF.getOriginID()));
+    return removeLive(In, IF.getOriginID());
   }
 
   /// An OriginFlow kills the liveness of the destination origin if `KillDest`
@@ -179,28 +200,26 @@ public:
     // If the destination of the flow is live, the source of the flow must also
     // be marked live before this point as its value will flow into the
     // destination.
-    if (In.LiveOrigins.contains(Dest)) {
-      const LivenessInfo *DestInfo = In.LiveOrigins.lookup(Dest);
-      assert(DestInfo);
-      Out = Lattice(Factory.add(Out.LiveOrigins, Src, *DestInfo));
-    }
+    if (const LivenessInfo *DestInfo = lookupLive(In, Dest))
+      Out = addLive(Out, Src, *DestInfo);
     if (OF.getKillDest())
-      Out = Lattice(Factory.remove(Out.LiveOrigins, Dest));
+      Out = removeLive(Out, Dest);
     return Out;
   }
 
   Lattice transfer(Lattice In, const KillOriginFact &F) {
-    return Lattice(Factory.remove(In.LiveOrigins, F.getKilledOrigin()));
+    return removeLive(In, F.getKilledOrigin());
   }
 
   Lattice transfer(Lattice In, const ExpireFact &F) {
     if (auto OID = F.getOriginID())
-      return Lattice(Factory.remove(In.LiveOrigins, *OID));
+      return removeLive(In, *OID);
     return In;
   }
 
-  LivenessMap getLiveOriginsAt(ProgramPoint P) const {
-    return getState(P).LiveOrigins;
+  LiveOriginSet getLiveOriginsAt(ProgramPoint P) const {
+    Lattice L = getState(P);
+    return LiveOriginSet{L.Persistent, L.BlockLocal};
   }
 
   // Dump liveness values on all test points in the program.
@@ -216,8 +235,32 @@ public:
   }
 
 private:
+  /// Routes an origin to the half of the lattice it belongs to.
+  bool isPersistent(OriginID OID) const {
+    return PersistentOrigins.test(OID.Value);
+  }
+
+  Lattice addLive(Lattice L, OriginID OID, LivenessInfo Info) {
+    if (isPersistent(OID))
+      return Lattice(Factory.add(L.Persistent, OID, Info), L.BlockLocal);
+    return Lattice(L.Persistent, Factory.add(L.BlockLocal, OID, Info));
+  }
+
+  Lattice removeLive(Lattice L, OriginID OID) {
+    if (isPersistent(OID))
+      return Lattice(Factory.remove(L.Persistent, OID), L.BlockLocal);
+    return Lattice(L.Persistent, Factory.remove(L.BlockLocal, OID));
+  }
+
+  const LivenessInfo *lookupLive(const Lattice &L, OriginID OID) const {
+    return isPersistent(OID) ? L.Persistent.lookup(OID)
+                             : L.BlockLocal.lookup(OID);
+  }
+
   FactManager &FactMgr;
   LivenessMap::Factory &Factory;
+  /// Shared with every other analysis via FactManager; see getPersistentOrigins.
+  const llvm::BitVector &PersistentOrigins;
 };
 } // namespace
 
@@ -235,7 +278,7 @@ LiveOriginsAnalysis::LiveOriginsAnalysis(const CFG &C, AnalysisDeclContext &AC,
 
 LiveOriginsAnalysis::~LiveOriginsAnalysis() = default;
 
-LivenessMap LiveOriginsAnalysis::getLiveOriginsAt(ProgramPoint P) const {
+LiveOriginSet LiveOriginsAnalysis::getLiveOriginsAt(ProgramPoint P) const {
   return PImpl->getLiveOriginsAt(P);
 }
 

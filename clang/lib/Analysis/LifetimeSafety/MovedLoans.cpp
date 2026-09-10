@@ -90,7 +90,7 @@ public:
       }
       return false;
     };
-    for (auto [O, _] : LiveOrigins.getLiveOriginsAt(&F))
+    for (auto [O, _] : LiveOrigins.getLiveOriginsAt(&F).allLive())
       for (LoanID LiveLoan : LoanPropagation.getLoans(O, &F)) {
         const Loan *LiveLoanPtr = LoanMgr.getLoan(LiveLoan);
         if (IsInvalidated(LiveLoanPtr->getAccessPath()))

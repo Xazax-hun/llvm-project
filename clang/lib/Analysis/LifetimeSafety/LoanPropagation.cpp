@@ -354,7 +354,8 @@ private:
   /// Boolean vector indexed by origin ID. If true, the origin appears in
   /// multiple basic blocks and must participate in join operations. If false,
   /// the origin is block-local and can be discarded at block boundaries.
-  /// Shared with every other analysis via FactManager; see getPersistentOrigins.
+  /// Shared with every other analysis via FactManager; see
+  /// getPersistentOrigins.
   const llvm::BitVector &PersistentOrigins;
 };
 } // namespace
