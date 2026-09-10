@@ -214,6 +214,38 @@ DiagnosticsEngine::DiagStateMap::File::lookup(unsigned Offset) const {
   return OnePastIt[-1].State;
 }
 
+bool DiagnosticsEngine::DiagStateMap::forEachStateRegionLoc(
+    SourceManager &SrcMgr,
+    llvm::function_ref<bool(SourceLocation)> F) const {
+  for (const auto &Entry : Files) {
+    FileID ID = Entry.first;
+    // The invalid FileID is the imaginary root file all top-level files are
+    // pretended to be included from; see getFile. It carries only
+    // FirstDiagState, which a caller checks separately via a null location.
+    if (ID.isInvalid())
+      continue;
+    SourceLocation Start = SrcMgr.getLocForStartOfFile(ID);
+    if (Start.isInvalid())
+      continue;
+    for (const DiagStatePoint &P : Entry.second.StateTransitions)
+      if (!F(Start.getLocWithOffset(P.Offset)))
+        return false;
+  }
+  return true;
+}
+
+bool DiagnosticsEngine::isIgnoredInEveryState(unsigned DiagID) const {
+  // The state the command line established. When there are no diagnostic
+  // pragmas this is the only state there is, so one lookup answers it.
+  if (!isIgnored(DiagID, SourceLocation()))
+    return false;
+  if (DiagStatesByLoc.hasOnlyInitialState() || !hasSourceManager())
+    return true;
+  return DiagStatesByLoc.forEachStateRegionLoc(
+      getSourceManager(),
+      [&](SourceLocation Loc) { return isIgnored(DiagID, Loc); });
+}
+
 DiagnosticsEngine::DiagStateMap::File *
 DiagnosticsEngine::DiagStateMap::getFile(SourceManager &SrcMgr,
                                          FileID ID) const {

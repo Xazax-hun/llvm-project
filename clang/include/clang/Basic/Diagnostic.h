@@ -454,6 +454,21 @@ private:
     /// Get the location at which a diagnostic state was last added.
     SourceLocation getCurDiagStateLoc() const { return CurDiagStateLoc; }
 
+    /// True when no `#pragma clang diagnostic` has been seen, so the state the
+    /// command line established is the only one and `lookup` yields it for
+    /// every location.
+    bool hasOnlyInitialState() const { return Files.empty(); }
+
+    /// Calls \p F once with a source location inside every region that has its
+    /// own diagnostic state, stopping early if \p F returns false. Returns
+    /// false if it stopped early.
+    ///
+    /// Together with hasOnlyInitialState this answers "is this diagnostic
+    /// enabled ANYWHERE in the translation unit?", which a location-specific
+    /// query cannot.
+    bool forEachStateRegionLoc(SourceManager &SrcMgr,
+                               llvm::function_ref<bool(SourceLocation)> F) const;
+
   private:
     friend class ASTReader;
     friend class ASTWriter;
@@ -961,6 +976,20 @@ public:
     return Diags->getDiagnosticSeverity(DiagID, Loc, *this) ==
            diag::Severity::Ignored;
   }
+
+  /// Determine whether \p DiagID is ignored in *every* diagnostic state this
+  /// translation unit establishes, `#pragma clang diagnostic` regions included.
+  ///
+  /// Prefer this over `isIgnored(DiagID, SourceLocation())` when deciding
+  /// whether a whole-translation-unit analysis can be skipped altogether. An
+  /// invalid SourceLocation resolves to the state the command line established
+  /// (see DiagStateMap::lookup, which returns FirstDiagState for it), so a
+  /// warning switched on for part of a file by a pragma is invisible to that
+  /// query -- and the analysis would be skipped even though it was asked for.
+  ///
+  /// Costs a single lookup when the translation unit contains no diagnostic
+  /// pragmas, which is the common case.
+  bool isIgnoredInEveryState(unsigned DiagID) const;
 
   /// Based on the way the client configured the DiagnosticsEngine
   /// object, classify the specified diagnostic ID into a Level, consumable by

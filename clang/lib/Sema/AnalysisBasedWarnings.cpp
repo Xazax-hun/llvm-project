@@ -4096,8 +4096,10 @@ public:
 static void LifetimeSafetyMemberIndirectionDepth(Sema &S,
                                                  TranslationUnitDecl *TU) {
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  if (Diags.isIgnored(diag::warn_lifetime_safety_multilevel_indirection,
-                      SourceLocation()))
+  // See the note on the destruction-order sweep: this must be a
+  // whole-translation-unit question.
+  if (Diags.isIgnoredInEveryState(
+          diag::warn_lifetime_safety_multilevel_indirection))
     return;
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyMemberIndirectionDepth");
 
@@ -4165,8 +4167,10 @@ static void
 LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
                                               TranslationUnitDecl *TU) {
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  if (Diags.isIgnored(diag::warn_lifetime_safety_non_invalidating_unverifiable,
-                      SourceLocation()))
+  // See the note on the destruction-order sweep: this must be a
+  // whole-translation-unit question.
+  if (Diags.isIgnoredInEveryState(
+          diag::warn_lifetime_safety_non_invalidating_unverifiable))
     return;
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyNonInvalidatingAvailability");
 
@@ -4230,8 +4234,11 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
 static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
                                                    TranslationUnitDecl *TU) {
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  if (Diags.isIgnored(diag::warn_lifetime_safety_unsafe_static_destruction,
-                      SourceLocation()))
+  // Asked of the WHOLE translation unit, not of the command-line state: a
+  // `#pragma clang diagnostic` may enable this for part of a file, and this
+  // sweep is the only thing that produces the diagnostic.
+  if (Diags.isIgnoredInEveryState(
+          diag::warn_lifetime_safety_unsafe_static_destruction))
     return;
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyDestructionOrder");
 
@@ -4412,6 +4419,14 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
 static void LifetimeSafetyFileVarInitAnalysis(
     Sema &S, TranslationUnitDecl *TU,
     clang::lifetimes::LifetimeSafetyStats &LSStats) {
+  // Gate BEFORE the traversal, not per variable inside the visitor: walking the
+  // translation unit is itself the expensive and observable part, since
+  // ShouldVisitTemplateInstantiations forces every lazily-stored declaration out
+  // of a PCH or module. Asked of the whole translation unit so that a
+  // `#pragma clang diagnostic` enabling a lifetime warning for part of a file
+  // still runs the sweep.
+  if (!lifetimes::IsLifetimeSafetyEnabledAnywhere(S))
+    return;
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyFileVarInitAnalysis");
 
   // Enumerating these declarations by hand does not work. A hand-rolled recursion

@@ -24,11 +24,10 @@
 
 namespace clang::lifetimes {
 
-inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
-  if (S.getLangOpts().DebugRunLifetimeSafety)
-    return true;
-  DiagnosticsEngine &Diags = S.getDiagnostics();
-  constexpr unsigned DiagIDs[] = {
+/// Every diagnostic the analysis can produce. Asking about all of them is how
+/// "is lifetime safety wanted here?" is answered, since any one of them being
+/// enabled requires the analysis to run.
+inline constexpr unsigned LifetimeSafetyDiagIDs[] = {
       diag::warn_lifetime_safety_use_after_scope,
       diag::warn_lifetime_safety_use_after_scope_moved,
       diag::warn_lifetime_safety_use_after_free,
@@ -86,8 +85,31 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
       diag::warn_lifetime_safety_self_referential,
       diag::warn_lifetime_safety_unsupported_store,
       diag::warn_lifetime_safety_unmodeled_expr};
-  for (unsigned DiagID : DiagIDs)
+
+inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
+  if (S.getLangOpts().DebugRunLifetimeSafety)
+    return true;
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  for (unsigned DiagID : LifetimeSafetyDiagIDs)
     if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
+      return true;
+  return false;
+}
+
+/// Whether any lifetime-safety diagnostic is enabled ANYWHERE in the
+/// translation unit.
+///
+/// This is the question a whole-translation-unit sweep must ask before it walks
+/// the AST. Asking `isIgnored(..., SourceLocation())` instead would consult only
+/// the state the command line established, so a `#pragma clang diagnostic`
+/// enabling a warning for part of a file would be missed and the sweep skipped
+/// -- silently dropping the diagnostics it alone can produce.
+inline bool IsLifetimeSafetyEnabledAnywhere(Sema &S) {
+  if (S.getLangOpts().DebugRunLifetimeSafety)
+    return true;
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  for (unsigned DiagID : LifetimeSafetyDiagIDs)
+    if (!Diags.isIgnoredInEveryState(DiagID))
       return true;
   return false;
 }
