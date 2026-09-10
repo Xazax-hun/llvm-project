@@ -20,6 +20,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/Utils.h"
 #include "clang/Analysis/AnalysisDeclContext.h"
 #include "clang/Analysis/CFG.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
@@ -955,8 +956,29 @@ public:
     return UnknownOwnershipCache;
   }
 
+  /// Bit vector indexed by origin ID. If set, the origin is referenced from more
+  /// than one basic block and must participate in join operations. If unset, it
+  /// is block-local and can be discarded at block boundaries.
+  ///
+  /// Computed once, on first use, and handed to EVERY analysis that needs it.
+  /// Sharing it is a soundness requirement rather than an optimization: if two
+  /// analyses disagreed about which origins cross block boundaries, an origin's
+  /// liveness could outlive its loans or the reverse, and the checker intersects
+  /// the two.
+  const llvm::BitVector &getPersistentOrigins(const CFG &Cfg) {
+    if (!PersistentOriginsComputed) {
+      computePersistentOrigins(Cfg);
+      PersistentOriginsComputed = true;
+    }
+    return PersistentOrigins;
+  }
+
 private:
+  void computePersistentOrigins(const CFG &Cfg);
+
   FactID NextFactID{0};
+  llvm::BitVector PersistentOrigins;
+  bool PersistentOriginsComputed = false;
   LoanManager LoanMgr;
   OriginManager OriginMgr;
   /// Facts for each CFG block, indexed by block ID.

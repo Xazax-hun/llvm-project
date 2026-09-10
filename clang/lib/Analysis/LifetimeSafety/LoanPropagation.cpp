@@ -26,182 +26,6 @@ namespace clang::lifetimes::internal {
 
 // Prepass to find persistent origins. An origin is persistent if it is
 // referenced in more than one basic block.
-/// The origins a dynamic store can WRITE, over-approximated statically.
-///
-/// A dynamic store's destinations are the loans its lvalue holds, which the
-/// prepass cannot evaluate -- but it can bound them. Every loan in that lvalue
-/// was ISSUED into some origin that flows into it, so walking the flow edges
-/// backwards from the lvalue's origin and collecting the loans issued anywhere
-/// in that reachable set gives a superset of the loans it can hold. Each such
-/// loan names the storage the store can land in, and that storage has an origin.
-///
-/// Marking only these keeps the block-local fast path for everything else. The
-/// cheaper approximations are both far too coarse in practice: marking every
-/// origin, or every declaration's origin, cost ~14x on this pass for a single
-/// lifetime_capture_by in a 60-variable, 120-block function, because in such a
-/// function the declaration origins are exactly the ones carrying loans.
-static void collectDynamicStoreDestinations(const FactManager &FactMgr,
-                                            const CFG &C,
-                                            llvm::BitVector &Out) {
-  llvm::SmallVector<const DynamicStoreFact *> Stores;
-  // Reverse flow edges: for each origin, the origins that flow into it.
-  llvm::DenseMap<unsigned, llvm::SmallVector<OriginID, 2>> FlowsInto;
-  // Loans issued to each origin.
-  llvm::DenseMap<unsigned, llvm::SmallVector<LoanID, 2>> IssuedTo;
-  for (const CFGBlock *B : C)
-    for (const Fact *F : FactMgr.getFacts(B)) {
-      if (const auto *DS = F->getAs<DynamicStoreFact>())
-        Stores.push_back(DS);
-      else if (const auto *OF = F->getAs<OriginFlowFact>())
-        FlowsInto[OF->getDestOriginID().Value].push_back(OF->getSrcOriginID());
-      else if (const auto *IF = F->getAs<IssueFact>())
-        IssuedTo[IF->getOriginID().Value].push_back(IF->getLoanID());
-    }
-  if (Stores.empty())
-    return;
-
-  const OriginManager &OM = FactMgr.getOriginMgr();
-  llvm::BitVector Seen(OM.getNumOrigins());
-  llvm::SmallVector<OriginID> Work;
-  for (const DynamicStoreFact *DS : Stores) {
-    OriginID Start = DS->getDestLValueOrigin();
-    if (!Seen.test(Start.Value)) {
-      Seen.set(Start.Value);
-      Work.push_back(Start);
-    }
-  }
-  while (!Work.empty()) {
-    OriginID Cur = Work.pop_back_val();
-    // Any loan issued into a reachable origin may reach the store's lvalue.
-    for (LoanID LID : IssuedTo.lookup(Cur.Value)) {
-      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      // Exactly the origin the routing would write, so the two stay in step:
-      // a destination the routing can reach but the prepass does not mark is
-      // one whose deposit is discarded at the next block boundary.
-      if (const OriginNode *Dest = OM.getOriginForAccessPath(AP))
-        Out.set(Dest->getOriginID().Value);
-    }
-    for (OriginID Pred : FlowsInto.lookup(Cur.Value))
-      if (!Seen.test(Pred.Value)) {
-        Seen.set(Pred.Value);
-        Work.push_back(Pred);
-      }
-  }
-}
-
-static llvm::BitVector computePersistentOrigins(const FactManager &FactMgr,
-                                                const CFG &C) {
-  llvm::TimeTraceScope TimeProfile("ComputePersistentOrigins");
-  unsigned NumOrigins = FactMgr.getOriginMgr().getNumOrigins();
-  llvm::BitVector PersistentOrigins(NumOrigins);
-
-  llvm::SmallVector<const CFGBlock *> OriginToFirstSeenBlock(NumOrigins,
-                                                             nullptr);
-  for (const CFGBlock *B : C) {
-    for (const Fact *F : FactMgr.getFacts(B)) {
-      auto CheckOrigin = [&](OriginID OID) {
-        if (PersistentOrigins.test(OID.Value))
-          return;
-        auto &FirstSeenBlock = OriginToFirstSeenBlock[OID.Value];
-        if (FirstSeenBlock == nullptr)
-          FirstSeenBlock = B;
-        if (FirstSeenBlock != B) {
-          // We saw this origin in more than one block.
-          PersistentOrigins.set(OID.Value);
-        }
-      };
-
-      switch (F->getKind()) {
-      case Fact::Kind::Issue:
-        CheckOrigin(F->getAs<IssueFact>()->getOriginID());
-        break;
-      case Fact::Kind::OriginFlow: {
-        const auto *OF = F->getAs<OriginFlowFact>();
-        CheckOrigin(OF->getDestOriginID());
-        CheckOrigin(OF->getSrcOriginID());
-        break;
-      }
-      case Fact::Kind::Use:
-        for (const OriginNode *Cur = F->getAs<UseFact>()->getUsedOrigins(); Cur;
-             Cur = Cur->getPointeeChild())
-          CheckOrigin(Cur->getOriginID());
-        break;
-      case Fact::Kind::KillOrigin:
-        CheckOrigin(F->getAs<KillOriginFact>()->getKilledOrigin());
-        break;
-      case Fact::Kind::OriginEscapes:
-        // An origin that escapes (via return/field/global) is defined in some
-        // earlier block and read here at the escape point; it spans blocks and
-        // must participate in joins. Omitting it misclassifies an origin that is
-        // only conditionally assigned and escapes at the exit block as
-        // block-local, dropping its loans at the join before the escape/expiry
-        // check (e.g. a conditional store of a stack address to a global).
-        CheckOrigin(F->getAs<OriginEscapesFact>()->getEscapedOriginID());
-        break;
-      case Fact::Kind::DynamicStore: {
-        // The origins this fact READS are ordinary reads and must be registered
-        // like any other, or a store whose block mentions them nowhere else
-        // leaves them block-local -- their loans are then dropped at the
-        // boundary, the destination lvalue looks like it holds nothing, and the
-        // store is refused as unresolvable even though it names a perfectly
-        // good object.
-        const auto *DS = F->getAs<DynamicStoreFact>();
-        CheckOrigin(DS->getDestLValueOrigin());
-        CheckOrigin(DS->getSrcOrigin());
-        // Where the store LANDS is a different question -- those origins are
-        // not named by this fact -- and is bounded once for the whole function
-        // by collectDynamicStoreDestinations, which needs the flow graph rather
-        // than one fact at a time.
-        break;
-      }
-      // Every fact below READS an origin that some earlier block may have
-      // written, so each has to register it -- the same reason spelled out for
-      // OriginEscapes and DynamicStore above. Leaving one out makes an origin
-      // mentioned nowhere else in its block look block-local, and its loans are
-      // dropped at the boundary: the fact then sees an empty origin and decides
-      // there is nothing to say.
-      //
-      // InvalidateOrigin is how this was found. A structured binding expands
-      // every use to the SAME MemberExpr, so one origin carries the member
-      // across the whole function; with the mutation inside a loop, the
-      // invalidation names an origin projected in an earlier block, saw no loans,
-      // and reported nothing -- while the identical loop written `rec.samples`
-      // re-projects in the loop body and was reported.
-      case Fact::Kind::InvalidateOrigin:
-        CheckOrigin(F->getAs<InvalidateOriginFact>()->getInvalidatedOrigin());
-        break;
-      case Fact::Kind::Projection:
-        CheckOrigin(F->getAs<ProjectionFact>()->getOriginID());
-        break;
-      case Fact::Kind::FieldStore: {
-        const auto *FS = F->getAs<FieldStoreFact>();
-        CheckOrigin(FS->getStoredOrigin());
-        CheckOrigin(FS->getContainerOrigin());
-        break;
-      }
-      case Fact::Kind::ArgumentOverlap: {
-        const auto *AO = F->getAs<ArgOverlapFact>();
-        for (OriginID OID : AO->getMutatingOrigins())
-          CheckOrigin(OID);
-        for (OriginID OID : AO->getBorrowOrigins())
-          CheckOrigin(OID);
-        break;
-      }
-      // These name no origin.
-      case Fact::Kind::MovedOrigin:
-      case Fact::Kind::Expire:
-      case Fact::Kind::TestPoint:
-      case Fact::Kind::UntrackedConstruct:
-        break;
-      }
-    }
-  }
-  // A dynamic store writes origins this per-fact walk cannot name, so its
-  // destinations are bounded separately and marked unconditionally: the store
-  // may be in a different block from every other mention of the destination.
-  collectDynamicStoreDestinations(FactMgr, C, PersistentOrigins);
-  return PersistentOrigins;
-}
 
 namespace {
 
@@ -259,7 +83,7 @@ public:
                LoanSet::Factory &LoanSetFactory)
       : DataflowAnalysis(C, AC, F), OriginLoanMapFactory(OriginLoanMapFactory),
         LoanSetFactory(LoanSetFactory),
-        PersistentOrigins(computePersistentOrigins(F, C)) {}
+        PersistentOrigins(F.getPersistentOrigins(C)) {}
 
   using Base::transfer;
 
@@ -530,7 +354,8 @@ private:
   /// Boolean vector indexed by origin ID. If true, the origin appears in
   /// multiple basic blocks and must participate in join operations. If false,
   /// the origin is block-local and can be discarded at block boundaries.
-  llvm::BitVector PersistentOrigins;
+  /// Shared with every other analysis via FactManager; see getPersistentOrigins.
+  const llvm::BitVector &PersistentOrigins;
 };
 } // namespace
 
