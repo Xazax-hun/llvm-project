@@ -222,11 +222,20 @@ public:
                                  llvm::StringRef Annotation) {
     std::optional<OriginID> StartOriginID = getOriginForDecl(StartOriginVar);
     std::vector<LoanID> EndLoanIDs = getLoansForVar(EndLoanVar);
+    const auto &LoanPropagation = Runner.getAnalysis().getLoanPropagation();
+    ProgramPoint PP = getProgramPoint(Annotation);
 
     for (LoanID LID : EndLoanIDs) {
+      // `buildOriginFlowChain` requires the target loan to be present in the
+      // start origin, so only ask about loans that actually are. One variable
+      // roots SEVERAL loans under field-sensitivity -- `tgt` and the projected
+      // `tgt.*` a lifetimebound return produces both have `tgt` as their root
+      // ValueDecl, and `getLoansForVar` matches on the root -- and typically
+      // only one of them reaches the start origin.
+      if (!LoanPropagation.getLoans(*StartOriginID, PP).contains(LID))
+        continue;
       const llvm::SmallVector<OriginID> OriginFlowChain =
-          Runner.getAnalysis().getLoanPropagation().buildOriginFlowChain(
-              getProgramPoint(Annotation), *StartOriginID, LID);
+          LoanPropagation.buildOriginFlowChain(PP, *StartOriginID, LID);
       if (!OriginFlowChain.empty())
         return OriginFlowChain;
     }
@@ -2003,7 +2012,16 @@ TEST_F(LifetimeAnalysisTest, BuildOriginFlowChainWithErrorTargetLoan) {
   )");
 
 #if !defined(NDEBUG) && GTEST_HAS_DEATH_TEST
-  EXPECT_DEATH(Helper->buildOriginFlowChainInOneBlock("s", "a", "after_use"),
+  // Call `buildOriginFlowChain` directly rather than through
+  // `buildOriginFlowChainInOneBlock`, which filters out loans the start origin
+  // does not hold: the point here is that violating that precondition asserts.
+  ProgramPoint PP = Helper->getProgramPoint("after_use");
+  std::optional<OriginID> StartOID = Helper->getOriginForDecl("s");
+  std::vector<LoanID> LoansToA = Helper->getLoansForVar("a");
+  ASSERT_TRUE(StartOID.has_value());
+  ASSERT_FALSE(LoansToA.empty());
+  EXPECT_DEATH(Runner->getAnalysis().getLoanPropagation().buildOriginFlowChain(
+                   PP, *StartOID, LoansToA.front()),
                "TargetLoan must be present in the StartOID at the StartPoint");
 #endif
 }
