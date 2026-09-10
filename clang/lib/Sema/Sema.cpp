@@ -1325,6 +1325,13 @@ void Sema::ActOnEndOfTranslationUnit() {
       UnusedFileScopedDecls.end());
 
   if (TUKind == TU_Prefix) {
+    // The whole-translation-unit lifetime-safety sweeps DO need to run here.
+    // A PCH's prefix is the complete content of the header being precompiled,
+    // and those sweeps analyze only declarations of the current translation
+    // unit -- so this is the one place their findings can be attributed to the
+    // code that contains them instead of to every consumer of the PCH.
+    AnalysisWarnings.IssueLifetimeSafetyTUWarnings(
+        Context.getTranslationUnitDecl());
     // Translation unit prefixes don't need any of the checking below.
     if (!PP.isIncrementalProcessingEnabled())
       TUScope = nullptr;

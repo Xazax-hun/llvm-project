@@ -117,6 +117,15 @@ public:
   // Issue warnings that require whole-translation-unit analysis.
   void IssueWarnings(TranslationUnitDecl *D);
 
+  // The lifetime-safety sweeps that need the whole translation unit, and only
+  // those. Called for a translation unit PREFIX -- a PCH or preamble being
+  // written -- which returns from ActOnEndOfTranslationUnit long before
+  // IssueWarnings above. The sweeps analyze only declarations belonging to the
+  // current translation unit, so unless they run while the PCH is produced, the
+  // hazards they alone can find are reported in every consumer instead of once
+  // where the code is written.
+  void IssueLifetimeSafetyTUWarnings(TranslationUnitDecl *D);
+
   // Run *only* the lifetime safety analysis on an implicitly-defined function
   // body (e.g. a defaulted/implicit default constructor). Such functions never
   // reach IssueWarnings, yet a default member initializer applied by an

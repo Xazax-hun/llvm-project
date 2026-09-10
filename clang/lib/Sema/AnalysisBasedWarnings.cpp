@@ -4142,7 +4142,19 @@ static void LifetimeSafetyMemberIndirectionDepth(Sema &S,
       return true;
     }
   };
-  Walker(S).TraverseDecl(TU);
+  // Only the declarations that belong to THIS translation unit. Iterating
+  // TU->decls() splices in every lazily-stored declaration from a PCH or
+  // module, which analyzes another translation unit's code: the hazard is then
+  // reported by every consumer rather than once where it is written, and the
+  // load is observable to -error-on-deserialized-decl. noload_decls avoids
+  // forcing the load; the isFromASTFile check makes the choice deterministic
+  // even when something else already loaded them.
+  {
+    Walker W(S);
+    for (Decl *D : TU->noload_decls())
+      if (!D->isFromASTFile())
+        W.TraverseDecl(D);
+  }
 }
 
 /// Refuses a '[[clang::lifetime_non_invalidating]]' promise the body verifier
@@ -4220,7 +4232,19 @@ LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
       return true;
     }
   };
-  Walker(S).TraverseDecl(TU);
+  // Only the declarations that belong to THIS translation unit. Iterating
+  // TU->decls() splices in every lazily-stored declaration from a PCH or
+  // module, which analyzes another translation unit's code: the hazard is then
+  // reported by every consumer rather than once where it is written, and the
+  // load is observable to -error-on-deserialized-decl. noload_decls avoids
+  // forcing the load; the isFromASTFile check makes the choice deterministic
+  // even when something else already loaded them.
+  {
+    Walker W(S);
+    for (Decl *D : TU->noload_decls())
+      if (!D->isFromASTFile())
+        W.TraverseDecl(D);
+  }
 }
 
 /// Enforces static destruction order safety across the TU.
@@ -4399,7 +4423,19 @@ static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
       return true;
     }
   };
-  Walker(S).TraverseDecl(TU);
+  // Only the declarations that belong to THIS translation unit. Iterating
+  // TU->decls() splices in every lazily-stored declaration from a PCH or
+  // module, which analyzes another translation unit's code: the hazard is then
+  // reported by every consumer rather than once where it is written, and the
+  // load is observable to -error-on-deserialized-decl. noload_decls avoids
+  // forcing the load; the isFromASTFile check makes the choice deterministic
+  // even when something else already loaded them.
+  {
+    Walker W(S);
+    for (Decl *D : TU->noload_decls())
+      if (!D->isFromASTFile())
+        W.TraverseDecl(D);
+  }
 }
 
 /// Runs the lifetime safety analysis over every namespace-scope variable whose
@@ -4597,7 +4633,19 @@ static void LifetimeSafetyFileVarInitAnalysis(
             VD, lifetimes::BailoutReason::CFGUnavailable);
     }
   };
-  Walker(S, LSStats).TraverseDecl(TU);
+  // Only the declarations that belong to THIS translation unit. Iterating
+  // TU->decls() splices in every lazily-stored declaration from a PCH or
+  // module, which analyzes another translation unit's code: the hazard is then
+  // reported by every consumer rather than once where it is written, and the
+  // load is observable to -error-on-deserialized-decl. noload_decls avoids
+  // forcing the load; the isFromASTFile check makes the choice deterministic
+  // even when something else already loaded them.
+  {
+    Walker W(S, LSStats);
+    for (Decl *D : TU->noload_decls())
+      if (!D->isFromASTFile())
+        W.TraverseDecl(D);
+  }
 }
 
 static bool shouldRunUnsafeBufferUsageAnalysis(const Sema &S,
@@ -4670,14 +4718,22 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
       S.getLangOpts().EnableLifetimeSafetyTUAnalysis)
     LifetimeSafetyTUAnalysis(S, TU, LSStats);
 
+  IssueLifetimeSafetyTUWarnings(TU);
+}
+
+void clang::sema::AnalysisBasedWarnings::IssueLifetimeSafetyTUWarnings(
+    TranslationUnitDecl *TU) {
+  if (!TU || !S.getLangOpts().CPlusPlus)
+    return;
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  if (S.hasUncompilableErrorOccurred() || Diags.getIgnoreAllWarnings())
+    return;
   // Namespace-scope dynamic initializers, in both modes: neither the per-
-  // function path nor the TU sweeps above reach them.
-  if (S.getLangOpts().CPlusPlus) {
-    LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
-    LifetimeSafetyDestructionOrderAnalysis(S, TU);
-    LifetimeSafetyNonInvalidatingBodyAvailability(S, TU);
-    LifetimeSafetyMemberIndirectionDepth(S, TU);
-  }
+  // function path nor the TU sweeps reach them.
+  LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
+  LifetimeSafetyDestructionOrderAnalysis(S, TU);
+  LifetimeSafetyNonInvalidatingBodyAvailability(S, TU);
+  LifetimeSafetyMemberIndirectionDepth(S, TU);
 }
 
 void clang::sema::AnalysisBasedWarnings::
