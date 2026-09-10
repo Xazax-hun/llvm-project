@@ -104,6 +104,12 @@ template <typename Tag>
 struct DenseMapInfo<clang::lifetimes::internal::utils::ID<Tag>> {
   using ID = clang::lifetimes::internal::utils::ID<Tag>;
 
+  // Upstream dropped this as unused (#201987); this branch keys DenseMaps on a
+  // LoanID (the projection cache), so it is needed here.
+  static inline ID getEmptyKey() {
+    return {DenseMapInfo<uint32_t>::getEmptyKey()};
+  }
+
   static unsigned getHashValue(const ID &Val) {
     return DenseMapInfo<uint32_t>::getHashValue(Val.Value);
   }
