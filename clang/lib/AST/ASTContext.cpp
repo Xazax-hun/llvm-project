@@ -9860,7 +9860,8 @@ void ASTContext::getObjCEncodingForStructureImpl(RecordDecl *RDecl,
 
   for (; CurLayObj != FieldOrBaseOffsets.end(); ++CurLayObj) {
 #ifndef NDEBUG
-    assert(CurOffs <= CurLayObj->first);
+    // A [[no_unique_address]] member may sit in a previous member's tail
+    // padding, so the next offset can precede the running one.
     if (CurOffs < CurLayObj->first) {
       uint64_t padding = CurLayObj->first - CurOffs;
       // FIXME: There doesn't seem to be a way to indicate in the encoding that
