@@ -257,7 +257,7 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
       if (ParmVarDecl *P = FD->getParamDecl(0u);
           !P->hasAttr<LifetimeBoundAttr>())
         P->addAttr(
-            LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
+            LifetimeBoundAttr::CreateImplicit(Context, LifetimeBoundAttr::Object, FD->getLocation()));
       break;
     default:
       break;
@@ -283,7 +283,7 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
                   Ctor->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() &&
                   Ctor->getParamDecl(I)->getType()->isReferenceType())
                 FD->getParamDecl(I)->addAttr(LifetimeBoundAttr::CreateImplicit(
-                    Context, FD->getLocation()));
+                    Context, LifetimeBoundAttr::Object, FD->getLocation()));
     return;
   }
 
@@ -302,7 +302,7 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
         //   basic_string_view(const CharT* s);
         //   basic_string_view(const CharT* s, size_type count);
         Param->addAttr(
-            LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
+            LifetimeBoundAttr::CreateImplicit(Context, LifetimeBoundAttr::Object, FD->getLocation()));
       } else if (CRD->getName() == "span") {
         // Construct from a pointer/iterator to the elements
         //   span(It first, size_type count);
@@ -317,7 +317,7 @@ void Sema::inferLifetimeBoundAttribute(FunctionDecl *FD) {
         if (PT->isPointerType() ||
             (LRT && LRT->getPointeeType().IgnoreParens()->isArrayType()))
           Param->addAttr(
-              LifetimeBoundAttr::CreateImplicit(Context, FD->getLocation()));
+              LifetimeBoundAttr::CreateImplicit(Context, LifetimeBoundAttr::Object, FD->getLocation()));
       }
     }
   }

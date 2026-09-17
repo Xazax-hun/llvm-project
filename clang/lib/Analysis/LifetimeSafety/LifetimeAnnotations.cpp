@@ -107,6 +107,11 @@ bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD) {
   return isNormalAssignmentOperator(FD);
 }
 
+bool implicitObjectParamIsPointeeBound(const FunctionDecl *FD) {
+  const auto *A = getImplicitObjectParamLifetimeBoundAttr(FD);
+  return A && A->getBoundTo() == LifetimeBoundAttr::Pointee;
+}
+
 bool carriesDestructionOrderPromise(const FunctionDecl *FD) {
   if (!FD)
     return false;

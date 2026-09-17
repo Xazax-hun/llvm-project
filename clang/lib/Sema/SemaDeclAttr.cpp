@@ -4437,6 +4437,36 @@ LifetimeCaptureByAttr *Sema::ParseLifetimeCaptureByAttr(const ParsedAttr &AL,
   return CapturedBy;
 }
 
+static void handleLifetimeBoundAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  // The optional argument says what the result is bound to: the annotated
+  // entity itself (the default) or whatever it refers TO. See LifetimeBoundDocs.
+  LifetimeBoundAttr::BoundKind Bound = LifetimeBoundAttr::Object;
+  if (AL.getNumArgs() > 0) {
+    if (!AL.isArgIdent(0)) {
+      S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+          << AL << AANT_ArgumentIdentifier;
+      return;
+    }
+    IdentifierInfo *II = AL.getArgAsIdent(0)->getIdentifierInfo();
+    if (!LifetimeBoundAttr::ConvertStrToBoundKind(II->getName(), Bound)) {
+      S.Diag(AL.getLoc(), diag::warn_attribute_type_not_supported) << AL << II;
+      return;
+    }
+    // This handler only ever sees an ordinary parameter -- the implicit object
+    // parameter spelling is a TYPE attribute and goes through
+    // HandleLifetimeBoundAttr in SemaType.cpp. `pointee` is modeled for the
+    // implicit object only, so accepting it here would silently mean `object`:
+    // reject it rather than let an annotation say something the analysis does
+    // not read.
+    if (Bound == LifetimeBoundAttr::Pointee) {
+      S.Diag(AL.getLoc(), diag::err_lifetimebound_pointee_not_on_parameter)
+          << AL.getRange();
+      return;
+    }
+  }
+  D->addAttr(::new (S.Context) LifetimeBoundAttr(S.Context, AL, Bound));
+}
+
 static void handleLifetimeCaptureByAttr(Sema &S, Decl *D,
                                         const ParsedAttr &AL) {
   // Do not allow multiple attributes.
@@ -7837,6 +7867,9 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_Callback:
     handleCallbackAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_LifetimeBound:
+    handleLifetimeBoundAttr(S, D, AL);
     break;
   case ParsedAttr::AT_LifetimeCaptureBy:
     handleLifetimeCaptureByAttr(S, D, AL);

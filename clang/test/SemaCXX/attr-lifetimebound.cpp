@@ -16,7 +16,18 @@ namespace usage_invalid {
     int (* [[clang::lifetimebound]] attr_on_func_ptr)(); // expected-error {{'clang::lifetimebound' attribute only applies to parameters and implicit object parameters}}
     void void_return_member() [[clang::lifetimebound]]; // expected-error {{'lifetimebound' attribute cannot be applied to an implicit object parameter of a function that returns void; did you mean 'lifetime_capture_by(X)'}}
   };
-  int *attr_with_param(int &param [[clang::lifetimebound(42)]]); // expected-error {{takes no arguments}}
+  // The optional argument names what the result is bound to, and must be one of
+  // the two identifiers.
+  int *attr_with_param(int &param [[clang::lifetimebound(42)]]); // expected-error {{'clang::lifetimebound' attribute requires an identifier}}
+  int *attr_bad_ident(int &param [[clang::lifetimebound(nonsense)]]); // expected-warning {{'clang::lifetimebound' attribute argument not supported: 'nonsense'}}
+  int *attr_object(int &param [[clang::lifetimebound(object)]]);
+  // 'pointee' is modeled for the implicit object parameter only; on an ordinary
+  // parameter it would silently mean 'object', so it is rejected.
+  int *attr_pointee(int &param [[clang::lifetimebound(pointee)]]); // expected-error {{'lifetimebound(pointee)' is only supported on the implicit object parameter}}
+  struct PointeeOnObject {
+    const char *m_p;
+    const char *ok() const [[clang::lifetimebound(pointee)]] { return m_p; }
+  };
 
   void attr_on_ptr_arg(int * [[clang::lifetimebound]] ptr); // expected-error {{'clang::lifetimebound' attribute only applies to parameters and implicit object parameters}}
   static_assert((int [[clang::lifetimebound]]) 12); // expected-error {{'clang::lifetimebound' attribute only applies to parameters and implicit object parameters}}

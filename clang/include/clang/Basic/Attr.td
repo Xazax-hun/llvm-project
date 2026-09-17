@@ -2125,8 +2125,15 @@ def ExplicitInit : InheritableAttr {
 def LifetimeBound : DeclOrTypeAttr {
   let Spellings = [Clang<"lifetimebound", 0>];
   let Subjects = SubjectList<[ParmVar, ImplicitObjectParameter], ErrorDiag>;
+  // Which storage the result is bound to. `object` (the default, and what a
+  // bare `[[clang::lifetimebound]]` means) says the result may refer to the
+  // annotated entity itself -- right for an owner, whose buffer lives in it.
+  // `pointee` says the result refers to whatever the annotated entity refers
+  // TO, and not to the entity: right for a view, which can be copied and
+  // destroyed without invalidating what it hands out.
+  let Args = [EnumArgument<"BoundTo", "BoundKind", /*is_string=*/false,
+              ["object", "pointee"], ["Object", "Pointee"], /*opt=*/1>];
   let Documentation = [LifetimeBoundDocs];
-  let SimpleHandler = 1;
 }
 
 def LifetimeCaptureBy : DeclOrTypeAttr {

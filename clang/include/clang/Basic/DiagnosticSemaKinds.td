@@ -10967,6 +10967,9 @@ def err_lifetimebound_no_object_param : Error<
   "'lifetimebound' attribute cannot be applied; "
   "%select{non-|static |explicit object }0"
   "member function has no implicit object parameter">;
+def err_lifetimebound_pointee_not_on_parameter : Error<
+  "'lifetimebound(pointee)' is only supported on the implicit object parameter; "
+  "on an ordinary parameter, use '[[clang::lifetimebound]]'">;
 def err_lifetimebound_ctor_dtor : Error<
   "'lifetimebound' attribute cannot be applied to a "
   "%select{constructor|destructor}0">;
@@ -11149,7 +11152,8 @@ def warn_lifetime_safety_dangling_global_moved
 def warn_lifetime_safety_lifetimebound_violation
     : Warning<"could not verify that %select{the return value|the constructed "
               "object}0 can be lifetime bound to %select{an unnamed parameter|"
-              "'%2'|the implicit this parameter}1">,
+              "'%2'|the implicit this parameter|what the implicit this parameter "
+              "refers to}1">,
       InGroup<LifetimeSafetyLifetimeboundViolation>,
       DefaultIgnore;
 def warn_lifetime_safety_undeclared_field_capture
@@ -11308,8 +11312,11 @@ def warn_lifetime_safety_unannotated_param
 def warn_lifetime_safety_unannotated_this_return
     : Warning<"member function returning %0 is not annotated for lifetime "
               "safety; the returned borrow's lifetime is unspecified, so mark "
-              "the implicit object 'lifetimebound' or the function "
-              "'lifetime_immortal'">,
+              "the implicit object %select{'lifetimebound' (if the result refers "
+              "to the object) or 'lifetimebound(pointee)' (if it refers to what "
+              "the object refers to)|'lifetimebound'|'lifetimebound(pointee)', "
+              "since the result refers to what the object refers to and not to "
+              "the object}1 or the function 'lifetime_immortal'">,
       InGroup<LifetimeSafetyUnannotatedIndirection>,
       DefaultIgnore;
 def warn_lifetime_safety_this_escapes_to_global

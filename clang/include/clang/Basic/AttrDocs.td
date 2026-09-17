@@ -4859,6 +4859,39 @@ function by writing the attribute after the function type:
       const char *data() const [[clang::lifetimebound]];
     };
 
+On the implicit object parameter the attribute takes an optional argument saying
+which storage the result is bound to:
+
+* ``[[clang::lifetimebound]]``, equivalently ``[[clang::lifetimebound(object)]]``:
+  the result may refer to the object itself. This is right for an *owner*, whose
+  storage the result points into -- destroying the owner invalidates the result.
+* ``[[clang::lifetimebound(pointee)]]``: the result refers to whatever the object
+  refers **to**, and not to the object. This is right for a *view*: a view can be
+  copied, and the original destroyed, without invalidating what it handed out.
+
+.. code-block:: c++
+
+    struct [[gsl::Owner(char)]] string {
+      char *m_buf;
+      // The buffer lives in the string, so the result dies with it.
+      const char *data() const [[clang::lifetimebound]];
+    };
+
+    struct [[gsl::Pointer(char)]] string_view {
+      const char *m_p;
+      // The result points at storage the view does not own, so it outlives the
+      // view. Plain ``lifetimebound`` here would claim the result dies with the
+      // view, and a by-value ``string_view`` parameter dies at every call --
+      // so storing ``v.data()`` anywhere would be reported as dangling.
+      const char *data() const [[clang::lifetimebound(pointee)]];
+    };
+
+``pointee`` is currently supported on the implicit object parameter only; on an
+ordinary parameter it is rejected rather than silently treated as ``object``.
+
+Where the body is visible, Clang verifies which relationship actually holds and
+reports a mismatch under ``-Wlifetime-safety-lifetimebound-violation``.
+
 This attribute is inspired by the C++ committee paper `P0936R0
 <http://wg21.link/p0936r0>`_, but does not affect whether temporary objects
 have their lifetimes extended.

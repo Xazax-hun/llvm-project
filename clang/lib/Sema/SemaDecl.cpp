@@ -14916,7 +14916,8 @@ StmtResult Sema::ActOnCXXForRangeIdentifier(Scope *S, SourceLocation IdentLoc,
 void Sema::addLifetimeBoundToImplicitThis(CXXMethodDecl *MD) {
   if (!MD || lifetimes::implicitObjectParamIsLifetimeBound(MD))
     return;
-  auto *Attr = LifetimeBoundAttr::CreateImplicit(Context, MD->getLocation());
+  auto *Attr = LifetimeBoundAttr::CreateImplicit(
+      Context, LifetimeBoundAttr::Object, MD->getLocation());
   QualType MethodType = MD->getType();
   QualType AttributedType =
       Context.getAttributedType(Attr, MethodType, MethodType);

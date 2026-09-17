@@ -278,7 +278,11 @@ public:
   // whose implicit object is not [[clang::lifetimebound]] and which is not
   // [[clang::lifetime_immortal]], leaving the returned borrow's lifetime
   // unspecified for callers.
-  virtual void reportUnannotatedThisReturn(const CXXMethodDecl *MD) {}
+  /// \p Which selects the annotation to advise: 0 both (the body does not say,
+  /// or both relationships occur), 1 plain 'lifetimebound', 2
+  /// 'lifetimebound(pointee)'.
+  virtual void reportUnannotatedThisReturn(const CXXMethodDecl *MD,
+                                           unsigned Which) {}
 
   // Reports a borrow of the implicit object ('this', \p IsField false) or one of
   // its fields (\p IsField true) escaping to global or static storage \p Global

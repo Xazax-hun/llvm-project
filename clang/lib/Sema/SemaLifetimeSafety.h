@@ -458,9 +458,14 @@ public:
     const auto *Attr =
         getImplicitObjectParamLifetimeBoundAttr(MDWithLifetimebound);
     assert(Attr && "Expected lifetimebound attribute");
+    // '(pointee)' promises a different relationship, so naming the object here
+    // would describe a check that was not the one performed.
+    unsigned BoundTo = Attr->getBoundTo() == LifetimeBoundAttr::Pointee
+                           ? /*what this refers to*/ 3
+                           : /*the implicit this parameter*/ 2;
     S.Diag(Attr->getLocation(),
            diag::warn_lifetime_safety_lifetimebound_violation)
-        << /*the return value*/ 0 << 2 << "" << Attr->getRange();
+        << /*the return value*/ 0 << BoundTo << "" << Attr->getRange();
   }
 
   void reportCaptureByViolation(const ParmVarDecl *PVD) override {
@@ -701,10 +706,11 @@ public:
         << PVD->getSourceRange();
   }
 
-  void reportUnannotatedThisReturn(const CXXMethodDecl *MD) override {
+  void reportUnannotatedThisReturn(const CXXMethodDecl *MD,
+                                   unsigned Which) override {
     S.Diag(MD->getLocation(),
            diag::warn_lifetime_safety_unannotated_this_return)
-        << MD->getReturnType() << MD->getSourceRange();
+        << MD->getReturnType() << Which << MD->getSourceRange();
   }
 
   void reportThisEscapesToGlobal(SourceLocation Loc, bool IsField,

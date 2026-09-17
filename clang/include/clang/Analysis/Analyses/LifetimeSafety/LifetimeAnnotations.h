@@ -89,6 +89,19 @@ getImplicitObjectParamLifetimeBoundAttr(const FunctionDecl *FD);
 /// method or because it's a normal assignment operator.
 bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD);
 
+/// Returns true if the implicit object parameter carries
+/// '[[clang::lifetimebound(pointee)]]': the result refers to whatever the object
+/// refers TO, not to the object.
+///
+/// This is the view case. `std::string::data()` hands out a pointer into storage
+/// the string owns, so its result dies with the string -- that is plain
+/// 'lifetimebound'. A view's accessor hands out a pointer to storage the view
+/// does not own, so copying the view and destroying the original leaves the
+/// result valid; binding it to the view object instead would report a dangle
+/// that cannot happen, and does so most visibly when the view is a by-value
+/// parameter (whose own storage always dies with the call).
+bool implicitObjectParamIsPointeeBound(const FunctionDecl *FD);
+
 /// Returns true if \p FD promises '[[clang::destruction_order_safe]]' -- that it
 /// does not observe another object of static storage duration, and so may run at
 /// shutdown in any order.

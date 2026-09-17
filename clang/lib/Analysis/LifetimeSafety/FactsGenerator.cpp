@@ -4151,8 +4151,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     // as the ordinary parameter it is instead.
     if (Method->isExplicitObjectMemberFunction())
       return false;
-    return I == 0 &&
-           isGslPointerType(Method->getFunctionObjectParameterType()) &&
+    if (I != 0)
+      return false;
+    // '[[clang::lifetimebound(pointee)]]' asks for exactly this branch, so it
+    // needs neither the [[gsl::Pointer]] annotation nor the accessor-name
+    // heuristic that shouldTrackImplicitObjectArg applies. Saying it explicitly
+    // is the only way to get view semantics for a type the heuristic does not
+    // recognize -- and the only way that does not depend on the method's NAME.
+    if (implicitObjectParamIsPointeeBound(Method))
+      return true;
+    return isGslPointerType(Method->getFunctionObjectParameterType()) &&
            shouldTrackImplicitObjectArg(*Args[0], Method,
                                         /*RunningUnderLifetimeSafety=*/true);
   };

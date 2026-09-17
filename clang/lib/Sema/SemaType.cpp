@@ -8982,9 +8982,31 @@ static void HandleLifetimeBoundAttr(TypeProcessingState &State,
                                     QualType &CurType,
                                     ParsedAttr &Attr) {
   if (State.getDeclarator().isDeclarationOfFunction()) {
+    Sema &S = State.getSema();
+    // The optional argument says what the result is bound to. It has to be read
+    // here rather than left to createSimpleAttr, which discards arguments -- an
+    // unrecognized or dropped spelling would silently mean `object` and make the
+    // annotation more constraining than the author asked for.
+    LifetimeBoundAttr::BoundKind Bound = LifetimeBoundAttr::Object;
+    if (Attr.getNumArgs() > 0) {
+      if (!Attr.isArgIdent(0)) {
+        S.Diag(Attr.getLoc(), diag::err_attribute_argument_type)
+            << Attr << AANT_ArgumentIdentifier;
+        Attr.setInvalid();
+        return;
+      }
+      IdentifierInfo *II = Attr.getArgAsIdent(0)->getIdentifierInfo();
+      if (!LifetimeBoundAttr::ConvertStrToBoundKind(II->getName(), Bound)) {
+        S.Diag(Attr.getLoc(), diag::warn_attribute_type_not_supported)
+            << Attr << II;
+        Attr.setInvalid();
+        return;
+      }
+    }
+    Attr.setUsedAsTypeAttr();
     CurType = State.getAttributedType(
-        createSimpleAttr<LifetimeBoundAttr>(State.getSema().Context, Attr),
-        CurType, CurType);
+        ::new (S.Context) LifetimeBoundAttr(S.Context, Attr, Bound), CurType,
+        CurType);
     return;
   }
   State.getSema().Diag(Attr.getLoc(), diag::err_attribute_wrong_decl_type)

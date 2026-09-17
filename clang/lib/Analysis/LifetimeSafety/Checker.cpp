@@ -358,6 +358,23 @@ private:
   llvm::DenseMap<const ParmVarDecl *, const ParmVarDecl *>
       UndeclaredFieldCaptures;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
+
+  /// What the borrow this function RETURNS was rooted at, so the advice for an
+  /// unannotated method can name the one annotation that fits instead of listing
+  /// both. `Object` means it borrows the object itself ('lifetimebound');
+  /// `Referent` means it hands back what the object refers to
+  /// ('lifetimebound(pointee)'). Stays `None` when there is no body to look at,
+  /// and becomes `Both` when the two can both happen, in which case neither
+  /// annotation alone describes the function.
+  enum class ReturnedBorrow { None, Object, Referent, Both };
+  ReturnedBorrow ReturnedBorrowKind = ReturnedBorrow::None;
+
+  void noteReturnedBorrow(ReturnedBorrow K) {
+    if (ReturnedBorrowKind == ReturnedBorrow::None)
+      ReturnedBorrowKind = K;
+    else if (ReturnedBorrowKind != K)
+      ReturnedBorrowKind = ReturnedBorrow::Both;
+  }
   /// For a [[clang::lifetime_immortal]] function: the worst offending subject
   /// its return value borrows (0 = local/temporary, 1 = parameter, 2 = this);
   /// -1 when none seen. A non-immortal return makes the immortal promise a lie.
@@ -719,6 +736,18 @@ public:
     };
     auto CheckImplicitThis = [&](const CXXMethodDecl *MD) {
       if (auto *ReturnEsc = dyn_cast<ReturnEscapeFact>(OEF)) {
+        // A borrow rooted at the OBJECT is what verifies plain 'lifetimebound'.
+        // It REFUTES '[[clang::lifetimebound(pointee)]]', which promises the
+        // result refers to the object's referent and not to the object, so a
+        // result that does borrow the object is a broken promise. Returning here
+        // leaves it out of VerifiedLiftimeboundEscapes, which is what makes
+        // reportLifetimeboundViolations report it -- otherwise a `pointee`
+        // annotation on a method handing out its own storage was accepted
+        // silently, and callers would then treat that borrow as outliving the
+        // object.
+        noteReturnedBorrow(ReturnedBorrow::Object);
+        if (implicitObjectParamIsPointeeBound(MD))
+          return;
         if (implicitObjectParamIsLifetimeBound(MD))
           VerifiedLiftimeboundEscapes.insert(MD);
         else
@@ -836,6 +865,22 @@ public:
         CheckParam(PVD, /*IsMoved=*/MovedAtEscape.lookup(LID));
       } else if (const auto *MD = AP.getAsPlaceholderThis())
         CheckImplicitThis(MD);
+      else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
+        // '[[clang::lifetimebound(pointee)]]' promises the result refers to what
+        // the object refers TO, so what verifies it is different from what
+        // verifies plain 'lifetimebound'. A member's origin is seeded at entry
+        // with an Uninitialized loan naming that field -- that seed IS the borrow
+        // the caller left in the member -- so returning it is the promise kept.
+        // The loan is rooted at neither `this` nor a parameter, which is why
+        // neither branch above sees it, and the promise was reported unverifiable
+        // for every honest view accessor.
+        if (isa<ReturnEscapeFact>(OEF) &&
+            isa_and_present<FieldDecl>(AP.getAsUninitialized())) {
+          noteReturnedBorrow(ReturnedBorrow::Referent);
+          if (implicitObjectParamIsPointeeBound(MD))
+            VerifiedLiftimeboundEscapes.insert(MD);
+        }
+      }
     }
   }
 
@@ -2799,7 +2844,24 @@ public:
     for (const ParmVarDecl *PVD : MD->parameters())
       if (PVD->hasAttr<LifetimeBoundAttr>())
         return;
-    SemaHelper->reportUnannotatedThisReturn(MD);
+    // Name the annotation the body actually calls for, when the body says. A
+    // method handing out what the object refers to needs the `pointee` form, and
+    // being told to write plain 'lifetimebound' is what leads an author to
+    // over-constrain it -- reported as a dangling field at every by-value call.
+    unsigned Which = 0;
+    switch (ReturnedBorrowKind) {
+    case ReturnedBorrow::Object:
+      Which = 1;
+      break;
+    case ReturnedBorrow::Referent:
+      Which = 2;
+      break;
+    case ReturnedBorrow::None:
+    case ReturnedBorrow::Both:
+      Which = 0;
+      break;
+    }
+    SemaHelper->reportUnannotatedThisReturn(MD, Which);
   }
 
   /// Soundness check: under the "safe programming model" only a single level
@@ -3285,8 +3347,8 @@ public:
         ParmVarDecl *InferredPVD = const_cast<ParmVarDecl *>(
             FD->getParamDecl(PVD->getFunctionScopeIndex()));
         if (!InferredPVD->hasAttr<LifetimeBoundAttr>())
-          InferredPVD->addAttr(
-              LifetimeBoundAttr::CreateImplicit(AST, PVD->getLocation()));
+          InferredPVD->addAttr(LifetimeBoundAttr::CreateImplicit(
+              AST, LifetimeBoundAttr::Object, PVD->getLocation()));
       }
     }
   }
