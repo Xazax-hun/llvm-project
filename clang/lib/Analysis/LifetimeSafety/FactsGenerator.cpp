@@ -2983,11 +2983,29 @@ void FactsGenerator::handleFullExprCleanup(
     // A temporary's destructor runs here and can read or mutate what the object captured,
     // exactly as a named local's can at scope exit. Emitting only the expiry left an
     // unnamed RAII guard -- `(void)Grower{&v}.vec;` -- silent, while naming it reported.
-    if (OriginNode *Node = getOriginNode(*MTE))
+    std::optional<OriginID> ExpiredOID;
+    if (OriginNode *Node = getOriginNode(*MTE)) {
       handleDestructionOfBorrowHolder(MTE->getSubExpr()->getType(), Node, MTE,
                                       FullExprCleanup.getCleanupLoc());
+      // Expire the ORIGIN too, not just the access path, for the same reason
+      // handleLifetimeEnds does it for a named local: otherwise the object's own
+      // liveness persists through loop back-edges. Nothing can read a destroyed
+      // object, so this cannot hide a report -- a borrow that OUTLIVES the
+      // temporary lives in some other origin, which is untouched.
+      //
+      // Without it, a temporary that is only CONDITIONALLY constructed reported
+      // its own destructor as a later use of itself. The cleanup sits in the
+      // block where the short-circuit merges (`c || !t.get().f`), which is
+      // reachable without the temporary ever being built, so the backward
+      // liveness from that destructor-use travelled around the loop bypassing the
+      // Issue in the constructing branch that would have killed it -- the same
+      // merge-block leak #205740 fixed for the conditional operator's flows.
+      OriginID OID = Node->getOriginID();
+      if (!escapesViaReturn(OID))
+        ExpiredOID = OID;
+    }
     CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
-        AccessPath(MTE), FullExprCleanup.getCleanupLoc()));
+        AccessPath(MTE), FullExprCleanup.getCleanupLoc(), ExpiredOID));
   }
 }
 
