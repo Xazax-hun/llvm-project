@@ -7261,6 +7261,33 @@ static void checkLifetimeBoundAttr(Sema &S, NamedDecl &ND) {
       }
     }
 
+    // A redeclaration must not change the lifetimebound FLAVOUR. Which one a
+    // call is checked against otherwise depends on source position: with
+    // `pointee` in the class and plain `lifetimebound` on the out-of-line
+    // definition, a caller written before the definition was let through and an
+    // identical caller after it was reported, with nothing said about the
+    // contradiction itself.
+    if (const auto *Cur =
+            lifetimes::getDirectImplicitObjectLifetimeBoundAttr(FD)) {
+      for (const FunctionDecl *R : FD->redecls()) {
+        if (R == FD)
+          continue;
+        const auto *Prev =
+            lifetimes::getDirectImplicitObjectLifetimeBoundAttr(R);
+        if (!Prev || Prev->getBoundTo() == Cur->getBoundTo())
+          continue;
+        S.Diag(Cur->getLocation(),
+               diag::warn_lifetime_safety_lifetimebound_flavor_mismatch)
+            << (Cur->getBoundTo() == LifetimeBoundAttr::Pointee)
+            << (Prev->getBoundTo() == LifetimeBoundAttr::Pointee)
+            << Cur->getRange();
+        S.Diag(Prev->getLocation(),
+               diag::note_lifetime_safety_lifetimebound_flavor_previous)
+            << Prev->getRange();
+        break;
+      }
+    }
+
     for (unsigned int I = 0; I < FD->getNumParams(); ++I) {
       const ParmVarDecl *P = FD->getParamDecl(I);
 

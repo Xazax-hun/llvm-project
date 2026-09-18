@@ -87,11 +87,24 @@ getImplicitObjectParamLifetimeBoundAttr(const FunctionDecl *FD) {
   FD = getDeclWithMergedLifetimeBoundAttrs(FD);
   // Attribute merging doesn't work well with attributes on function types (like
   // 'this' param). We need to check all redeclarations.
+  //
+  // When declarations DISAGREE about the flavour, prefer `object`. Returning
+  // whichever came first made the analysis depend on source position: a caller
+  // written before an out-of-line definition that says `object` saw `pointee`
+  // and was let through, while the same call after it was reported. `object` is
+  // the stricter reading -- it binds the result to the object, so it can only add
+  // reports -- and picking it is order-independent. Sema separately reports the
+  // contradiction; this is what keeps the analysis sound when that warning is off.
   auto CheckRedecls = [](const FunctionDecl *F) -> const LifetimeBoundAttr * {
+    const LifetimeBoundAttr *Found = nullptr;
     for (const FunctionDecl *Redecl : F->redecls())
-      if (const auto *Attr = getDirectImplicitObjectLifetimeBoundAttr(Redecl))
-        return Attr;
-    return nullptr;
+      if (const auto *Attr = getDirectImplicitObjectLifetimeBoundAttr(Redecl)) {
+        if (Attr->getBoundTo() == LifetimeBoundAttr::Object)
+          return Attr;
+        if (!Found)
+          Found = Attr;
+      }
+    return Found;
   };
 
   if (const auto *Attr = CheckRedecls(FD))

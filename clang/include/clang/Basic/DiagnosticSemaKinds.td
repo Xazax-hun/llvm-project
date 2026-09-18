@@ -2359,6 +2359,16 @@ def warn_lifetime_safety_override_param_adds_capture_by : Warning<
   "base's declaration, which promises no capture, so an argument the caller must "
   "not let escape is captured with nothing reported">,
   InGroup<LifetimeSafetyCaptureByViolation>, DefaultIgnore;
+def warn_lifetime_safety_lifetimebound_flavor_mismatch : Warning<
+  "'[[clang::lifetimebound%select{|(pointee)}0]]' here conflicts with "
+  "'[[clang::lifetimebound%select{|(pointee)}1]]' on a previous declaration of "
+  "this function; the two describe different relationships -- one binds the "
+  "result to the object, the other to what the object refers to -- and a call is "
+  "checked against whichever declaration is in scope, so the same call is treated "
+  "one way before this point and the other way after it">,
+  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def note_lifetime_safety_lifetimebound_flavor_previous : Note<
+  "previous declaration is here">;
 def warn_lifetime_safety_override_this_adds_lifetimebound : Warning<
   "this overriding member function binds its return value to the object "
   "('[[clang::lifetimebound]]'), but the overridden method does not; a call "
