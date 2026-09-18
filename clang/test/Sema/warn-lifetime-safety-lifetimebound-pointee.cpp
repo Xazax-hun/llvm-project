@@ -109,3 +109,23 @@ struct [[gsl::Pointer(char)]] Advice {
   // expected-warning@+1 {{implicit this in intra-TU function should be marked}}
   const char *returns_either() const { return m_flag ? m_p : m_inline; } // expected-note {{param returned here}}
 };
+
+//===----------------------------------------------------------------------===//
+// A type with no modelled referent. `pointee` says the result refers to what the
+// object refers TO, and here there is no origin to refer to -- the record has no
+// tracked members, so its origin node has no pointee child. Asking for the
+// referent's origin asserted (and would have dereferenced null in a release
+// build).
+//
+// The borrow is REFUSED rather than dropped, and rather than falling back to
+// binding the result to the OBJECT: that fallback would assert exactly the
+// relationship this annotation denies, reviving the false positive above for
+// every by-value parameter of such a type.
+//===----------------------------------------------------------------------===//
+
+class NoMembers {
+  const char16_t *span16() const [[clang::lifetimebound(pointee)]];
+  // expected-warning@+2 {{lifetime safety cannot track this value here}}
+  // expected-warning@+1 {{member function returning 'const char16_t *' is not annotated for lifetime safety}}
+  const char16_t *unsafeSpan16() const { return span16(); }
+};

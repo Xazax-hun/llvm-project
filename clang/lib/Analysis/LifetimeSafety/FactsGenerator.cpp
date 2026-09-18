@@ -4156,6 +4156,21 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     }
     return PVD ? PVD->hasAttr<clang::LifetimeBoundAttr>() : false;
   };
+  // '[[clang::lifetimebound(pointee)]]' on the implicit object: the result refers
+  // to what the object refers TO rather than to the object. Saying it explicitly
+  // is the only way to get view semantics for a type the accessor-name heuristic
+  // in shouldTrackImplicitObjectArg does not recognize, and the only way that
+  // does not depend on the method's NAME.
+  //
+  // Only the implicit object can carry it: the attribute is rejected on an
+  // ordinary parameter, C++23 explicit object parameters included, so there is
+  // nothing to ask about argument positions other than 0.
+  auto isPointeeBoundImplicitObject = [FD](unsigned I) -> bool {
+    const auto *Method = dyn_cast<CXXMethodDecl>(FD);
+    return I == 0 && Method && Method->isInstance() &&
+           !Method->isExplicitObjectMemberFunction() &&
+           implicitObjectParamIsPointeeBound(Method);
+  };
   auto shouldTrackPointerImplicitObjectArg = [FD, &Args](unsigned I) -> bool {
     const auto *Method = dyn_cast<CXXMethodDecl>(FD);
     if (!Method || !Method->isInstance())
@@ -4169,16 +4184,8 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     // as the ordinary parameter it is instead.
     if (Method->isExplicitObjectMemberFunction())
       return false;
-    if (I != 0)
-      return false;
-    // '[[clang::lifetimebound(pointee)]]' asks for exactly this branch, so it
-    // needs neither the [[gsl::Pointer]] annotation nor the accessor-name
-    // heuristic that shouldTrackImplicitObjectArg applies. Saying it explicitly
-    // is the only way to get view semantics for a type the heuristic does not
-    // recognize -- and the only way that does not depend on the method's NAME.
-    if (implicitObjectParamIsPointeeBound(Method))
-      return true;
-    return isGslPointerType(Method->getFunctionObjectParameterType()) &&
+    return I == 0 &&
+           isGslPointerType(Method->getFunctionObjectParameterType()) &&
            shouldTrackImplicitObjectArg(*Args[0], Method,
                                         /*RunningUnderLifetimeSafety=*/true);
   };
@@ -4228,6 +4235,19 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
         // FIXME: Handle origin-shape mismatches gracefully so we can also flow
         // inner origins.
         flowSingleLevelWithUnknownDepth(CallNode, ArgNode, Call, KillSrc);
+        KillSrc = false;
+      }
+    } else if (isPointeeBoundImplicitObject(I)) {
+      // See through the object to what it refers to. A record with no modelled
+      // referent -- no tracked members, or a shape the origin tree does not
+      // expand -- has no origin to see through TO, so propagate nothing and let
+      // the untracked-borrow sentinel below refuse the call. Falling through to
+      // the plain-lifetimebound branch instead would bind the result to the
+      // OBJECT, asserting the very relationship this annotation denies and
+      // reviving the false positive it exists to remove.
+      if (OriginNode *Referent = ArgNode->getPointeeChild()) {
+        CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
+            CallNode->getOriginID(), Referent->getOriginID(), KillSrc));
         KillSrc = false;
       }
     } else if (shouldTrackPointerImplicitObjectArg(I)) {
