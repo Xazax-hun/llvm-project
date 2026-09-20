@@ -2518,9 +2518,7 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
 void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {
   OriginNode *Node = getOriginNode(*DE->getArgument());
   CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-      Node->getOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true,
-      /*MutatedField=*/nullptr, OwnerLoanGate::None,
-      /*ResultOrigin=*/std::nullopt, /*ReleasesStorage=*/true));
+      Node->getOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true));
 }
 
 void FactsGenerator::VisitCXXThrowExpr(const CXXThrowExpr *TE) {
@@ -3451,9 +3449,7 @@ void FactsGenerator::handleDestructiveCall(const Expr *Call,
   if (ArgNode)
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
         ArgNode->getOriginID(), Call, /*Assumed=*/false,
-        /*Deallocation=*/true, /*MutatedField=*/nullptr, OwnerLoanGate::None,
-        /*ResultOrigin=*/std::nullopt,
-        /*ReleasesStorage=*/releasesStorageOfFirstArg(*FD)));
+        /*Deallocation=*/true));
 }
 
 // Soundness: detect overlapping (aliasing) call arguments. No lifetime

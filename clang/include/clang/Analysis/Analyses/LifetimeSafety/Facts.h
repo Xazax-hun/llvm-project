@@ -438,15 +438,6 @@ class InvalidateOriginFact : public Fact {
   /// `std::destroy_at`, an explicit destructor call). Drives the "naked
   /// deallocation" check and the `ownership_takes(this)` verification.
   bool Deallocation;
-  /// True when the invalidation also RELEASES THE STORAGE, which only `delete`
-  /// and friends do. An explicit destructor call ends the object's lifetime and
-  /// leaves the storage -- that is the whole point of one, since placement-new
-  /// may reuse it -- so a pointer or reference AT the object is still a valid
-  /// pointer afterwards, where after a `delete` it dangles. Only this stronger
-  /// property may cancel the "an object survives a mutation of its own contents"
-  /// exemption; keying that on Deallocation reported `p->~S(); ++p;` and every
-  /// destroy-then-advance loop.
-  bool ReleasesStorage;
   /// When non-null, the invalidation is scoped to a specific owner field
   /// (e.g. `s.buf.append(...)`): only borrows of *this* field are invalidated,
   /// not the enclosing object or its sibling fields. The receiver origin also
@@ -475,13 +466,11 @@ public:
                        bool Assumed = false, bool Deallocation = false,
                        const FieldDecl *MutatedField = nullptr,
                        OwnerLoanGate LoanGate = OwnerLoanGate::None,
-                       std::optional<OriginID> ResultOrigin = std::nullopt,
-                       bool ReleasesStorage = false)
+                       std::optional<OriginID> ResultOrigin = std::nullopt)
       : Fact(Kind::InvalidateOrigin), OID(OID),
         InvalidationOp(InvalidationOp), Assumed(Assumed),
-        Deallocation(Deallocation), ReleasesStorage(ReleasesStorage),
-        MutatedField(MutatedField), LoanGate(LoanGate),
-        ResultOrigin(ResultOrigin) {}
+        Deallocation(Deallocation), MutatedField(MutatedField),
+        LoanGate(LoanGate), ResultOrigin(ResultOrigin) {}
 
   OriginID getInvalidatedOrigin() const { return OID; }
   /// The invalidating operation as a statement (never null). Use this for the
@@ -494,8 +483,6 @@ public:
   }
   bool isAssumed() const { return Assumed; }
   bool isDeallocation() const { return Deallocation; }
-  /// Whether the storage itself goes away, not just the object in it.
-  bool releasesStorage() const { return ReleasesStorage; }
   const FieldDecl *getMutatedField() const { return MutatedField; }
   bool requiresOwnerLoanTarget() const {
     return LoanGate != OwnerLoanGate::None;

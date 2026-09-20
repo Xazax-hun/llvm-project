@@ -1102,18 +1102,18 @@ public:
         // A deallocation is different -- it destroys the object, so a pointer AT
         // it is exactly what dangles (`delete &obj;` then `p->id`).
         //
-        // A DESTRUCTION is different again. It leaves the storage, so the pointer
-        // stays a valid pointer and `p->~S(); ++p;` is fine -- but the OBJECT is
-        // dead, so any use that FOLLOWS the pointer touches a dead object and must
-        // be reported (`p->~S(); p->~S();`).
+        // Once the object's lifetime ENDS, by any means, a use that FOLLOWS the
+        // pointer touches a dead object and must be reported
+        // (`p->~S(); p->~S();`), while a use of the pointer VALUE is fine
+        // (`p->~S(); ++p;`). Whether the storage was also released makes no
+        // difference to that: `++p` is equally harmless either way, and a
+        // dereference equally wrong, so the two need not be told apart here.
         //
-        // Gated on the object's lifetime actually ending: after a mere content
-        // mutation the object is alive, so a pointer at it is fine even when
-        // dereferenced, which is the whole point of the exemption
+        // Gated on the lifetime actually ending: after a mere content mutation the
+        // object is alive, so a pointer at it is fine even when dereferenced, which
+        // is the whole point of the exemption
         // (`v->push_back(1); v->push_back(2);`).
-        if (!IOF->releasesStorage() &&
-            !(IOF->isDeallocation() && UseFollowsPointer) &&
-            IAP == LoanAP(L) &&
+        if (!(IOF->isDeallocation() && UseFollowsPointer) && IAP == LoanAP(L) &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(IAP)))
           continue;
         return true;
@@ -1658,7 +1658,7 @@ public:
         // reference AT the mutated record, so a view, a closure, or an origin
         // whose type is unknown still reports. A deallocation is exempt from the
         // exemption: it destroys the object, so a pointer at it is what dangles.
-        if (!IOF->releasesStorage() && AP == L->getAccessPath() &&
+        if (!IOF->isDeallocation() && AP == L->getAccessPath() &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(AP)))
           continue;
         // See IsExactInvalidated: containment, not equality.

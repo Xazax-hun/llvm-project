@@ -104,35 +104,42 @@ void mutate_twice_through_pointer(S *p) {
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
-// Which destroying calls RELEASE the storage, and which only end the object.
+// Whether the STORAGE was also released makes no difference to this rule.
 //
-// `destructsFirstArg` recognises more than the explicit destructor call:
-// `std::destroy_at` also just ends the object, while `free`, `realloc`, a direct
-// `operator delete` call and an `ownership_takes(this)` release method genuinely
-// give the storage back. Only the latter group may cancel the exemption -- and
-// they all arrive through the same code path as the destructor call, so it is easy
-// to give the whole group the wrong answer.
+// `destructsFirstArg` covers more than the explicit destructor call: `free`,
+// `realloc`, a direct `operator delete` call and an `ownership_takes(this)`
+// release method all end the object's lifetime AND give the storage back. But
+// `++p` is equally harmless either way, and a dereference equally wrong, so the
+// two need not be told apart -- the rule is just "lifetime ended + use follows the
+// pointer".
+//
+// Telling them apart is what made `free(p); ++p;` and `delete p; ++p;` report,
+// which is noise: a non-dereferencing use of a freed pointer is not a temporal
+// memory error, and out-of-bounds is out of scope for this analysis.
 //===----------------------------------------------------------------------===//
 
 extern "C" void free(void *);
 void operator delete(void *) noexcept;
 
-// Storage released: a pointer AT the object dangles, so a later use reports.
-void freed_then_used(S *p) { // expected-warning {{is later invalidated}}
-  free(p);                   // expected-note {{invalidated here}}
-  (void)p->id;               // expected-note {{later used here}}
+// Following the pointer after the storage is gone: reported.
+void freed_then_dereferenced(S *p) { // expected-warning {{is later invalidated}}
+  free(p);                           // expected-note {{invalidated here}}
+  (void)p->id;                       // expected-note {{later used here}}
 }
 
-void operator_delete_then_used(S *p) { // expected-warning {{is later invalidated}}
-  ::operator delete(p);                // expected-note {{invalidated here}}
-  (void)p->id;                         // expected-note {{later used here}}
+// Only reading the pointer value: not reported, exactly as after a destructor
+// call. These three are the same rule, not three rules.
+void freed_then_advanced(S *p) {
+  free(p);
+  ++p;
 }
 
-// The contrast with `destroy_then_advance` at the top of this file: there the
-// storage survives, so moving the pointer is fine and stays unreported. Here the
-// storage is gone, so even pointer arithmetic on it is reported -- the exemption is
-// cancelled outright rather than only for uses that follow the pointer.
-void freed_then_advanced(S *p) { // expected-warning {{is later invalidated}}
-  ::operator delete(p);          // expected-note {{invalidated here}}
-  ++p;                           // expected-note {{later used here}}
+void operator_deleted_then_advanced(S *p) {
+  ::operator delete(p);
+  ++p;
+}
+
+void deleted_then_advanced(S *p) {
+  delete p;
+  ++p;
 }
