@@ -19196,6 +19196,24 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
            diag::warn_lifetime_safety_override_this_adds_lifetimebound);
       Diag(Old->getLocation(), diag::note_overridden_virtual_function);
     }
+    // Both may be lifetimebound and still disagree about WHAT the result is bound
+    // to. Base 'pointee' with an override binding to the object is unsound and
+    // needs no lie anywhere: each body can be perfectly consistent with its own
+    // annotation, yet a virtual call is checked against the BASE's flavour, so the
+    // object binding is dropped while dispatch actually returns the object's own
+    // storage. Worse than the redeclaration case that is already diagnosed, since
+    // dispatch is dynamic and the call site cannot know which flavour applies.
+    //
+    // The other direction (base binds to the object, override to the pointee) only
+    // over-approximates at the call site, which is safe, so it is not flagged.
+    if (lifetimes::implicitObjectParamIsPointeeBound(Old) &&
+        lifetimes::implicitObjectParamIsLifetimeBound(New) &&
+        !lifetimes::implicitObjectParamIsPointeeBound(New)) {
+      Diag(New->getLocation(),
+           diag::
+               warn_lifetime_safety_override_this_changes_lifetimebound_flavor);
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+    }
     // Overriding a '[[clang::lifetime_immortal]]' method, whose result never
     // dangles, requires the override to preserve that guarantee -- it must also
     // be 'lifetime_immortal'. Callers through the base class treat the result as

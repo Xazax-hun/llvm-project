@@ -129,3 +129,75 @@ class NoMembers {
   // expected-warning@+1 {{member function returning 'const char16_t *' is not annotated for lifetime safety}}
   const char16_t *unsafeSpan16() const { return span16(); }
 };
+
+//===----------------------------------------------------------------------===//
+// Verification is a MAY property, refutation a MUST one.
+//
+// One referent-bound return path used to put the method in the "verified" set,
+// and nothing could take it out again -- so a second path returning the object's
+// OWN storage was licensed too, while the call site dropped the object binding for
+// both. That is an ASan-confirmed stack-use-after-scope with no diagnostic.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer(char)]] Hybrid {
+  const char *m_ref;
+  char m_own[8];
+
+  // One path hands back the referent, the other the object's own storage. The
+  // second refutes the promise, whichever the walk reaches first.
+  // expected-warning@+1 {{could not verify that the return value can be lifetime bound to what the implicit this parameter refers to}}
+  const char *both(bool own) const [[clang::lifetimebound(pointee)]] {
+    return own ? m_own : m_ref;
+  }
+
+  // Same, spelled as a branch rather than a conditional operator.
+  // expected-warning@+1 {{could not verify that the return value can be lifetime bound to what the implicit this parameter refers to}}
+  const char *branchy(bool own) const [[clang::lifetimebound(pointee)]] {
+    if (own)
+      return m_own;
+    return m_ref;
+  }
+
+  // Unconditionally honest: still accepted.
+  const char *honest_only() const [[clang::lifetimebound(pointee)]] {
+    return m_ref;
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// A virtual override must not change the flavour.
+//
+// Needs no lying annotation: each body agrees with its own annotation, yet a
+// virtual call is checked against the BASE's flavour, so an override binding to
+// the object has that binding dropped while dispatch really does return the
+// object's storage.
+//===----------------------------------------------------------------------===//
+
+struct [[gsl::Pointer(char)]] Base {
+  const char *m_ref;
+  virtual ~Base() = default;
+  // expected-note@+1 {{overridden virtual function is here}}
+  virtual const char *data() const [[clang::lifetimebound(pointee)]] {
+    return m_ref;
+  }
+};
+
+struct [[gsl::Pointer(char)]] Derived : Base {
+  char m_own[8];
+  // expected-warning@+1 {{this overriding member function binds its return value to the object ('[[clang::lifetimebound]]'), but the overridden method binds it to what the object refers to}}
+  const char *data() const [[clang::lifetimebound]] override { return m_own; }
+};
+
+// The reverse direction only over-approximates at the call site -- callers assume
+// the stricter object binding -- so it is deliberately NOT flagged.
+struct [[gsl::Pointer(char)]] Base2 {
+  const char *m_ref;
+  char m_own[8];
+  virtual ~Base2() = default;
+  virtual const char *data() const [[clang::lifetimebound]] { return m_own; }
+};
+struct [[gsl::Pointer(char)]] Derived2 : Base2 {
+  const char *data() const [[clang::lifetimebound(pointee)]] override {
+    return m_ref;
+  }
+};

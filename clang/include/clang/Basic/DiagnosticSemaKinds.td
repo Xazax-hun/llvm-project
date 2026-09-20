@@ -2374,6 +2374,13 @@ def warn_lifetime_safety_override_this_adds_lifetimebound : Warning<
   "('[[clang::lifetimebound]]'), but the overridden method does not; a call "
   "through the base class would not enforce it">,
   InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
+def warn_lifetime_safety_override_this_changes_lifetimebound_flavor : Warning<
+  "this overriding member function binds its return value to the object "
+  "('[[clang::lifetimebound]]'), but the overridden method binds it to what the "
+  "object refers to ('[[clang::lifetimebound(pointee)]]'); a call through the base "
+  "class is checked against the base's weaker relationship, so a returned borrow "
+  "of the object itself is not tracked and a dangle would go unreported">,
+  InGroup<LifetimeSafetyLifetimeboundViolation>, DefaultIgnore;
 def warn_lifetime_safety_override_of_immortal : Warning<
   "this override of a 'lifetime_immortal' method does not guarantee its return "
   "never dangles; a call through the base class assumes it does, so the override "

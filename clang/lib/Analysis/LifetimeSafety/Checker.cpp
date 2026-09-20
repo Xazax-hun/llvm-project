@@ -359,6 +359,18 @@ private:
       UndeclaredFieldCaptures;
   llvm::DenseSet<const Decl *> VerifiedLiftimeboundEscapes;
 
+  /// Declarations whose '[[clang::lifetimebound(pointee)]]' is REFUTED by some
+  /// return path: that path hands back a borrow of the OBJECT, which is exactly
+  /// what the annotation denies.
+  ///
+  /// Separate from the verification set because verification is a MAY property
+  /// -- one referent-bound path is enough to put a decl in it -- while refutation
+  /// is a MUST property that has to win no matter which path the walk sees first.
+  /// Sharing one set let `return b ? m_own : m_ref;` license the annotation for
+  /// the `m_own` path too, and the call site then drops the object binding for
+  /// both.
+  llvm::DenseSet<const Decl *> RefutedPointeeBound;
+
   /// What the borrow this function RETURNS was rooted at, so the advice for an
   /// unannotated method can name the one annotation that fits instead of listing
   /// both. `Object` means it borrows the object itself ('lifetimebound');
@@ -746,8 +758,10 @@ public:
         // silently, and callers would then treat that borrow as outliving the
         // object.
         noteReturnedBorrow(ReturnedBorrow::Object);
-        if (implicitObjectParamIsPointeeBound(MD))
+        if (implicitObjectParamIsPointeeBound(MD)) {
+          RefutedPointeeBound.insert(MD);
           return;
+        }
         if (implicitObjectParamIsLifetimeBound(MD))
           VerifiedLiftimeboundEscapes.insert(MD);
         else
@@ -3303,7 +3317,8 @@ public:
       SemaHelper->reportOwnershipTakesThisViolation(cast<FunctionDecl>(FD));
     if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
         MD && getImplicitObjectParamLifetimeBoundAttr(MD) &&
-        !VerifiedLiftimeboundEscapes.contains(MD))
+        (RefutedPointeeBound.contains(MD) ||
+         !VerifiedLiftimeboundEscapes.contains(MD)))
       SemaHelper->reportLifetimeboundViolation(MD);
     for (const ParmVarDecl *PVD : cast<FunctionDecl>(FD)->parameters()) {
       if (!PVD->hasAttr<LifetimeBoundAttr>())
