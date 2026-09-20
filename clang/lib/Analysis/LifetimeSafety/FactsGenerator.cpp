@@ -2518,7 +2518,9 @@ void FactsGenerator::VisitCXXNewExpr(const CXXNewExpr *NE) {
 void FactsGenerator::VisitCXXDeleteExpr(const CXXDeleteExpr *DE) {
   OriginNode *Node = getOriginNode(*DE->getArgument());
   CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
-      Node->getOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true));
+      Node->getOriginID(), DE, /*Assumed=*/false, /*Deallocation=*/true,
+      /*MutatedField=*/nullptr, OwnerLoanGate::None,
+      /*ResultOrigin=*/std::nullopt, /*ReleasesStorage=*/true));
 }
 
 void FactsGenerator::VisitCXXThrowExpr(const CXXThrowExpr *TE) {

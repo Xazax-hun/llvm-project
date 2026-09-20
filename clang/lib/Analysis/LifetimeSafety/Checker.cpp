@@ -1086,7 +1086,7 @@ public:
         //
         // A deallocation is different -- it destroys the object, so a pointer AT
         // it is exactly what dangles (`delete &obj;` then `p->id`).
-        if (!IOF->isDeallocation() && IAP == LoanAP(L) &&
+        if (!IOF->releasesStorage() && IAP == LoanAP(L) &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(IAP)))
           continue;
         return true;
@@ -1626,7 +1626,7 @@ public:
         // reference AT the mutated record, so a view, a closure, or an origin
         // whose type is unknown still reports. A deallocation is exempt from the
         // exemption: it destroys the object, so a pointer at it is what dangles.
-        if (!IOF->isDeallocation() && AP == L->getAccessPath() &&
+        if (!IOF->releasesStorage() && AP == L->getAccessPath() &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(AP)))
           continue;
         // See IsExactInvalidated: containment, not equality.
