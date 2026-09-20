@@ -319,6 +319,12 @@ bool takesOwnershipOfThis(const FunctionDecl &FD);
 // (e.g., destructors via implicit 'this', std::destroy_at).
 bool destructsFirstArg(const FunctionDecl &FD);
 
+/// Whether such a call also RELEASES the first argument's storage, as `free`,
+/// `realloc`, a direct `operator delete` call and an `ownership_takes(this)`
+/// method do -- unlike an explicit destructor call or `std::destroy_at`, which end
+/// the object's lifetime and leave the storage behind.
+bool releasesStorageOfFirstArg(const FunctionDecl &FD);
+
 /// Returns true for standard library callable wrappers (e.g., std::function)
 /// that can propagate the stored lambda's origins.
 bool isStdCallableWrapperType(const CXXRecordDecl *RD);

@@ -1217,6 +1217,29 @@ bool destructsFirstArg(const FunctionDecl &FD) {
   return false;
 }
 
+bool releasesStorageOfFirstArg(const FunctionDecl &FD) {
+  // Of the calls destructsFirstArg recognizes, these also give the STORAGE back,
+  // so a pointer AT the object dangles afterwards and must not be spared by the
+  // "an object survives a mutation of its own contents" exemption.
+  //
+  // The two that do NOT are an explicit destructor call and `std::destroy_at`:
+  // both end the object's lifetime and leave the storage, which is the whole
+  // point of them, since placement-new may reuse it.
+  if (takesOwnershipOfThis(FD))
+    return true;
+  OverloadedOperatorKind OO = FD.getOverloadedOperator();
+  if (OO == OO_Delete || OO == OO_Array_Delete)
+    return true;
+  if (FD.getBuiltinID() == Builtin::BI__builtin_operator_delete)
+    return true;
+  if (getName(FD) == "free" || getName(FD) == "realloc" ||
+      getName(FD) == "reallocf" || getName(FD) == "cfree") {
+    const DeclContext *DC = FD.getDeclContext()->getRedeclContext();
+    return DC->isTranslationUnit() || isInStlNamespace(&FD);
+  }
+  return false;
+}
+
 bool isStdCallableWrapperType(const CXXRecordDecl *RD) {
   if (!RD || !isInStlNamespace(RD))
     return false;

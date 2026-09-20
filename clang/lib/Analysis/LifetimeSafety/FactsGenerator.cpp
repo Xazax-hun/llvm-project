@@ -3451,7 +3451,9 @@ void FactsGenerator::handleDestructiveCall(const Expr *Call,
   if (ArgNode)
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
         ArgNode->getOriginID(), Call, /*Assumed=*/false,
-        /*Deallocation=*/true));
+        /*Deallocation=*/true, /*MutatedField=*/nullptr, OwnerLoanGate::None,
+        /*ResultOrigin=*/std::nullopt,
+        /*ReleasesStorage=*/releasesStorageOfFirstArg(*FD)));
 }
 
 // Soundness: detect overlapping (aliasing) call arguments. No lifetime
