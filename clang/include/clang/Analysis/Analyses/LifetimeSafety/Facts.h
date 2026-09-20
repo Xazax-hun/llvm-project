@@ -356,6 +356,12 @@ class UseFact : public Fact {
   // produces an independent object. Only the declaration's type is visible where
   // that difference is consumed, and it is the same in both.
   bool IsReferenceBinding = false;
+  /// True when this use FOLLOWS the pointer -- `*p`, `p->m`, `p[i]`, or the
+  /// object argument of `p->method()` -- rather than just reading its value.
+  /// After the pointee is invalidated, a use that follows the pointer touches the
+  /// dead object and must be reported, while one that only reads the pointer
+  /// value (`++p`, `p != end`) is fine.
+  bool IsDereference = false;
 
 public:
   static bool classof(const Fact *F) { return F->getKind() == Kind::Use; }
@@ -378,6 +384,8 @@ public:
   bool isWritten() const { return IsWritten; }
   void markAsReferenceBinding() { IsReferenceBinding = true; }
   bool isReferenceBinding() const { return IsReferenceBinding; }
+  void markAsDereference() { IsDereference = true; }
+  bool isDereference() const { return IsDereference; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

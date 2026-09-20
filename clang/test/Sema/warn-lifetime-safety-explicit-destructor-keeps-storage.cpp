@@ -67,16 +67,38 @@ void delete_address_of_local() {
 }
 
 //===----------------------------------------------------------------------===//
-// KNOWN GAP, deliberately not covered here: destroying the SAME object twice
-//
-//   void destroy_twice(S *p) { p->~S(); p->~S(); }
-//
-// used to be reported and no longer is. The model gives `p`, `p + 1` and
-// `current` on successive iterations the SAME loan -- pointer arithmetic
-// deliberately preserves it -- so "destroy the storage named by $p twice" is the
-// same fact in `destroy_twice` and in `destroy_loop` above, which destroys a
-// different element each time. Separating them needs element identity, which the
-// model does not have; reporting is what produced the loop false positive. A
-// double destruction is also not an aliasing question, so it belongs in a check
-// of its own rather than in this one.
+// The object IS dead afterwards, so a use that FOLLOWS the pointer must still be
+// reported. The storage surviving makes the pointer a valid pointer; it does not
+// resurrect the object.
+//===----------------------------------------------------------------------===//
+
+void destroy_twice(S *p) { // expected-warning {{is later invalidated}}
+  p->~S();                 // expected-note {{invalidated here}}
+  p->~S();                 // expected-note {{later used here}}
+}
+
+void destroy_then_read(S *p) { // expected-warning {{is later invalidated}}
+  p->~S();                     // expected-note {{invalidated here}}
+  (void)p->id;                 // expected-note {{later used here}}
+}
+
+void destroy_then_deref(S *p) { // expected-warning {{is later invalidated}}
+  p->~S();                      // expected-note {{invalidated here}}
+  S copy = *p;                  // expected-note {{later used here}}
+  (void)copy;
+}
+
+// A mere content mutation leaves the object alive, so a pointer at it is fine even
+// when dereferenced -- this is what the exemption is for, and the destruction rule
+// above must not disturb it.
+void mutate_twice_through_pointer(S *p) {
+  p->id = 1;
+  p->id = 2;
+}
+
+//===----------------------------------------------------------------------===//
+// KNOWN GAP: element identity. `p[0].~S(); p[1].~S();` still reports, because the
+// model gives every element of `p` the same loan, so the second subscript is a
+// dereference of what the model considers the same, now-destroyed object.
+// Distinguishing elements is out of scope here.
 //===----------------------------------------------------------------------===//

@@ -286,6 +286,7 @@ private:
   /// aliasing the designated object: the outer origin -- the one holding the borrow
   /// of the object itself -- is what it receives, and must not be peeled to the
   /// r-value origin the way reading a variable's value is.
+  bool useFollowsPointer(const Expr *E) const;
   void handleUse(const Expr *E, bool BoundToReference = false);
 
   /// Soundness: flag a *use* of a global variable whose type is a "container of

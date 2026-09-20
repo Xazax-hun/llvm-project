@@ -1072,7 +1072,8 @@ public:
     // `o.v` is a prefix of `o.v.a` -- so returning early made the field-precise
     // path strictly weaker than the generic one, and the member spelling of a
     // bug the local spelling catches went unreported.
-    auto IsExactInvalidated = [&](OriginID OID, LoanID L) {
+    auto IsExactInvalidated = [&](OriginID OID, LoanID L,
+                                 bool UseFollowsPointer) {
       if (MutatedField && namesFieldLast(LoanAP(L), MutatedField))
         return true;
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
@@ -1086,7 +1087,19 @@ public:
         //
         // A deallocation is different -- it destroys the object, so a pointer AT
         // it is exactly what dangles (`delete &obj;` then `p->id`).
-        if (!IOF->releasesStorage() && IAP == LoanAP(L) &&
+        //
+        // A DESTRUCTION is different again. It leaves the storage, so the pointer
+        // stays a valid pointer and `p->~S(); ++p;` is fine -- but the OBJECT is
+        // dead, so any use that FOLLOWS the pointer touches a dead object and must
+        // be reported (`p->~S(); p->~S();`).
+        //
+        // Gated on the object's lifetime actually ending: after a mere content
+        // mutation the object is alive, so a pointer at it is fine even when
+        // dereferenced, which is the whole point of the exemption
+        // (`v->push_back(1); v->push_back(2);`).
+        if (!IOF->releasesStorage() &&
+            !(IOF->isDeallocation() && UseFollowsPointer) &&
+            IAP == LoanAP(L) &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(IAP)))
           continue;
         return true;
@@ -1104,6 +1117,11 @@ public:
       if (IOF->getResultOrigin() == OID)
         continue;
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
+      // Does the use keeping this origin live FOLLOW the pointer (`*p`, `p->m`,
+      // `p->method()`) rather than just read its value (`++p`, `p != end`)? Only
+      // the former reaches the object a destructive invalidation has killed.
+      const auto *CausingUse = LiveInfo.CausingFact.dyn_cast<const UseFact *>();
+      bool UseFollowsPointer = CausingUse && CausingUse->isDereference();
       llvm::SmallVector<LoanID, 2> Invalidated;
       for (LoanID L : HeldLoans) {
         // A function declared `ownership_takes` on its implicit object says it
@@ -1118,7 +1136,7 @@ public:
             isa<FunctionDecl>(FD) &&
             takesOwnershipOfThis(*cast<FunctionDecl>(FD)))
           continue;
-        if (IsExactInvalidated(OID, L))
+        if (IsExactInvalidated(OID, L, UseFollowsPointer))
           Invalidated.push_back(L);
       }
 

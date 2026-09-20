@@ -4358,6 +4358,35 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
   return false;
 }
 
+/// Whether the value read from \p E is used to FOLLOW a pointer -- `*E`, `E->m`,
+/// `E->method()`, `E[i]` -- rather than just to read the pointer itself (`++E`,
+/// `E != end`, passing it along).
+///
+/// Asked of the READ, not of the dereference expression, because that is where the
+/// use fact lives: the origin that ends up holding the pointee's loan is the
+/// variable's own, and its liveness is caused by the DeclRefExpr. Marking the
+/// dereference expression instead left the fact that matters unmarked.
+bool FactsGenerator::useFollowsPointer(const Expr *E) const {
+  const ParentMap &PM = AC.getParentMap();
+  const Stmt *Child = E;
+  const Stmt *P = PM.getParent(Child);
+  // The read is wrapped in the lvalue-to-rvalue conversion (and possibly parens)
+  // before it reaches whatever consumes it.
+  while (P && (isa<ParenExpr>(P) || isa<ImplicitCastExpr>(P))) {
+    Child = P;
+    P = PM.getParent(P);
+  }
+  if (const auto *UO = dyn_cast_or_null<UnaryOperator>(P))
+    return UO->getOpcode() == UO_Deref;
+  // A MemberExpr's only child is its base, so `->` alone decides it. This also
+  // covers `p->method()`, including `p->~S()`.
+  if (const auto *ME = dyn_cast_or_null<MemberExpr>(P))
+    return ME->isArrow();
+  if (const auto *ASE = dyn_cast_or_null<ArraySubscriptExpr>(P))
+    return ASE->getBase() == Child;
+  return false;
+}
+
 void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
   OriginNode *Node = getOriginNode(*E);
   if (!Node)
@@ -4390,6 +4419,8 @@ void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
     UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
     if (BoundToReference)
       UF->markAsReferenceBinding();
+    if (useFollowsPointer(E))
+      UF->markAsDereference();
     CurrentBlockFacts.push_back(UF);
     UseFacts[E] = UF;
   } else if (BoundToReference) {
