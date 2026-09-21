@@ -121,6 +121,22 @@ static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
     return recordOf(PVD->getType());
   if (const ValueDecl *VD = AP.getAsValueDecl())
     return recordOf(VD->getType());
+  // An `Uninitialized` root names a declaration holding no *known* borrow -- a
+  // member the analysed method did not initialise, typically because the
+  // constructor ran elsewhere. That says nothing about the storage's TYPE, which
+  // identifies the denoted object just as it does for the two roots above, so it
+  // belongs here rather than yielding "no record at all".
+  //
+  // Without it, a member pointing AT a container lost the "an object survives a
+  // mutation of its own contents" exemption: that exemption is granted only on
+  // positively recognising a pointer AT the mutated record, and with no record to
+  // compare against, `originBorrowsInto` has to answer conservatively that the
+  // holder points INTO it. So `v->push_back(i)` in a method of
+  // `struct View { std::vector<int> *v; }` was reported as a dangling field, while
+  // the identical code with the pointer in a local or a parameter -- where the
+  // root does carry its type -- was correctly silent.
+  if (const ValueDecl *UD = AP.getAsUninitialized())
+    return recordOf(UD->getType());
   return nullptr;
 }
 

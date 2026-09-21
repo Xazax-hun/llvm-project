@@ -15,12 +15,15 @@ volatile char sink;
 // the call (so the liveness-based invalidation pass misses it).
 
 struct [[gsl::Pointer]] W {
-  // The wrapper's borrow lives in this member, so the mutation through it is also
-  // reported against the member (in addition to the argument-overlap hazard).
-  string *p; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
+  // No report against the member itself: `p` points AT the owner, so reallocating
+  // `*p` leaves it valid. The callee is therefore silent here, exactly as it is
+  // when the AT-pointer is a parameter (`void f(string *p, string_view v)`) or a
+  // local -- whether `v` aliases `*p` is the caller's doing, and the caller below
+  // is what reports it.
+  string *p;
   W(string &s [[clang::lifetimebound]]); // captures &s into the pointee origin
   void grow_and_use(string_view v [[clang::noescape]]) {
-    p->push_back('z'); // reallocates *p // expected-note {{invalidated here}}
+    p->push_back('z'); // reallocates *p
     sink = *v.data();  // v aliased *p -> dangling
   }
 };

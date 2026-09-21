@@ -17,15 +17,13 @@ using std::vector;
 volatile int sink;
 
 struct [[gsl::Pointer]] Warmer {
-  // The direct case below also reports the member itself, which is unrelated to the
-  // lambda spellings.
-  // expected-warning@+2 {{borrow held by this member which escapes to a field is later invalidated}}
-  // expected-note@+1 {{this field dangles}}
+  // `pv` points AT the container, so reallocating `*pv` leaves it valid -- no
+  // report against the member itself, matching the local and parameter spellings
+  // of the same code.
   vector<int> *pv;
 
   // The control: the same mutation written directly.
   void warm_direct() const {
-    // expected-note@+2 {{invalidated here}}
     // expected-warning@+1 {{mutating an owner through a pointer or reference member of a const-qualified}}
     pv->push_back(1);
   }

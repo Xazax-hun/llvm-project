@@ -31,8 +31,11 @@ struct [[gsl::Owner]] Box {
   int read() const { return *p; }
 
 private:
-  vector<int> *pv; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
-  const int *p;
+  // The report anchors at the member the borrow came *through*, and names the
+  // member that actually dangles -- `p`, not the AT-pointer `pv`, which a
+  // reallocation of `*pv` leaves valid.
+  vector<int> *pv;   // expected-warning {{borrow held by this member which escapes to a field is later invalidated}}
+  const int *p;      // expected-note {{this field dangles}}
 };
 
 // Same method: store into a member, invalidate, then read locally. Here the
@@ -63,8 +66,8 @@ struct [[gsl::Owner]] Doc {
   char first() const { return *view.data(); }
 
 private:
-  string *s; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
-  string_view view;
+  string *s;         // expected-warning {{borrow held by this member which escapes to a field is later invalidated}}
+  string_view view;  // expected-note {{this field dangles}}
 };
 
 //===----------------------------------------------------------------------===//
