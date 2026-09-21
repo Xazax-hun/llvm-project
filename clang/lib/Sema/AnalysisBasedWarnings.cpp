@@ -4645,6 +4645,24 @@ static void LifetimeSafetyFileVarInitAnalysis(
     for (Decl *D : TU->noload_decls())
       if (!D->isFromASTFile())
         W.TraverseDecl(D);
+    // The traversal above cannot reach a specialization this translation unit
+    // instantiated from a template that came from a PCH or module: the
+    // specialization lives in the template's folding set, and noload_decls()
+    // deliberately leaves the template in lazy storage. So a static data member
+    // of a class template, or a variable template specialization, had its
+    // initializer analyzed NOWHERE -- not at produce, where no instantiation
+    // exists yet, and not at consume, where nothing enumerates it. The same code
+    // reached by a plain #include was analyzed normally.
+    //
+    // Sema records what it instantiated, which is both reachable and exactly the
+    // right set: membership means this translation unit generated the code, so
+    // this restores what #include does, including reporting in each translation
+    // unit that instantiates. The isFromASTFile() check drops an entry whose
+    // definition came from the PCH after all, which belongs to whoever produced
+    // it.
+    for (VarDecl *VD : S.InstantiatedVarDefinitions)
+      if (!VD->isFromASTFile())
+        W.TraverseDecl(VD);
   }
 }
 

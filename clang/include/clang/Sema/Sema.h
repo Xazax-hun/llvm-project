@@ -14111,6 +14111,29 @@ public:
   /// types, static variables, enumerators, etc.
   std::deque<PendingImplicitInstantiation> PendingLocalImplicitInstantiations;
 
+  /// The variable definitions this translation unit instantiated: static data
+  /// members of class templates and variable template specializations, in
+  /// instantiation order.
+  ///
+  /// Such a specialization is reachable through no DeclContext. It lives in its
+  /// template's folding set, so a traversal rooted at the translation unit finds
+  /// it only by going through the template -- and when the template came from a
+  /// PCH or module, iterating `TU->noload_decls()` deliberately does not
+  /// materialize that template, precisely so a consumer does not re-examine
+  /// another translation unit's declarations. An end-of-translation-unit pass
+  /// that needs to see the initializer code THIS translation unit generated is
+  /// then left with nothing to walk, and the alternative -- `TU->decls()` --
+  /// forces the whole PCH out of lazy storage in every consumer and is
+  /// observable to -error-on-deserialized-decl.
+  ///
+  /// Recorded where the definition is instantiated, alongside the notification
+  /// to ASTConsumer::HandleCXXStaticMemberVarInstantiation, so membership means
+  /// exactly "this translation unit instantiated it" with no location test
+  /// needed. Currently consumed by the lifetime safety file-variable-initializer
+  /// sweep; entries may already have had a definition, so a consumer that cares
+  /// should check isFromASTFile().
+  SmallVector<VarDecl *, 0> InstantiatedVarDefinitions;
+
   class LocalEagerInstantiationScope {
   public:
     LocalEagerInstantiationScope(Sema &S, bool AtEndOfTU)

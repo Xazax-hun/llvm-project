@@ -6427,14 +6427,19 @@ void Sema::InstantiateVariableDefinition(SourceLocation PointOfInstantiation,
   struct PassToConsumerRAII {
     ASTConsumer &Consumer;
     VarDecl *Var;
+    Sema &S;
 
-    PassToConsumerRAII(ASTConsumer &Consumer, VarDecl *Var)
-      : Consumer(Consumer), Var(Var) { }
+    PassToConsumerRAII(ASTConsumer &Consumer, VarDecl *Var, Sema &S)
+        : Consumer(Consumer), Var(Var), S(S) {}
 
     ~PassToConsumerRAII() {
       Consumer.HandleCXXStaticMemberVarInstantiation(Var);
+      // Also record it for end-of-translation-unit passes, which cannot reach a
+      // specialization any other way: it lives in its template's folding set
+      // rather than in any DeclContext. See Sema::InstantiatedVarDefinitions.
+      S.InstantiatedVarDefinitions.push_back(Var);
     }
-  } PassToConsumerRAII(Consumer, Var);
+  } PassToConsumerRAII(Consumer, Var, *this);
 
   // If we already have a definition, we're done.
   if (VarDecl *Def = Var->getDefinition()) {
