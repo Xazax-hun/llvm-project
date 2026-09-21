@@ -1374,6 +1374,12 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   case UO_PostInc:
   case UO_PreDec:
   case UO_PostDec: {
+    // Incrementing a NON-pointer lvalue reached through a pointer reads and
+    // writes the pointee, so it is an access: `p->id++` touches `*p` exactly as
+    // `p->id = 1` does. It is not an assignment, so handleAssignment never sees
+    // it. (For a pointer operand this is the pointer's own arithmetic, handled
+    // below, and not an access of anything.)
+
     // Incrementing/decrementing a pointer keeps it aimed into the same
     // allocation, and unary plus on a pointer is the identity -- so the result
     // carries the operand's loans. Without this a borrow used via the result
@@ -1451,15 +1457,6 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // must be live; the destination's own origin holds the value being REPLACED,
   // and overwriting a dangling value is not a use of it. Marking the destination
   // reported `this->p = kGlobal.data();` as a use of whatever `p` held before.
-  if (const auto *ME = dyn_cast<MemberExpr>(LHSExpr)) {
-    if (ME->isArrow())
-      markPointeeAccess(ME->getBase(), /*ForceOwnFact=*/true);
-  } else if (const auto *UO = dyn_cast<UnaryOperator>(LHSExpr)) {
-    if (UO->getOpcode() == UO_Deref)
-      markPointeeAccess(UO->getSubExpr(), /*ForceOwnFact=*/true);
-  } else if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(LHSExpr)) {
-    markPointeeAccess(ASE->getBase(), /*ForceOwnFact=*/true);
-  }
   // Look through a value-preserving explicit reference cast on the destination
   // (e.g. `static_cast<int*&>(p) = ...` or the C-style `(int*&)p = ...`), which
   // preserves the underlying lvalue but is not stripped by IgnoreParenImpCasts.
@@ -1838,6 +1835,10 @@ void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
     return;
   }
   if (BO->isCompoundAssignmentOp()) {
+    // A compound assignment READS AND WRITES its destination, so it touches the
+    // pointee; it returns before reaching handleAssignment, so it needs its own
+    // marking. `p->id += 1` is as much an access as `p->id = 1`.
+
     // A compound assignment reads AND writes its left operand, and both happen
     // AFTER the right operand is evaluated -- so if the RHS invalidates what
     // the LHS borrows, the write goes through a dangling borrow. The LHS's own
@@ -4406,24 +4407,7 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
 /// yields a scalar, and an `int` never carries a borrow, so `p[0] += n;` would
 /// otherwise report a lost borrow that never existed. It also stopped a second,
 /// duplicate lost-loan appearing wherever the sentinel already fires.
-void FactsGenerator::markPointeeAccess(const Expr *E, bool ForceOwnFact) {
-  if (ForceOwnFact) {
-    // A STORE destination needs a fact of its OWN. handleUse deduplicates by
-    // expression, and handleAssignment goes on to mark the LHS use written --
-    // which makes transferUseSubtree drop it, so the access would be recorded
-    // and then thrown away. One fact cannot mean both "the pointee's old value
-    // is replaced, so its value-liveness ends" and "the pointee was not
-    // touched"; the second is false for a store through a pointer. Splitting an
-    // expression into a use and a write is the same shape handleAssignment
-    // already uses for a reference binding.
-    if (OriginNode *Node = getOriginNode(*E)) {
-      UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
-      UF->markAsPointeeAccess();
-      UF->setShape(UseShape::AccessesPointee);
-      CurrentBlockFacts.push_back(UF);
-    }
-    return;
-  }
+void FactsGenerator::markPointeeAccess(const Expr *E) {
   bool IsNew = !UseFacts.contains(E);
   handleUse(E);
   if (IsNew)
@@ -4466,23 +4450,20 @@ UseShape FactsGenerator::classifyUse(const Expr *E) const {
     Child = P;
     P = PM.getParent(P);
   }
-  // Address arithmetic: these COMPUTE a location without touching it. `&p->m`
-  // and `S &r = *p;` read no memory at all. Whether the location is then read or
-  // written shows up as a separate load or store on the resulting lvalue, which
-  // registers its own use -- so counting these as uses would report `&p->id`,
-  // which accesses nothing.
+  // `p->m`, `*p` and `p[i]` count as ACCESSES here, even though strictly they
+  // only compute a location and `&p->m` touches nothing.
   //
-  // A MemberExpr naming a METHOD is the callee of a member call, not a field
-  // access: the call binds the pointee to `this` and its body is assumed to load
-  // it, so that stays a use. This is what keeps `p->~S(); p->~S();` reported.
-  if (const auto *ME = dyn_cast_or_null<MemberExpr>(P))
-    return isa<FieldDecl>(ME->getMemberDecl()) ? UseShape::ComputesAddress
-                                               : UseShape::AccessesPointee;
-  if (const auto *ASE = dyn_cast_or_null<ArraySubscriptExpr>(P))
-    return ASE->getBase() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
+  // Demoting them, and relying on the load/store hook to record the real access,
+  // was tried and lost reports. The hook is reliable for a READ, which always
+  // carries an lvalue-to-rvalue conversion, but a WRITE has no such marker, and a
+  // destination reached through a subscript -- `p[0].id = 1`, `p->arr[0] = 1` --
+  // slipped through the marking entirely. Erring towards "this is an access"
+  // costs a false positive on `&p->id`; erring the other way cost eleven
+  // ASan-confirmed heap-use-after-frees.
+  //
+  // The load hook still earns its place: it records accesses through an lvalue
+  // whose pointer was never read directly, such as `(p + 0)->id`.
   if (const auto *UO = dyn_cast_or_null<UnaryOperator>(P)) {
-    if (UO->getOpcode() == UO_Deref || UO->getOpcode() == UO_AddrOf)
-      return UseShape::ComputesAddress;
     // A PREFIX `++p` / `--p` reads the value to compute a new address; that is
     // not by itself a use of the object the pointer designates. A POSTFIX
     // `p++` / `p--` evaluates to the pointer from BEFORE the increment -- the
