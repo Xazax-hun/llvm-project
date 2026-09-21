@@ -2955,13 +2955,16 @@ void delete_param_pointer(int* x) { // expected-warning {{parameter does not liv
 }
 
 // A borrow held by a pointer member, freed through that member and then read.
-// The member's seed loan has no anchor of its own; it is reported against the
-// member declaration, which is what makes this reachable at all.
+// The read of the member is an ACCESS of the freed object, so the precise
+// use-after-free path anchors this at the use rather than at the member
+// declaration -- the member seed has no anchor of its own, which is why this
+// used to be reported against the declaration instead.
 struct S {
-  int *x; // expected-warning {{borrow held by this member which escapes to a field is later invalidated}} expected-note {{this field dangles}}
+  int *x;
   void foo() {
     delete x; // expected-note {{freed here}}
-    (void)x;
+    (void)x;  // expected-warning {{allocated object does not live long enough}} \
+              // expected-note {{later used here}}
   }
 };
 
@@ -3319,15 +3322,15 @@ struct Holder {
 } // namespace CXXDefaultInitExprTests
 
 namespace base_class_fields {
-struct X { int* x; }; // expected-note {{this field dangles}}
+struct X { int* x; };
 struct Y : X {
   int* y;
   void bar() {
     {
       int a;
-      x = &a; // expected-warning {{stack memory associated with local variable 'a' escapes to the field 'x' which will dangle}}
-    }
-    (void)x;
+      x = &a; // expected-warning {{local variable 'a' does not live long enough}}
+    }         // expected-note {{destroyed here}}
+    (void)x;  // expected-note {{later used here}}
   }
 };
 } // namespace base_class_fields

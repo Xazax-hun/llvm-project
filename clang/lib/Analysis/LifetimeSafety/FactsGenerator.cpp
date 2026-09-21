@@ -1147,6 +1147,26 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
         UntrackedConstructReason::VoidPointerCast, cast<Expr>(CE)));
 
+  // THE LOAD is where the object is actually touched. `p->m` and `*p` are address
+  // arithmetic that read no memory -- `&p->m` proves it, and the generator emits
+  // identical facts for `sink = p->id` and `int *q = &p->id` -- so the use of the
+  // POINTEE belongs here, at the conversion, not at the `->`. The lvalue's origin
+  // received the pointer's loans by flow, so liveness propagates back to the
+  // pointer.
+  //
+  // Must come BEFORE the bail-out below: reading a pointee usually yields a
+  // scalar, which has no origin of its own, so the bail-out would skip exactly
+  // the loads we care about. handleUse deduplicates, so a load of a plain
+  // variable, already registered by VisitDeclRefExpr, costs nothing.
+  // `(void)p->id` needs no conversion -- a discarded-value expression may stay an
+  // lvalue -- so the load is not spelled out. Counted as one anyway: the
+  // conservative reading is that the object was touched, and it is how much of
+  // the test suite spells "and then it is used".
+  if ((CE->getCastKind() == CK_LValueToRValue ||
+       CE->getCastKind() == CK_ToVoid) &&
+      CE->getSubExpr()->isGLValue())
+    markPointeeAccess(CE->getSubExpr());
+
   OriginNode *Dest = getOriginNode(*CE);
   if (!Dest)
     return;
@@ -1418,6 +1438,28 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // (see WritesPartOfDestination).
   const QualType SpelledDestTy = LHSExpr->getType().getNonReferenceType();
   LHSExpr = LHSExpr->IgnoreParenImpCasts();
+  // A STORE through a pointer touches the pointee just as a load does, and it is
+  // not spelled with an lvalue-to-rvalue conversion -- so `p->~S(); p->id = 1;`
+  // and the cursor idiom `w++->id = 1;` had no use of the pointee at all.
+  //
+  // Only when the destination is reached BY FOLLOWING a pointer. Writing a
+  // variable, or a member of a local object, overwrites that storage rather than
+  // something a pointer designates, and is already modelled as a write that kills
+  // the destination's loans.
+  // Marked on the BASE, i.e. on the thing written THROUGH -- not on the
+  // destination lvalue. In `q->f = v` the object touched is `*q`, so `q` is what
+  // must be live; the destination's own origin holds the value being REPLACED,
+  // and overwriting a dangling value is not a use of it. Marking the destination
+  // reported `this->p = kGlobal.data();` as a use of whatever `p` held before.
+  if (const auto *ME = dyn_cast<MemberExpr>(LHSExpr)) {
+    if (ME->isArrow())
+      markPointeeAccess(ME->getBase(), /*ForceOwnFact=*/true);
+  } else if (const auto *UO = dyn_cast<UnaryOperator>(LHSExpr)) {
+    if (UO->getOpcode() == UO_Deref)
+      markPointeeAccess(UO->getSubExpr(), /*ForceOwnFact=*/true);
+  } else if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(LHSExpr)) {
+    markPointeeAccess(ASE->getBase(), /*ForceOwnFact=*/true);
+  }
   // Look through a value-preserving explicit reference cast on the destination
   // (e.g. `static_cast<int*&>(p) = ...` or the C-style `(int*&)p = ...`), which
   // preserves the underlying lvalue but is not stripped by IgnoreParenImpCasts.
@@ -4356,6 +4398,39 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
   return false;
 }
 
+/// Registers an ACCESS of the lvalue \p E -- a load or a store -- as a use.
+///
+/// Exempt from the lost-loan sentinel: that sentinel reads "a use of an origin
+/// holding no loan" as "a borrow was lost", which is the right inference for a
+/// read of a POINTER value and the wrong one here. Loading a pointee usually
+/// yields a scalar, and an `int` never carries a borrow, so `p[0] += n;` would
+/// otherwise report a lost borrow that never existed. It also stopped a second,
+/// duplicate lost-loan appearing wherever the sentinel already fires.
+void FactsGenerator::markPointeeAccess(const Expr *E, bool ForceOwnFact) {
+  if (ForceOwnFact) {
+    // A STORE destination needs a fact of its OWN. handleUse deduplicates by
+    // expression, and handleAssignment goes on to mark the LHS use written --
+    // which makes transferUseSubtree drop it, so the access would be recorded
+    // and then thrown away. One fact cannot mean both "the pointee's old value
+    // is replaced, so its value-liveness ends" and "the pointee was not
+    // touched"; the second is false for a store through a pointer. Splitting an
+    // expression into a use and a write is the same shape handleAssignment
+    // already uses for a reference binding.
+    if (OriginNode *Node = getOriginNode(*E)) {
+      UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
+      UF->markAsPointeeAccess();
+      UF->setShape(UseShape::AccessesPointee);
+      CurrentBlockFacts.push_back(UF);
+    }
+    return;
+  }
+  bool IsNew = !UseFacts.contains(E);
+  handleUse(E);
+  if (IsNew)
+    if (UseFact *UF = UseFacts.lookup(E))
+      UF->markAsPointeeAccess();
+}
+
 /// Classifies how the value read from \p E touches the pointer: see UseShape.
 ///
 /// Asked of the READ, not of the consuming expression, because that is where the
@@ -4381,7 +4456,7 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
 /// positive rather than a missed report.
 UseShape FactsGenerator::classifyUse(const Expr *E) const {
   if (!E->getType()->isPointerType())
-    return UseShape::MayFollow;
+    return UseShape::AccessesPointee;
   const ParentMap &PM = AC.getParentMap();
   const Stmt *Child = E;
   const Stmt *P = PM.getParent(Child);
@@ -4391,19 +4466,40 @@ UseShape FactsGenerator::classifyUse(const Expr *E) const {
     Child = P;
     P = PM.getParent(P);
   }
+  // Address arithmetic: these COMPUTE a location without touching it. `&p->m`
+  // and `S &r = *p;` read no memory at all. Whether the location is then read or
+  // written shows up as a separate load or store on the resulting lvalue, which
+  // registers its own use -- so counting these as uses would report `&p->id`,
+  // which accesses nothing.
+  //
+  // A MemberExpr naming a METHOD is the callee of a member call, not a field
+  // access: the call binds the pointee to `this` and its body is assumed to load
+  // it, so that stays a use. This is what keeps `p->~S(); p->~S();` reported.
+  if (const auto *ME = dyn_cast_or_null<MemberExpr>(P))
+    return isa<FieldDecl>(ME->getMemberDecl()) ? UseShape::ComputesAddress
+                                               : UseShape::AccessesPointee;
+  if (const auto *ASE = dyn_cast_or_null<ArraySubscriptExpr>(P))
+    return ASE->getBase() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
   if (const auto *UO = dyn_cast_or_null<UnaryOperator>(P)) {
-    // `++p` / `--p` retarget the pointer; `!p` only tests it.
+    if (UO->getOpcode() == UO_Deref || UO->getOpcode() == UO_AddrOf)
+      return UseShape::ComputesAddress;
+    // A PREFIX `++p` / `--p` reads the value to compute a new address; that is
+    // not by itself a use of the object the pointer designates. A POSTFIX
+    // `p++` / `p--` evaluates to the pointer from BEFORE the increment -- the
+    // very object that died -- so it may still be followed. Neither makes any
+    // claim that what the pointer designates AFTERWARDS is valid, so `Retarget`
+    // only fails to SET a bit and never cancels a dereference that follows.
     if (UO->isIncrementDecrementOp())
-      return UseShape::Retarget;
+      return UO->isPostfix() ? UseShape::AccessesPointee : UseShape::NotAUse;
     if (UO->getOpcode() == UO_LNot)
-      return UseShape::ValueOnly;
-    return UseShape::MayFollow;
+      return UseShape::NotAUse;
+    return UseShape::AccessesPointee;
   }
   if (const auto *BO = dyn_cast_or_null<BinaryOperator>(P)) {
     // Comparing or testing a pointer reads only its value, and leaves it
     // designating the same storage.
     if (BO->isComparisonOp() || BO->isLogicalOp())
-      return UseShape::ValueOnly;
+      return UseShape::NotAUse;
     // Pointer arithmetic retargets the pointer -- but only the forms that
     // actually ASSIGN to it. `p + 1` leaves `p` designating exactly what it did
     // before and merely computes a new value; it is the RESULT that is
@@ -4417,33 +4513,33 @@ UseShape FactsGenerator::classifyUse(const Expr *E) const {
          BO->getRHS()->getType()->isPointerType());
     if (IsPtrAndInt) {
       if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_SubAssign)
-        return UseShape::Retarget;
+        return UseShape::NotAUse;
       // `q - p` on two pointers is a distance and retargets nothing either; it
       // falls here too, since IsPtrAndInt already excluded it.
       if (BO->getOpcode() == BO_Add || BO->getOpcode() == BO_Sub)
-        return UseShape::ValueOnly;
+        return UseShape::ComputesAddress;
     }
-    return UseShape::MayFollow;
+    return UseShape::AccessesPointee;
   }
   // A discarded value cannot be followed. `(void)p` parses as a CStyleCastExpr to
   // void; the implicit-cast loop above already skipped any conversion.
   if (const auto *CE = dyn_cast_or_null<CastExpr>(P))
     if (CE->getType()->isVoidType())
-      return UseShape::ValueOnly;
+      return UseShape::ComputesAddress;
   // The controlling expression of a branch or loop only tests the value. Checked
   // against the specific child slot: a ConditionalOperator's RESULT arms and a
   // ForStmt's body or increment are not conditions, and their value flows on.
   if (const auto *If = dyn_cast_or_null<IfStmt>(P))
-    return If->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+    return If->getCond() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
   if (const auto *W = dyn_cast_or_null<WhileStmt>(P))
-    return W->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+    return W->getCond() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
   if (const auto *D = dyn_cast_or_null<DoStmt>(P))
-    return D->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+    return D->getCond() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
   if (const auto *F = dyn_cast_or_null<ForStmt>(P))
-    return F->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+    return F->getCond() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
   if (const auto *CO = dyn_cast_or_null<ConditionalOperator>(P))
-    return CO->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
-  return UseShape::MayFollow;
+    return CO->getCond() == Child ? UseShape::NotAUse : UseShape::AccessesPointee;
+  return UseShape::AccessesPointee;
 }
 
 void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {

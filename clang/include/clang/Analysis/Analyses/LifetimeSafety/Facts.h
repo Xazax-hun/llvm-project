@@ -338,24 +338,34 @@ public:
             const OriginManager &OM) const override;
 };
 
-/// How a use touches a pointer value, for deciding whether a dangling pointer
-/// can still be FOLLOWED from this point on. The distinction matters because a
-/// use that merely reads the pointer value is harmless once the pointee is gone:
-/// `p->~S(); ++p;` is fine, `p->~S(); p->id;` is not.
+/// What a read of a pointer value does with it. Only the third kind is an
+/// access of the pointee -- and note that whether an ADDRESS COMPUTATION ends up
+/// touching the pointee is not decided here at all: `&p->m` touches nothing
+/// while `sink = p->m` and `p->m = 1` both do. That question is answered
+/// separately, where the resulting lvalue is loaded or stored, and recorded by
+/// `UseFact::isPointeeAccess`.
 enum class UseShape : uint8_t {
-  /// The pointer is followed (`*p`, `p->m`, `p[i]`, the object argument of
-  /// `p->method()`), or handed somewhere that could follow it (a call argument, a
-  /// copy into another variable). The conservative default: anything not
-  /// positively recognised as one of the cases below lands here, so a use that
-  /// could reach the dead object is never mistaken for a harmless one.
-  MayFollow,
-  /// Only the pointer VALUE is read, and it still designates the same storage:
-  /// `p == q`, `if (p)`, `(void)p`.
-  ValueOnly,
-  /// Only the value is read, and the result no longer designates the same
-  /// storage: `++p`, `p + 1`. Whether what it designates INSTEAD is valid is a
-  /// bounds question, which is out of scope for this analysis.
-  Retarget,
+  /// Reaches the pointee, or hands the pointer to something assumed to: a call
+  /// argument, the implicit object of a member call, a copy into another
+  /// variable, or simply a shape not recognised below. The conservative default,
+  /// so an unrecognised construct costs a false positive rather than a missed
+  /// report.
+  AccessesPointee,
+  /// Computes a location from the pointer without touching it -- `*p`, `p->m`,
+  /// `p[i]`, `&p->m`. Still a use: it keeps the borrow live for whatever accesses
+  /// the resulting lvalue. Making these non-uses lost real reports through
+  /// multi-level chains such as `(**vpp).use()`.
+  ComputesAddress,
+  /// Reads the pointer VALUE and nothing else -- `++p`, `p += n`, `p == q`,
+  /// `if (p)`. Not a use at all: it neither touches the pointee nor needs the
+  /// borrow to stay live, since anything that later accesses the pointee records
+  /// its own access. This is what keeps `{ int x; p = &x; } ++p;` quiet while
+  /// `(p++)->m` still reports.
+  ///
+  /// It asserts nothing about what the pointer designates AFTERWARDS either, so
+  /// it never cancels a later access: believing `++p` lands on a valid element
+  /// produced a hole every time it was tried.
+  NotAUse,
 };
 
 class UseFact : public Fact {
@@ -377,7 +387,12 @@ class UseFact : public Fact {
   // that difference is consumed, and it is the same in both.
   bool IsReferenceBinding = false;
   /// See UseShape.
-  UseShape Shape = UseShape::MayFollow;
+  UseShape Shape = UseShape::AccessesPointee;
+  /// True when this use is an ACCESS OF THE POINTEE -- the load or store of an
+  /// lvalue reached by following a pointer -- rather than a read of the pointer
+  /// value itself. `p->m` and `*p` only compute a location; the access is the
+  /// load or store applied to the result, and that is what touches the object.
+  bool IsPointeeAccess = false;
 
 public:
   static bool classof(const Fact *F) { return F->getKind() == Kind::Use; }
@@ -400,6 +415,8 @@ public:
   bool isWritten() const { return IsWritten; }
   void markAsReferenceBinding() { IsReferenceBinding = true; }
   bool isReferenceBinding() const { return IsReferenceBinding; }
+  void markAsPointeeAccess() { IsPointeeAccess = true; }
+  bool isPointeeAccess() const { return IsPointeeAccess; }
   void setShape(UseShape S) { Shape = S; }
   UseShape getShape() const { return Shape; }
 

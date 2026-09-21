@@ -24,9 +24,19 @@ struct S {
 // Destroying through a pointer or reference, then using the pointer VALUE.
 //===----------------------------------------------------------------------===//
 
-void destroy_loop(S *begin, S *end) {
+// Reported, and the note points at the destructor call in the BODY -- the use
+// that actually reaches the object -- rather than at whichever address
+// computation in the loop header happens to come first in the file.
+//
+// The report itself is the known element-identity gap: every element of
+// `current` shares one loan, so the model cannot see that each iteration
+// destroys a different object. Pointer arithmetic deliberately does not excuse
+// it; believing `++current` lands on a valid element produced a hole every time
+// it was tried.
+void destroy_loop(S *begin, S *end) { // expected-warning {{parameter is later invalidated}}
   for (S *current = begin; current != end; ++current)
-    current->~S();
+    current->~S(); // expected-note {{invalidated here}} \
+                   // expected-note {{later used here}}
 }
 
 void destroy_then_advance(S *p) {

@@ -278,6 +278,9 @@ private:
   /// If so, creates a `TestPointFact` and returns true.
   bool handleTestPoint(const CXXFunctionalCastExpr *FCE);
 
+  /// Registers an access (load or store) of the lvalue `E` as a use.
+  void markPointeeAccess(const Expr *E, bool ForceOwnFact = false);
+
   /// Classifies how the value read from `E` touches the pointer: see UseShape.
   UseShape classifyUse(const Expr *E) const;
 

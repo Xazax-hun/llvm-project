@@ -1,18 +1,26 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++23 -Wlifetime-safety -verify %s
 
-// Two questions about a dangling pointer, answered over ALL the uses forward of
-// the point where its pointee died rather than over the nearest one.
+// WHAT COUNTS AS USING A POINTEE.
 //
-// Reading only the nearest use was the defect: liveness carries a single
-// `CausingFact`, so a harmless use sitting between a lifetime-ending event and a
-// real dereference answered for both and cancelled the report.
+// `p->m`, `*p` and `p[i]` do not touch anything -- they compute a location.
+// `&p->m` proves it, and the generator emits IDENTICAL facts for `sink = p->id`
+// and `int *q = &p->id`. The object is touched by the LOAD or the STORE applied
+// to the resulting lvalue, so that is where the access is recorded: at the
+// lvalue-to-rvalue conversion for a read, at the assignment destination for a
+// write. Everything else is assumed to touch the pointee -- any call, including
+// a member call, whose body is presumed to load it.
 //
-// Note on anchors below: the primary warning points at where the borrow was
-// created, and the "later used here" note at the NEAREST use after the
-// lifetime-ending event -- which in the gap cases is the harmless use, not the
-// dereference that makes it an error. The dereference is what is now detected;
-// pointing the note at it would mean preferring it as the causing fact, which is a
-// separate change.
+// A read of the pointer VALUE alone -- `++p`, `p += n`, `p == q`, `if (p)` -- is
+// not a use at all. It neither touches the pointee nor needs the borrow kept
+// alive, because whatever accesses the pointee later records its own access. It
+// asserts nothing about what the pointer designates AFTERWARDS either, so it
+// never cancels a later access: believing `++p` lands on a valid element
+// produced a hole every time it was tried.
+//
+// The question is only ASKED where an object's lifetime ended while its storage
+// survives -- an explicit destructor call -- since that is the one case where
+// merely holding the pointer is still fine. Where the storage itself is gone,
+// holding the borrow at all is the error and every use reports.
 
 struct S {
   int id;
@@ -23,142 +31,155 @@ volatile int sink;
 void take(int *);
 
 //===----------------------------------------------------------------------===//
-// An OBJECT's lifetime ended while its storage survives (an explicit destructor
-// call). The error is specifically FOLLOWING the pointer to the dead object, so a
-// use that only reads the pointer value is fine -- but it must not excuse a
-// dereference that comes after it.
+// Storage survives: an explicit destructor call.
 //===----------------------------------------------------------------------===//
 
-// The controls, which always worked.
-void no_gap_read(S *p) { // expected-warning {{parameter is later invalidated}}
-  p->~S();               // expected-note {{invalidated here}}
-  sink = p->id;          // expected-note {{later used here}}
+void read_after_destroy(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                      // expected-note {{invalidated here}}
+  sink = p->id;                 // expected-note {{later used here}}
 }
 
-void no_gap_destroy_twice(S *p) { // expected-warning {{parameter is later invalidated}}
-  p->~S();                        // expected-note {{invalidated here}}
-  p->~S();                        // expected-note {{later used here}}
+void destroy_twice(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                 // expected-note {{invalidated here}}
+  p->~S();                 // expected-note {{later used here}}
 }
 
-// A value-only use in between. `p` still designates the destroyed object -- a
-// comparison, a discarded read and a null test do not move it -- so the
-// dereference that follows is a use of a dead object.
+// A use that only reads the pointer value in between must not answer for the
+// dereference that follows -- reading just the nearest use let it cancel the
+// report. The note points at the access, not at the nearer harmless read.
 void gap_compare(S *p, S *r) { // expected-warning {{parameter is later invalidated}}
   p->~S();                     // expected-note {{invalidated here}}
-  sink = (p == r);             // expected-note {{later used here}}
-  sink = p->id;
+  sink = (p == r);
+  sink = p->id; // expected-note {{later used here}}
 }
 
 void gap_discarded(S *p) { // expected-warning {{parameter is later invalidated}}
   p->~S();                 // expected-note {{invalidated here}}
-  (void)p;                 // expected-note {{later used here}}
-  sink = p->id;
+  (void)p;
+  sink = p->id; // expected-note {{later used here}}
 }
 
 void gap_null_test(S *p) { // expected-warning {{parameter is later invalidated}}
   p->~S();                 // expected-note {{invalidated here}}
-  if (p) {                 // expected-note {{later used here}}
+  if (p) {
   }
-  sink = p->id;
+  sink = p->id; // expected-note {{later used here}}
 }
 
 void gap_then_destroy_again(S *p, S *r) { // expected-warning {{parameter is later invalidated}}
   p->~S();                                // expected-note {{invalidated here}}
-  sink = (p == r);                        // expected-note {{later used here}}
+  sink = (p == r);
+  p->~S(); // expected-note {{later used here}}
+}
+
+// POSTFIX `p++` evaluates to the pointer from BEFORE the increment -- the object
+// that just died -- so the load through it reaches the dead object. This is the
+// cursor idiom, silent while arithmetic could cancel a dereference.
+void postfix_yields_old_value(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                            // expected-note {{invalidated here}}
+  sink = (p++)->id;                   // expected-note {{later used here}}
+}
+
+// A STORE touches the pointee exactly as a load does, and is spelled with no
+// conversion at all.
+void store_after_destroy(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                       // expected-note {{invalidated here}}
+  p->id = 1;                     // expected-note {{later used here}}
+}
+
+// Reading the pointer value is not an error here: the storage is still there, so
+// the pointer is still a valid pointer.
+void bare_compare(S *p, S *r) {
   p->~S();
+  sink = (p == r); // no-warning
 }
 
-// `e - p` is a distance: it reads both pointers and retargets neither.
-void gap_pointer_distance(S *p, S *e) { // expected-warning {{parameter is later invalidated}}
-  p->~S();                              // expected-note {{invalidated here}}
-  sink = (int)(e - p);                  // expected-note {{later used here}}
-  sink = p->id;
-}
-
-// `p + 1` computes a new value and leaves `p` designating the dead object; it is
-// the RESULT that is retargeted, and the result is a separate origin. Treating the
-// read of `p` as a retarget here lost this report.
-void gap_non_mutating_arithmetic(S *p) { // expected-warning {{parameter is later invalidated}}
-  p->~S();                               // expected-note {{invalidated here}}
-  S *q = p + 1;                          // expected-note {{later used here}}
-  (void)q;
-  sink = p->id;
-}
-
-//===----------------------------------------------------------------------===//
-// Pointer arithmetic that ASSIGNS to the pointer does excuse what follows: `p` no
-// longer designates the object that died, and whether the element it designates
-// instead is valid is a bounds question, out of scope for this analysis.
-//===----------------------------------------------------------------------===//
-
-void retarget_then_read(S *p) {
+void bare_increment(S *p) {
   p->~S();
+  ++p; // no-warning
+}
+
+// DELIBERATE FALSE POSITIVE: `++p` moves to a different, live element. Silence
+// would require believing the new element is valid.
+void prefix_then_read(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                    // expected-note {{invalidated here}}
   ++p;
-  sink = p->id; // no-warning: a different element
+  sink = p->id; // expected-note {{later used here}}
 }
 
-void retarget_compound_then_read(S *p) {
-  p->~S();
-  p += 1;
-  sink = p->id; // no-warning
+// DELIBERATE FALSE POSITIVE, and really the known element-identity gap: every
+// element of `c` shares one loan, so the model cannot see that each iteration
+// destroys a different object. The note points at the destructor call in the
+// BODY -- the use that reaches the object -- not at the loop header.
+void destroy_loop(S *begin, S *end) { // expected-warning {{parameter is later invalidated}}
+  for (S *c = begin; c != end; ++c)
+    c->~S(); // expected-note {{invalidated here}} \
+             // expected-note {{later used here}}
 }
-
-// The loop this rule exists for: each iteration destroys a different element.
-void destroy_loop(S *begin, S *end) {
-  for (S *current = begin; current != end; ++current)
-    current->~S();
-}
-
-// KNOWN LIMIT: arithmetic whose net displacement is zero is still treated as
-// retargeting, so `++p; --p;` and `p += 0;` before a dereference stay silent.
-// Recognising them would mean evaluating the displacement; both spellings are
-// contrived, and the rule being applied is "the pointer was assigned to, so we no
-// longer claim it designates the dead object".
 
 //===----------------------------------------------------------------------===//
-// The STORAGE is gone (a scope ended). Holding the borrow at all is the error, so
-// every use reports -- a bare read included. The single exception is arithmetic,
-// which computes an address and touches nothing.
+// Storage is gone: a scope ended. An address computed from dead storage is still
+// dead storage, so nothing here is exempt except reads of the pointer value.
 //===----------------------------------------------------------------------===//
 
+void scope_deref() {
+  int *p;
+  {
+    int x = 1;
+    p = &x;  // expected-warning {{local variable 'x' does not live long enough}}
+  }          // expected-note {{destroyed here}}
+  sink = *p; // expected-note {{later used here}}
+}
+
+// Reading only the pointer value touches nothing -- the same rule as above, not
+// a special case for expiry.
 void scope_increment_only() {
   int *p;
   {
     int x = 1;
     p = &x;
   }
-  ++p; // no-warning: computes an address, reads no dead memory
+  ++p; // no-warning
 }
 
-// Unlike the invalidation case, arithmetic does NOT excuse a later dereference
-// here: the storage `++p` lands in is equally gone.
-void scope_increment_then_deref() {
+void scope_compare_only(int *q) {
   int *p;
   {
     int x = 1;
-    p = &x; // expected-warning {{local variable 'x' does not live long enough}}
-  }         // expected-note {{destroyed here}}
-  ++p;      // expected-note {{later used here}}
-  sink = *p;
+    p = &x;
+  }
+  sink = (p == q); // no-warning
 }
 
-// Liveness flowing to another variable must not lose what the source already
-// accumulated. `e`'s only use is arithmetic, and the flow `b -> e` used to
-// OVERWRITE `b`'s state with `e`'s, forgetting the dereference of `b` below.
-// ASan confirms a stack-use-after-scope here.
-void flow_must_not_clobber_source() {
-  int *b = nullptr;
+// The shapes an arithmetic exemption used to silence, each an ASan-confirmed
+// stack-use-after-scope.
+void scope_postfix_arrow() {
+  S *p;
   {
-    int arr[4]{};
-    b = arr;      // expected-warning {{local variable 'arr' does not live long enough}}
-  }               // expected-note {{destroyed here}}
-  int *e = b + 1; // expected-note {{later used here}}
-  ++e;
-  sink = *b;
+    S a[4]{};
+    p = a; // expected-warning {{local variable 'a' does not live long enough}}
+  }        // expected-note {{destroyed here}}
+  sink = (p++)->id; // expected-note {{later used here}}
 }
 
-// A bare read of a pointer to dead storage still reports: the value is
-// indeterminate, and this is also how the rest of the suite spells "used here".
+void scope_prefix_arrow() {
+  S *p;
+  {
+    S a[4]{};
+    p = a; // expected-warning {{local variable 'a' does not live long enough}}
+  }        // expected-note {{destroyed here}}
+  sink = (++p)->id; // expected-note {{later used here}}
+}
+
+void scope_cursor_store() {
+  S *w;
+  {
+    S b[8]{};
+    w = b; // expected-warning {{local variable 'b' does not live long enough}}
+  }        // expected-note {{destroyed here}}
+  w++->id = 1; // expected-note {{later used here}}
+}
+
 void scope_bare_read() {
   int *p;
   {
@@ -168,7 +189,6 @@ void scope_bare_read() {
   (void)p;  // expected-note {{later used here}}
 }
 
-// Handing the pointer to a callee, which may follow it.
 void scope_pass_to_callee() {
   int *p;
   {
@@ -176,4 +196,18 @@ void scope_pass_to_callee() {
     p = &x; // expected-warning {{local variable 'x' does not live long enough}}
   }         // expected-note {{destroyed here}}
   take(p);  // expected-note {{later used here}}
+}
+
+// Liveness flowing to another variable must not lose what the source
+// accumulated: the flow `b -> e` used to OVERWRITE `b`'s state with `e`'s,
+// forgetting the dereference of `b` below. ASan confirms this one.
+void flow_must_not_clobber_source() {
+  int *b = nullptr;
+  {
+    int arr[4]{};
+    b = arr; // expected-warning {{local variable 'arr' does not live long enough}}
+  }               // expected-note {{destroyed here}}
+  int *e = b + 1;
+  ++e;
+  sink = *b; // expected-note {{later used here}}
 }

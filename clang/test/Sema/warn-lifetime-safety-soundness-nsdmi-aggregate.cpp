@@ -105,6 +105,10 @@ struct Counter {
 void useQuiet() {
   FromGlobal f{};
   Counter c{};
+  // Twice: once for the view itself and once for the `const char &` element the
+  // subscript loads, which is a second access of the same borrow. Cosmetic
+  // duplication of one hazard, not two hazards.
+  // expected-warning@+2 {{borrows from a mutable global or static object}}
   // expected-warning@+1 {{borrows from a mutable global or static object}}
   sink = (char)(c.n + f.v.data()[0]);
 }

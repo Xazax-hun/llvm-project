@@ -77,8 +77,8 @@ struct CtorPointerField {
 };
 
 struct MemberSetters {
-  std::string_view view;  // expected-note 6 {{this field dangles}}
-  const char* p;          // expected-note 6 {{this field dangles}}
+  std::string_view view;  // expected-note 5 {{this field dangles}}
+  const char* p;          // expected-note 5 {{this field dangles}}
 
   void setWithParam(std::string s) {
     view = s;     // expected-warning {{stack memory associated with parameter 's' escapes to the field 'view' which will dangle}}
@@ -138,24 +138,29 @@ struct MemberSetters {
     p = local.data(); // expected-warning {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
   }
 
+  // The reads below are ACCESSES of the borrow, so the precise use-after-scope
+  // path claims these rather than the field-escape backstop: same bug, reported
+  // at the borrow with a real use location instead of only at the field.
   void use_after_scope() {
     {
       std::string local;
-      view = local;     // expected-warning {{stack memory associated with local variable 'local' escapes to the field 'view' which will dangle}}
-      p = local.data(); // expected-warning {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
-    }
-    (void)view;
-    (void)p;
+      view = local;     // expected-warning {{local variable 'local' does not live long enough}}
+      p = local.data(); // expected-warning {{local variable 'local' does not live long enough}}
+    }             // expected-note 2 {{destroyed here}}
+    (void)view;   // expected-note {{later used here}}
+    (void)p;      // expected-note {{later used here}}
   }
 
+  // Reassigning the fields afterwards does not help: the reads happen first, and
+  // they are reads of the dead borrow.
   void use_after_scope_saved_after_reassignment() {
     {
       std::string local;
-      view = local;
-      p = local.data();
-    }
-    (void)view;
-    (void)p;
+      view = local;     // expected-warning {{local variable 'local' does not live long enough}}
+      p = local.data(); // expected-warning {{local variable 'local' does not live long enough}}
+    }             // expected-note 2 {{destroyed here}}
+    (void)view;   // expected-note {{later used here}}
+    (void)p;      // expected-note {{later used here}}
 
     view = kGlobal;
     p = kGlobal.data();

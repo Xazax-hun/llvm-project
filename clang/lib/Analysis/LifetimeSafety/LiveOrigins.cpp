@@ -115,13 +115,25 @@ public:
   Lattice join(Lattice L1, Lattice L2) const {
     assert(L1.BlockLocal.isEmpty() && L2.BlockLocal.isEmpty() &&
            "block-local origins must not reach a block boundary");
-    // Take the earliest Fact to make the join hermetic and commutative.
-    auto CombineCausingFact = [](CausingFactType A,
-                                 CausingFactType B) -> CausingFactType {
+    auto TouchesPointee = [](CausingFactType F) {
+      const auto *UF = F.dyn_cast<const UseFact *>();
+      return UF && UF->getShape() == UseShape::AccessesPointee;
+    };
+    auto CombineCausingFact = [&](CausingFactType A,
+                                  CausingFactType B) -> CausingFactType {
       if (!A)
         return B;
       if (!B)
         return A;
+      // Prefer a use that TOUCHES THE POINTEE. It is what makes a use after a
+      // lifetime end an error, so it is what the "later used here" note should
+      // point at -- otherwise the note lands on whichever address computation
+      // happens to come first in the file, which for
+      // `for (S *c = b; c != e; ++c) c->~S();` is the loop header rather than
+      // the destructor call in the body.
+      if (TouchesPointee(A) != TouchesPointee(B))
+        return TouchesPointee(A) ? A : B;
+      // Take the earliest Fact to make the join hermetic and commutative.
       return GetFactLoc(A) < GetFactLoc(B) ? A : B;
     };
     auto CombineLivenessKind = [](LivenessKind K1,
@@ -141,13 +153,12 @@ public:
       // cancel another's dereference.
       if (!L1)
         return LivenessInfo(L2->CausingFact, LivenessKind::Maybe,
-                            L2->FollowedForward, L2->FollowedSameTarget);
+                            L2->FollowedSameTarget);
       if (!L2)
         return LivenessInfo(L1->CausingFact, LivenessKind::Maybe,
-                            L1->FollowedForward, L1->FollowedSameTarget);
+                            L1->FollowedSameTarget);
       return LivenessInfo(CombineCausingFact(L1->CausingFact, L2->CausingFact),
                           CombineLivenessKind(L1->Kind, L2->Kind),
-                          L1->FollowedForward || L2->FollowedForward,
                           L1->FollowedSameTarget || L2->FollowedSameTarget);
     };
     // A symmetric join is required here. If an origin is live on one branch but
@@ -173,6 +184,16 @@ public:
     if (!Cur)
       return In;
     OriginID OID = Cur->getOriginID();
+    // Reading the pointer VALUE -- `++p`, `p == q`, `if (p)` -- does not make the
+    // borrow live. It touches nothing, and anything that accesses the pointee
+    // later records its own access, so nothing is lost by ignoring it. This is
+    // what keeps `{ int x; p = &x; } ++p;` quiet while `(p++)->m` still reports.
+    //
+    // Only for that shape. Address computation (`*p`, `p->m`) must stay a use:
+    // making it one too lost real reports through multi-level chains such as
+    // `(**vpp).use()`, where no single access names the outer pointer.
+    if (UF.getShape() == UseShape::NotAUse)
+      return In;
     Lattice Out = In;
     // Write kills liveness.
     if (UF.isWritten())
@@ -186,17 +207,26 @@ public:
       // between a lifetime-ending event and a real dereference would answer for
       // both -- backwards, this use is reached after the dereference, and simply
       // storing its own shape would forget the dereference. See LivenessInfo.
-      bool Fwd = UF.getShape() != UseShape::Retarget;
-      bool SameTarget = UF.getShape() == UseShape::MayFollow;
+      // Both bits only ever accumulate -- nothing CLEARS them. Pointer
+      // Accumulates over every forward use and is never cleared: see
+      // LivenessInfo. Storing only this use's own shape would let a harmless use
+      // between a lifetime-ending event and a real dereference answer for both,
+      // since backwards this use is reached AFTER that dereference. A use already
+      bool SameTarget = UF.getShape() == UseShape::AccessesPointee;
+      // Prefer an ACCESS of the pointee as the causing fact. It is what makes a
+      // use-after-lifetime-end an error, so it is the right thing for the
+      // "later used here" note to point at -- whereas the nearest use is often
+      // an address computation, which is why the note for
+      // `for (S *c = b; c != e; ++c) c->~S();` landed on the loop header.
+      CausingFactType Cause = &UF;
       if (const LivenessInfo *Prev = lookupLive(Out, OID)) {
-        Fwd |= Prev->FollowedForward;
-        // Pointer arithmetic retargets: a dereference forward of `++p` reaches
-        // whatever `p` now designates, not the object that died here.
-        if (UF.getShape() != UseShape::Retarget)
-          SameTarget |= Prev->FollowedSameTarget;
+        SameTarget |= Prev->FollowedSameTarget;
+        if (UF.getShape() != UseShape::AccessesPointee)
+          if (const auto *PrevUF = Prev->CausingFact.dyn_cast<const UseFact *>())
+            if (PrevUF->getShape() == UseShape::AccessesPointee)
+              Cause = PrevUF;
       }
-      Out = addLive(Out, OID,
-                    LivenessInfo(&UF, LivenessKind::Must, Fwd, SameTarget));
+      Out = addLive(Out, OID, LivenessInfo(Cause, LivenessKind::Must, SameTarget));
     }
     for (const OriginNode::Edge &E : Cur->children())
       Out = transferUseSubtree(Out, UF, E.Child);
@@ -212,7 +242,6 @@ public:
   Lattice transfer(Lattice In, const OriginEscapesFact &OEF) {
     return addLive(In, OEF.getEscapedOriginID(),
                    LivenessInfo(&OEF, LivenessKind::Must,
-                                /*FollowedForward=*/true,
                                 /*FollowedSameTarget=*/true));
   }
 
@@ -247,10 +276,8 @@ public:
     // with the value.
     if (const LivenessInfo *DestInfo = lookupLive(In, Dest)) {
       LivenessInfo New = *DestInfo;
-      if (const LivenessInfo *PrevSrc = lookupLive(In, Src)) {
-        New.FollowedForward |= PrevSrc->FollowedForward;
+      if (const LivenessInfo *PrevSrc = lookupLive(In, Src))
         New.FollowedSameTarget |= PrevSrc->FollowedSameTarget;
-      }
       Out = addLive(Out, Src, New);
     }
     if (OF.getKillDest())
