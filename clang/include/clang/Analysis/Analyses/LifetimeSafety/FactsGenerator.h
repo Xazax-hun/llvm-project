@@ -278,6 +278,9 @@ private:
   /// If so, creates a `TestPointFact` and returns true.
   bool handleTestPoint(const CXXFunctionalCastExpr *FCE);
 
+  /// Classifies how the value read from `E` touches the pointer: see UseShape.
+  UseShape classifyUse(const Expr *E) const;
+
   // Treats an expression as a use of the referenced object. It will be
   // checked for use-after-free unless it is later marked as being written to
   // (e.g. on the left-hand side of an assignment in the case of a DeclRefExpr).
@@ -286,7 +289,6 @@ private:
   /// aliasing the designated object: the outer origin -- the one holding the borrow
   /// of the object itself -- is what it receives, and must not be peeled to the
   /// r-value origin the way reading a variable's value is.
-  bool useFollowsPointer(const Expr *E) const;
   void handleUse(const Expr *E, bool BoundToReference = false);
 
   /// Soundness: flag a *use* of a global variable whose type is a "container of

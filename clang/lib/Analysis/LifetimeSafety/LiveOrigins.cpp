@@ -136,12 +136,19 @@ public:
     auto CombineLivenessInfo = [&](const LivenessInfo *L1,
                                    const LivenessInfo *L2) -> LivenessInfo {
       assert((L1 || L2) && "unexpectedly merging 2 empty sets");
+      // The "may be followed" bits are joined by OR: a use reachable on ANY
+      // forward path can follow the pointer, so one path's harmless use must not
+      // cancel another's dereference.
       if (!L1)
-        return LivenessInfo(L2->CausingFact, LivenessKind::Maybe);
+        return LivenessInfo(L2->CausingFact, LivenessKind::Maybe,
+                            L2->FollowedForward, L2->FollowedSameTarget);
       if (!L2)
-        return LivenessInfo(L1->CausingFact, LivenessKind::Maybe);
+        return LivenessInfo(L1->CausingFact, LivenessKind::Maybe,
+                            L1->FollowedForward, L1->FollowedSameTarget);
       return LivenessInfo(CombineCausingFact(L1->CausingFact, L2->CausingFact),
-                          CombineLivenessKind(L1->Kind, L2->Kind));
+                          CombineLivenessKind(L1->Kind, L2->Kind),
+                          L1->FollowedForward || L2->FollowedForward,
+                          L1->FollowedSameTarget || L2->FollowedSameTarget);
     };
     // A symmetric join is required here. If an origin is live on one branch but
     // not the other, its confidence must be demoted to `Maybe`.
@@ -170,10 +177,27 @@ public:
     // Write kills liveness.
     if (UF.isWritten())
       Out = removeLive(Out, OID);
-    else
+    else {
       // Read makes origin live with definite confidence (dominates this
       // point).
-      Out = addLive(Out, OID, LivenessInfo(&UF, LivenessKind::Must));
+      //
+      // The "can the pointer still be followed?" bits must ACCUMULATE over the
+      // uses forward of here rather than be replaced, or a harmless use sitting
+      // between a lifetime-ending event and a real dereference would answer for
+      // both -- backwards, this use is reached after the dereference, and simply
+      // storing its own shape would forget the dereference. See LivenessInfo.
+      bool Fwd = UF.getShape() != UseShape::Retarget;
+      bool SameTarget = UF.getShape() == UseShape::MayFollow;
+      if (const LivenessInfo *Prev = lookupLive(Out, OID)) {
+        Fwd |= Prev->FollowedForward;
+        // Pointer arithmetic retargets: a dereference forward of `++p` reaches
+        // whatever `p` now designates, not the object that died here.
+        if (UF.getShape() != UseShape::Retarget)
+          SameTarget |= Prev->FollowedSameTarget;
+      }
+      Out = addLive(Out, OID,
+                    LivenessInfo(&UF, LivenessKind::Must, Fwd, SameTarget));
+    }
     for (const OriginNode::Edge &E : Cur->children())
       Out = transferUseSubtree(Out, UF, E.Child);
     return Out;
@@ -181,9 +205,15 @@ public:
 
   /// An escaping origin (e.g., via return) makes the origin live with definite
   /// confidence, as it dominates this program point.
+  ///
+  /// An escape hands the pointer somewhere this function cannot see, so it counts
+  /// as "may be followed" for both questions: `p->~S(); return p;` gives the
+  /// caller a pointer to a dead object however the caller spells its use.
   Lattice transfer(Lattice In, const OriginEscapesFact &OEF) {
     return addLive(In, OEF.getEscapedOriginID(),
-                   LivenessInfo(&OEF, LivenessKind::Must));
+                   LivenessInfo(&OEF, LivenessKind::Must,
+                                /*FollowedForward=*/true,
+                                /*FollowedSameTarget=*/true));
   }
 
   /// Issuing a new loan to an origin kills its liveness.
@@ -200,8 +230,29 @@ public:
     // If the destination of the flow is live, the source of the flow must also
     // be marked live before this point as its value will flow into the
     // destination.
-    if (const LivenessInfo *DestInfo = lookupLive(In, Dest))
-      Out = addLive(Out, Src, *DestInfo);
+    //
+    // MERGE the "can it still be followed?" bits rather than overwriting them.
+    // `addLive` replaces, which was harmless while the payload only described
+    // *why* the origin is live -- both consumers reported regardless. Now the
+    // bits are an accumulation over the uses forward of here, and in a backward
+    // analysis this flow is visited AFTER a later use of the source, so
+    // overwriting threw that use away:
+    //
+    //   { int arr[4]{}; b = arr; }   // storage gone
+    //   int *e = b + 1;              // flow b -> e, and e's only use is `++e`
+    //   ++e;                         //   so e carries {false, false}
+    //   return *b;                   // real use-after-scope, was unreported
+    //
+    // The source keeps whatever it had and gains whatever the destination can do
+    // with the value.
+    if (const LivenessInfo *DestInfo = lookupLive(In, Dest)) {
+      LivenessInfo New = *DestInfo;
+      if (const LivenessInfo *PrevSrc = lookupLive(In, Src)) {
+        New.FollowedForward |= PrevSrc->FollowedForward;
+        New.FollowedSameTarget |= PrevSrc->FollowedSameTarget;
+      }
+      Out = addLive(Out, Src, New);
+    }
     if (OF.getKillDest())
       Out = removeLive(Out, Dest);
     return Out;

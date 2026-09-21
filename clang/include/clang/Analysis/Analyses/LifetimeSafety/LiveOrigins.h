@@ -59,17 +59,49 @@ struct LivenessInfo {
   /// while `Maybe`-be-alive suggests a potential one on some paths.
   LivenessKind Kind;
 
+  /// Whether some use FORWARD of this point can still FOLLOW the pointer. Needed
+  /// because `CausingFact` is only the *nearest* use: a harmless one sitting
+  /// between a lifetime-ending event and a real dereference would otherwise
+  /// answer for both, and `p->~S(); (void)(p == q); p->id;` went unreported.
+  ///
+  /// Two variants, because the two questions differ in what pointer ARITHMETIC
+  /// means:
+  ///
+  /// `FollowedForward` -- some forward use may follow the pointer, full stop.
+  /// Asked when the STORAGE is gone (a scope ended), where `++p` lands in storage
+  /// that is equally gone, so retargeting does not make a later dereference
+  /// harmless.
+  ///
+  /// `FollowedSameTarget` -- ... and it still designates the object that died.
+  /// Asked when an OBJECT's lifetime ended while its storage survives (an explicit
+  /// destructor call), where `++p` moves to a different element and what happens
+  /// after is a bounds question, out of scope here. This is what lets
+  /// `for (S *c = b; c != e; ++c) c->~S();` stay silent while
+  /// `p->~S(); p->~S();` reports.
+  ///
+  /// Both are joined by OR: a use reachable on ANY forward path counts.
+  bool FollowedForward = false;
+  bool FollowedSameTarget = false;
+
   LivenessInfo() : CausingFact(nullptr), Kind(LivenessKind::Dead) {}
   LivenessInfo(CausingFactType CF, LivenessKind K) : CausingFact(CF), Kind(K) {}
+  LivenessInfo(CausingFactType CF, LivenessKind K, bool FollowedForward,
+               bool FollowedSameTarget)
+      : CausingFact(CF), Kind(K), FollowedForward(FollowedForward),
+        FollowedSameTarget(FollowedSameTarget) {}
 
   bool operator==(const LivenessInfo &Other) const {
-    return CausingFact == Other.CausingFact && Kind == Other.Kind;
+    return CausingFact == Other.CausingFact && Kind == Other.Kind &&
+           FollowedForward == Other.FollowedForward &&
+           FollowedSameTarget == Other.FollowedSameTarget;
   }
   bool operator!=(const LivenessInfo &Other) const { return !(*this == Other); }
 
   void Profile(llvm::FoldingSetNodeID &IDBuilder) const {
     IDBuilder.AddPointer(CausingFact.getOpaqueValue());
     IDBuilder.Add(Kind);
+    IDBuilder.AddBoolean(FollowedForward);
+    IDBuilder.AddBoolean(FollowedSameTarget);
   }
 };
 

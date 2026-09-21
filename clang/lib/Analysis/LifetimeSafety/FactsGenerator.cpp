@@ -4356,15 +4356,32 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
   return false;
 }
 
-/// Whether the value read from \p E is used to FOLLOW a pointer -- `*E`, `E->m`,
-/// `E->method()`, `E[i]` -- rather than just to read the pointer itself (`++E`,
-/// `E != end`, passing it along).
+/// Classifies how the value read from \p E touches the pointer: see UseShape.
 ///
-/// Asked of the READ, not of the dereference expression, because that is where the
+/// Asked of the READ, not of the consuming expression, because that is where the
 /// use fact lives: the origin that ends up holding the pointee's loan is the
 /// variable's own, and its liveness is caused by the DeclRefExpr. Marking the
 /// dereference expression instead left the fact that matters unmarked.
-bool FactsGenerator::useFollowsPointer(const Expr *E) const {
+///
+/// Only recognises value-only shapes POSITIVELY, and only for a RAW POINTER. Two
+/// separate reasons for that restriction, both learned the hard way:
+///
+/// - Syntax does not decide whether a borrow is followed when a record is
+///   involved: `sv[0]` and `sv.size()` are both `.` calls on a `string_view`, the
+///   first follows the borrow and the second does not, and the object-argument use
+///   the generator produces for them is IDENTICAL. Classifying `.` as value-only
+///   silenced a real use-after-free of a temporary.
+/// - Every operator can be overloaded, so `p == q`, `p + 1` and `!p` on a class
+///   type run arbitrary code that may dereference.
+///
+/// A raw pointer has neither problem: its operators are built in and its members
+/// are reached only through `->`. So anything else -- a view, an iterator, a smart
+/// pointer, a closure, an overloaded operator, or simply a shape not listed --
+/// stays `MayFollow`, and the cost of a shape we fail to recognise is a false
+/// positive rather than a missed report.
+UseShape FactsGenerator::classifyUse(const Expr *E) const {
+  if (!E->getType()->isPointerType())
+    return UseShape::MayFollow;
   const ParentMap &PM = AC.getParentMap();
   const Stmt *Child = E;
   const Stmt *P = PM.getParent(Child);
@@ -4374,15 +4391,59 @@ bool FactsGenerator::useFollowsPointer(const Expr *E) const {
     Child = P;
     P = PM.getParent(P);
   }
-  if (const auto *UO = dyn_cast_or_null<UnaryOperator>(P))
-    return UO->getOpcode() == UO_Deref;
-  // A MemberExpr's only child is its base, so `->` alone decides it. This also
-  // covers `p->method()`, including `p->~S()`.
-  if (const auto *ME = dyn_cast_or_null<MemberExpr>(P))
-    return ME->isArrow();
-  if (const auto *ASE = dyn_cast_or_null<ArraySubscriptExpr>(P))
-    return ASE->getBase() == Child;
-  return false;
+  if (const auto *UO = dyn_cast_or_null<UnaryOperator>(P)) {
+    // `++p` / `--p` retarget the pointer; `!p` only tests it.
+    if (UO->isIncrementDecrementOp())
+      return UseShape::Retarget;
+    if (UO->getOpcode() == UO_LNot)
+      return UseShape::ValueOnly;
+    return UseShape::MayFollow;
+  }
+  if (const auto *BO = dyn_cast_or_null<BinaryOperator>(P)) {
+    // Comparing or testing a pointer reads only its value, and leaves it
+    // designating the same storage.
+    if (BO->isComparisonOp() || BO->isLogicalOp())
+      return UseShape::ValueOnly;
+    // Pointer arithmetic retargets the pointer -- but only the forms that
+    // actually ASSIGN to it. `p + 1` leaves `p` designating exactly what it did
+    // before and merely computes a new value; it is the RESULT that is
+    // retargeted, and the result is a different origin which receives the loans
+    // by flow. Calling the read of `p` a retarget there made a later `p->id`
+    // forget that `p` itself still points at the dead object.
+    bool IsPtrAndInt =
+        (BO->getLHS()->getType()->isPointerType() &&
+         BO->getRHS()->getType()->isIntegerType()) ||
+        (BO->getLHS()->getType()->isIntegerType() &&
+         BO->getRHS()->getType()->isPointerType());
+    if (IsPtrAndInt) {
+      if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_SubAssign)
+        return UseShape::Retarget;
+      // `q - p` on two pointers is a distance and retargets nothing either; it
+      // falls here too, since IsPtrAndInt already excluded it.
+      if (BO->getOpcode() == BO_Add || BO->getOpcode() == BO_Sub)
+        return UseShape::ValueOnly;
+    }
+    return UseShape::MayFollow;
+  }
+  // A discarded value cannot be followed. `(void)p` parses as a CStyleCastExpr to
+  // void; the implicit-cast loop above already skipped any conversion.
+  if (const auto *CE = dyn_cast_or_null<CastExpr>(P))
+    if (CE->getType()->isVoidType())
+      return UseShape::ValueOnly;
+  // The controlling expression of a branch or loop only tests the value. Checked
+  // against the specific child slot: a ConditionalOperator's RESULT arms and a
+  // ForStmt's body or increment are not conditions, and their value flows on.
+  if (const auto *If = dyn_cast_or_null<IfStmt>(P))
+    return If->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+  if (const auto *W = dyn_cast_or_null<WhileStmt>(P))
+    return W->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+  if (const auto *D = dyn_cast_or_null<DoStmt>(P))
+    return D->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+  if (const auto *F = dyn_cast_or_null<ForStmt>(P))
+    return F->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+  if (const auto *CO = dyn_cast_or_null<ConditionalOperator>(P))
+    return CO->getCond() == Child ? UseShape::ValueOnly : UseShape::MayFollow;
+  return UseShape::MayFollow;
 }
 
 void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
@@ -4417,8 +4478,7 @@ void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
     UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
     if (BoundToReference)
       UF->markAsReferenceBinding();
-    if (useFollowsPointer(E))
-      UF->markAsDereference();
+    UF->setShape(classifyUse(E));
     CurrentBlockFacts.push_back(UF);
     UseFacts[E] = UF;
   } else if (BoundToReference) {

@@ -338,6 +338,26 @@ public:
             const OriginManager &OM) const override;
 };
 
+/// How a use touches a pointer value, for deciding whether a dangling pointer
+/// can still be FOLLOWED from this point on. The distinction matters because a
+/// use that merely reads the pointer value is harmless once the pointee is gone:
+/// `p->~S(); ++p;` is fine, `p->~S(); p->id;` is not.
+enum class UseShape : uint8_t {
+  /// The pointer is followed (`*p`, `p->m`, `p[i]`, the object argument of
+  /// `p->method()`), or handed somewhere that could follow it (a call argument, a
+  /// copy into another variable). The conservative default: anything not
+  /// positively recognised as one of the cases below lands here, so a use that
+  /// could reach the dead object is never mistaken for a harmless one.
+  MayFollow,
+  /// Only the pointer VALUE is read, and it still designates the same storage:
+  /// `p == q`, `if (p)`, `(void)p`.
+  ValueOnly,
+  /// Only the value is read, and the result no longer designates the same
+  /// storage: `++p`, `p + 1`. Whether what it designates INSTEAD is valid is a
+  /// bounds question, which is out of scope for this analysis.
+  Retarget,
+};
+
 class UseFact : public Fact {
   const Expr *UseExpr;
   const OriginNode *ONode;
@@ -356,12 +376,8 @@ class UseFact : public Fact {
   // produces an independent object. Only the declaration's type is visible where
   // that difference is consumed, and it is the same in both.
   bool IsReferenceBinding = false;
-  /// True when this use FOLLOWS the pointer -- `*p`, `p->m`, `p[i]`, or the
-  /// object argument of `p->method()` -- rather than just reading its value.
-  /// After the pointee is invalidated, a use that follows the pointer touches the
-  /// dead object and must be reported, while one that only reads the pointer
-  /// value (`++p`, `p != end`) is fine.
-  bool IsDereference = false;
+  /// See UseShape.
+  UseShape Shape = UseShape::MayFollow;
 
 public:
   static bool classof(const Fact *F) { return F->getKind() == Kind::Use; }
@@ -384,8 +400,8 @@ public:
   bool isWritten() const { return IsWritten; }
   void markAsReferenceBinding() { IsReferenceBinding = true; }
   bool isReferenceBinding() const { return IsReferenceBinding; }
-  void markAsDereference() { IsDereference = true; }
-  bool isDereference() const { return IsDereference; }
+  void setShape(UseShape S) { Shape = S; }
+  UseShape getShape() const { return Shape; }
 
   void dump(llvm::raw_ostream &OS, const LoanManager &,
             const OriginManager &OM) const override;

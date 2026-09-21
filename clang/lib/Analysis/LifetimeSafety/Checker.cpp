@@ -942,6 +942,19 @@ public:
     const AccessPath &ExpiredPath = EF->getAccessPath();
     for (auto &[OID, LiveInfo] :
          LiveOrigins.getLiveOriginsAt(EF).allLive()) {
+      // Once the storage is gone, a use that only reads the pointer VALUE is
+      // harmless: `{ int x; p = &x; } ++p;` touches no dead memory, and neither
+      // does a comparison or a discarded read. Reporting those was the expiry
+      // path doing what the invalidation path was already taught not to do.
+      //
+      // `FollowedForward` covers every use forward of here, so a dereference
+      // anywhere ahead still reports, as does any escape and anything not
+      // positively recognised as value-only -- a call argument included, since the
+      // callee may follow the pointer. Unlike the invalidation case, pointer
+      // arithmetic does NOT excuse a later dereference: the storage `++p` lands in
+      // is equally gone.
+      if (!LiveInfo.FollowedForward)
+        continue;
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, EF);
       for (LoanID HeldLoanID : HeldLoans) {
         const Loan *HeldLoan = FactMgr.getLoanMgr().getLoan(HeldLoanID);
@@ -1161,8 +1174,13 @@ public:
       // Does the use keeping this origin live FOLLOW the pointer (`*p`, `p->m`,
       // `p->method()`) rather than just read its value (`++p`, `p != end`)? Only
       // the former reaches the object a destructive invalidation has killed.
-      const auto *CausingUse = LiveInfo.CausingFact.dyn_cast<const UseFact *>();
-      bool UseFollowsPointer = CausingUse && CausingUse->isDereference();
+      //
+      // Asked of every use forward of here, not just the nearest one: a harmless
+      // use in between would otherwise answer for a later dereference, and
+      // `p->~S(); (void)(p == q); p->id;` went unreported. `SameTarget` is the
+      // right variant because the storage survives an explicit destructor call, so
+      // `++p` moves to a different element and what follows is a bounds question.
+      bool UseFollowsPointer = LiveInfo.FollowedSameTarget;
       llvm::SmallVector<LoanID, 2> Invalidated;
       for (LoanID L : HeldLoans) {
         // A function declared `ownership_takes` on its implicit object says it
