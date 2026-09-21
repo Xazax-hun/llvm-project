@@ -1092,6 +1092,17 @@ public:
         return true;
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const AccessPath &IAP = LoanAP(InvalidID);
+        // An Unknown path says the receiver's borrow was LOST to a construct the
+        // model could not follow, so which storage this mutation reaches is
+        // precisely what we do not know -- it may be any of it, including the one
+        // this live origin holds. isPrefixOf compares kind and root, so an Unknown
+        // path matches NOTHING, and the invalidation silently invalidated nothing:
+        // `std::max(q, q)->push_back(99)` reallocated the vector with a live borrow
+        // into it and was not reported, because std::max's result carries only an
+        // Unknown loan (the multilevel-indirection refusal that would have covered
+        // the signature is suppressed in system headers).
+        if (IAP.isUnknown())
+          return true;
         if (!IAP.isPrefixOf(LoanAP(L)))
           continue;
         // A loan naming the mutated storage EXACTLY denotes the object, and an
