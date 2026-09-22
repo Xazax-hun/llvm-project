@@ -119,6 +119,29 @@ class LifetimeSafetySemaHelperImpl : public LifetimeSafetySemaHelper {
 public:
   LifetimeSafetySemaHelperImpl(Sema &S) : S(S) {}
 
+  /// True if the reader has silenced `DiagID` at `L`.
+  ///
+  /// A lifetime report's primary diagnostic is anchored at the borrow's CREATION:
+  /// that is the one location every loan has -- a loan may have many uses -- and
+  /// it is what the message names ("parameter is later invalidated"). But a reader
+  /// silencing a warning puts the pragma around the code they consider fine, which
+  /// is the offending USE:
+  ///
+  ///   p->~T();
+  ///   #pragma clang diagnostic ignored "-Wlifetime-safety-invalidation"
+  ///   deallocate(p);            // <- what the reader means
+  ///
+  /// Clang consults the diagnostic state at the location a diagnostic is emitted
+  /// AT, so anchoring at the creation made that pragma do nothing at all. For a
+  /// borrow of a PARAMETER it is worse: the creation is the parameter
+  /// declaration, so no pragma placed anywhere in the body could suppress it.
+  ///
+  /// So a report is suppressed when it is silenced at the code it is ABOUT, not
+  /// only at the code it points at.
+  bool silencedAt(unsigned DiagID, SourceLocation L) const {
+    return L.isValid() && S.getDiagnostics().isIgnored(DiagID, L);
+  }
+
   void reportUseAfterScope(const Expr *IssueExpr, const Expr *UseExpr,
                            const Expr *MovedExpr,
                            SourceLocation FreeLoc) override {
@@ -126,6 +149,8 @@ public:
                           ? diag::warn_lifetime_safety_use_after_scope_moved
                           : diag::warn_lifetime_safety_use_after_scope;
 
+    if (silencedAt(DiagID, UseExpr->getExprLoc()))
+      return;
     S.Diag(IssueExpr->getExprLoc(), DiagID)
         << getDiagSubjectDescription(IssueExpr) << IssueExpr->getSourceRange();
     if (MovedExpr)
@@ -141,6 +166,8 @@ public:
     unsigned DiagID = MovedExpr
                           ? diag::warn_lifetime_safety_use_after_scope_moved
                           : diag::warn_lifetime_safety_use_after_scope;
+    if (silencedAt(DiagID, UseLoc))
+      return;
     S.Diag(IssueExpr->getExprLoc(), DiagID)
         << getDiagSubjectDescription(IssueExpr) << IssueExpr->getSourceRange();
     if (MovedExpr)
@@ -219,6 +246,8 @@ public:
     auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
                        ? diag::note_lifetime_safety_freed_here
                        : diag::note_lifetime_safety_invalidated_here;
+    if (silencedAt(WarnDiag, UseExpr->getExprLoc()))
+      return;
     S.Diag(IssueExpr->getExprLoc(), WarnDiag)
         << false << IssueExpr->getSourceRange();
     S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
@@ -236,6 +265,8 @@ public:
                        ? diag::note_lifetime_safety_freed_here
                        : diag::note_lifetime_safety_invalidated_here;
 
+    if (silencedAt(WarnDiag, UseExpr->getExprLoc()))
+      return;
     S.Diag(PVD->getSourceRange().getBegin(), WarnDiag)
         << true << PVD->getSourceRange();
     S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
@@ -251,6 +282,8 @@ public:
     auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
                        ? diag::note_lifetime_safety_freed_here
                        : diag::note_lifetime_safety_invalidated_here;
+    if (silencedAt(WarnDiag, UseLoc))
+      return;
     S.Diag(IssueExpr->getExprLoc(), WarnDiag)
         << false << IssueExpr->getSourceRange();
     S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
@@ -265,6 +298,8 @@ public:
     auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
                        ? diag::note_lifetime_safety_freed_here
                        : diag::note_lifetime_safety_invalidated_here;
+    if (silencedAt(WarnDiag, UseLoc))
+      return;
     S.Diag(PVD->getSourceRange().getBegin(), WarnDiag)
         << true << PVD->getSourceRange();
     S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
@@ -280,6 +315,8 @@ public:
     auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
                        ? diag::note_lifetime_safety_freed_here
                        : diag::note_lifetime_safety_invalidated_here;
+    if (silencedAt(WarnDiag, UseLoc))
+      return;
     S.Diag(MD->getBeginLoc(), WarnDiag)
         << /*borrow held by this object=*/2 << MD->getSourceRange();
     S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
