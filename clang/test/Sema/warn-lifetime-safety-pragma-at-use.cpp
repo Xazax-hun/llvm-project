@@ -92,6 +92,52 @@ void scope_not_suppressed() {
 }
 
 //===----------------------------------------------------------------------===//
+// SUPPRESSING ONE USE MUST NOT HIDE ANOTHER.
+//
+// There is one report per loan and liveness keeps ONE use as its name, so
+// deciding from that name alone would let a pragma around it suppress the report
+// for every other use. The decision therefore runs over every use of the loan
+// that comes AFTER the operation which made it dangle, and suppresses only if all
+// of them are silenced.
+//
+// Uses BEFORE that operation are excluded deliberately: in the template above,
+// `p->~T()` is itself a use of `p` and sits outside the pragma, so counting it
+// would make "all uses silenced" false and leave the reported bug unfixed.
+//===----------------------------------------------------------------------===//
+
+void one_of_two_uses_suppressed(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                              // expected-note {{invalidated here}}
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-invalidation"
+  // The report fires because of the use below, but the note still points here:
+  // the NAMED use is unchanged, only the suppression decision widened.
+  sink = p->id; // expected-note {{later used here}}
+#pragma clang diagnostic pop
+  sink = p->id; // this one is not silenced, so the report survives
+}
+
+// The reverse order, which happened to work even before -- kept so the two
+// cannot drift apart.
+void first_use_unsuppressed(S *p) { // expected-warning {{parameter is later invalidated}}
+  p->~S();                          // expected-note {{invalidated here}}
+  sink = p->id;                     // expected-note {{later used here}}
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-invalidation"
+  sink = p->id;
+#pragma clang diagnostic pop
+}
+
+// Every use silenced: legitimately quiet.
+void all_uses_suppressed(S *p) {
+  p->~S();
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-invalidation"
+  sink = p->id;
+  sink = p->id; // no-warning
+#pragma clang diagnostic pop
+}
+
+//===----------------------------------------------------------------------===//
 // NOT changed, and worth recording: a pragma around the CREATION still suppresses,
 // because that is the location clang's own state lookup uses. It therefore also
 // silences a use that sits outside the region -- the mirror image of the bug
