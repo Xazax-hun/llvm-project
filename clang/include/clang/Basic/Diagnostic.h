@@ -431,6 +431,17 @@ private:
     /// Look up the diagnostic state at a given source location.
     DiagState *lookup(SourceManager &SrcMgr, SourceLocation Loc) const;
 
+    /// As `lookup`, but never materialises a `File` entry.
+    ///
+    /// `lookup` builds the per-file transition table lazily, so asking it a
+    /// question has a side effect. That is fine once parsing is complete, but a
+    /// consumer running mid-parse -- an analysis at the end of a function body,
+    /// say -- would create the entry early and leave it to be reused for the
+    /// rest of the translation unit. Returns null when no entry exists yet, so
+    /// the caller can decide what to assume rather than silently freezing the
+    /// table.
+    DiagState *lookupNoCreate(SourceManager &SrcMgr, SourceLocation Loc) const;
+
     /// Determine whether this map is empty.
     bool empty() const { return Files.empty(); }
 
@@ -513,6 +524,12 @@ private:
 
     /// The initial diagnostic state.
     DiagState *FirstDiagState;
+
+  public:
+    /// The state established by the command line, before any pragma.
+    DiagState *getFirstDiagState() const { return FirstDiagState; }
+
+  private:
 
     /// The current diagnostic state.
     DiagState *CurDiagState;
@@ -972,6 +989,34 @@ public:
   ///
   /// \param Loc The source location we are interested in finding out the
   /// diagnostic state. Can be null in order to query the latest state.
+  /// True if a `#pragma clang diagnostic` (or a command-line `-Wno-`) has
+  /// mapped `DiagID` to Ignored at `Loc`.
+  ///
+  /// Unlike `isIgnored`, this NEVER materialises diagnostic state: it uses the
+  /// non-creating state lookup and a non-inserting mapping lookup. That matters
+  /// for a consumer running mid-parse -- an analysis at the end of a function
+  /// body -- where `isIgnored` would lazily build the file's transition table
+  /// early and leave the stale table in place for the rest of the translation
+  /// unit. Conservatively answers false when the state at `Loc` is not yet
+  /// known.
+  bool isSilencedAtNoCreate(unsigned DiagID, SourceLocation Loc) const {
+    if (!SourceMgr || Loc.isInvalid())
+      return false;
+    DiagState *State = DiagStatesByLoc.lookupNoCreate(*SourceMgr, Loc);
+    DiagState *Base = DiagStatesByLoc.getFirstDiagState();
+    // Nothing between here and the command line, so no pragma applies.
+    if (!State || State == Base)
+      return false;
+    auto SeverityIn = [DiagID](DiagState *S) {
+      return S->lookupMapping((diag::kind)DiagID).getSeverity();
+    };
+    // Relative to the command line, NOT absolute. A lifetime subgroup that is
+    // simply off by default is Ignored everywhere, and treating that as
+    // "silenced here" would make this true for most locations in most files.
+    return SeverityIn(State) == diag::Severity::Ignored &&
+           (!Base || SeverityIn(Base) != diag::Severity::Ignored);
+  }
+
   bool isIgnored(unsigned DiagID, SourceLocation Loc) const {
     return Diags->getDiagnosticSeverity(DiagID, Loc, *this) ==
            diag::Severity::Ignored;

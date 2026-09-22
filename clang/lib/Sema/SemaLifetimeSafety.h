@@ -115,6 +115,7 @@ inline bool IsLifetimeSafetyEnabledAnywhere(Sema &S) {
 }
 
 class LifetimeSafetySemaHelperImpl : public LifetimeSafetySemaHelper {
+  llvm::SmallVector<SourceLocation, 4> Candidates;
 
 public:
   LifetimeSafetySemaHelperImpl(Sema &S) : S(S) {}
@@ -138,8 +139,26 @@ public:
   ///
   /// So a report is suppressed when it is silenced at the code it is ABOUT, not
   /// only at the code it points at.
+  void setSuppressionCandidates(ArrayRef<SourceLocation> Locs) override {
+    Candidates.assign(Locs.begin(), Locs.end());
+  }
+
   bool silencedAt(unsigned DiagID, SourceLocation L) const {
-    return L.isValid() && S.getDiagnostics().isIgnored(DiagID, L);
+    // Over every use of the borrow when the checker supplied them: suppressing
+    // on the named use alone would hide the report for the others.
+    if (!Candidates.empty()) {
+      for (SourceLocation C : Candidates)
+        if (!S.getDiagnostics().isSilencedAtNoCreate(DiagID, C))
+          return false;
+      return true;
+    }
+    return silencedAtOne(DiagID, L);
+  }
+
+  bool silencedAtOne(unsigned DiagID, SourceLocation L) const {
+    // isSilencedAtNoCreate rather than isIgnored: the latter lazily builds the
+    // file's diagnostic-state table as a side effect, and this runs mid-parse.
+    return L.isValid() && S.getDiagnostics().isSilencedAtNoCreate(DiagID, L);
   }
 
   void reportUseAfterScope(const Expr *IssueExpr, const Expr *UseExpr,

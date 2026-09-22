@@ -77,6 +77,11 @@ public:
   LifetimeSafetySemaHelper() = default;
   virtual ~LifetimeSafetySemaHelper() = default;
 
+  /// The locations the next report is ABOUT -- every use of the borrow, not just
+  /// the one the report names. A report is suppressed only when the reader has
+  /// silenced ALL of them, so silencing one use cannot hide another.
+  virtual void setSuppressionCandidates(ArrayRef<SourceLocation> Locs) {}
+
   virtual void reportUseAfterScope(const Expr *IssueExpr, const Expr *UseExpr,
                                    const Expr *MovedExpr,
                                    SourceLocation FreeLoc) {}

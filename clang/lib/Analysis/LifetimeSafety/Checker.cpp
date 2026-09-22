@@ -540,6 +540,7 @@ public:
           checkConstSubversionEscape(OEF);
         }
         else if (const auto *UF = F->getAs<UseFact>()) {
+          recordUseOfLoans(UF);
           checkLostLoan(UF);
           checkBorrowFromMutableGlobal(UF);
           checkAssignmentDereferencesOwnBorrow(UF);
@@ -3015,6 +3016,49 @@ public:
         SemaHelper->reportMultiLevelIndirectionReturn(Fn);
   }
 
+  /// Every location at which a loan is USED, so a suppression decision can be
+  /// made over all of them rather than over the single one the report names.
+  ///
+  /// There is one report per loan and liveness keeps one use as its name, so
+  /// suppressing based on that name alone would let a `#pragma clang diagnostic
+  /// ignored` around ONE use hide the report for every other use. Collected here
+  /// because the checker is the only place that sees all the uses AND runs late
+  /// enough to ask about diagnostic state safely.
+  llvm::DenseMap<LoanID, llvm::SmallVector<SourceLocation, 4>> UsesOfLoan;
+
+  void recordUseOfLoans(const UseFact *UF) {
+    if (!SemaHelper || UF->isWritten())
+      return;
+    const OriginNode *ON = UF->getUsedOrigins();
+    if (!ON)
+      return;
+    SourceLocation Loc =
+        UF->isImplicit() ? UF->getImplicitLoc() : UF->getUseExpr()->getExprLoc();
+    if (Loc.isInvalid())
+      return;
+    for (LoanID L : LoanPropagation.getLoans(ON->getOriginID(), UF))
+      UsesOfLoan[L].push_back(Loc);
+  }
+
+  /// The uses of `LID` that a report about it is ABOUT: the ones that come
+  /// AFTER the operation which made the borrow dangle. Uses before it are
+  /// perfectly fine and are not what a reader silencing the report means.
+  ///
+  /// `Boundary` is the invalidating expression for an invalidation, or the
+  /// expiry location for a scope end. With none, every use counts, which only
+  /// makes suppression harder.
+  llvm::SmallVector<SourceLocation, 4>
+  suppressionCandidates(LoanID LID, SourceLocation Boundary) const {
+    llvm::SmallVector<SourceLocation, 4> Out;
+    auto It = UsesOfLoan.find(LID);
+    if (It == UsesOfLoan.end())
+      return Out;
+    for (SourceLocation L : It->second)
+      if (!Boundary.isValid() || !(L < Boundary))
+        Out.push_back(L);
+    return Out;
+  }
+
   void issuePendingWarnings() {
     if (!SemaHelper)
       return;
@@ -3077,6 +3121,12 @@ public:
       const Expr *IssueExpr = L->getIssuingExpr();
       llvm::PointerUnion<const UseFact *, const OriginEscapesFact *>
           CausingFact = Warning.CausingFact;
+      // Every use of this loan, so the reporter can require that the reader
+      // silenced all of them before it suppresses anything.
+      SemaHelper->setSuppressionCandidates(suppressionCandidates(
+          LID, Warning.InvalidatedByExpr
+                   ? Warning.InvalidatedByExpr->getExprLoc()
+                   : Warning.ExpiryLoc));
       const ParmVarDecl *InvalidatedPVD =
           L->getAccessPath().getAsPlaceholderParam();
       // A borrow taken through a pointer/view MEMBER of `this` carries the seed

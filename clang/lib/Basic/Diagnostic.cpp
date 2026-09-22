@@ -246,6 +246,18 @@ bool DiagnosticsEngine::isIgnoredInEveryState(unsigned DiagID) const {
       [&](SourceLocation Loc) { return isIgnored(DiagID, Loc); });
 }
 
+DiagnosticsEngine::DiagState *
+DiagnosticsEngine::DiagStateMap::lookupNoCreate(SourceManager &SrcMgr,
+                                                SourceLocation Loc) const {
+  if (Files.empty())
+    return FirstDiagState;
+  FileIDAndOffset Decomp = SrcMgr.getDecomposedLoc(Loc);
+  auto It = Files.find(Decomp.first);
+  if (It == Files.end())
+    return nullptr;
+  return It->second.lookup(Decomp.second);
+}
+
 DiagnosticsEngine::DiagStateMap::File *
 DiagnosticsEngine::DiagStateMap::getFile(SourceManager &SrcMgr,
                                          FileID ID) const {
