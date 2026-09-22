@@ -140,6 +140,22 @@ static const CXXRecordDecl *invalidatedObjectRecord(const AccessPath &AP) {
   return nullptr;
 }
 
+/// True if `AP` names something INSIDE an object rather than the object itself:
+/// its path carries an `Interior` (`.*`) element, which is what the result of a
+/// `[[clang::lifetimebound]]` accessor gets -- "somewhere in there, I cannot say
+/// where".
+///
+/// This settles INTO-vs-AT from the LOAN, which the holder's static type cannot
+/// always do: when a container's element type IS the container's own record -- a
+/// tree, a DOM, an AST, a JSON node -- a borrow into the element buffer has the
+/// same pointee record as a pointer AT the object, so the type test calls it
+/// "points AT" and declines to report. `kid = root->firstKid(); root->addKid();
+/// kid->id;` was a silent heap-use-after-free for exactly that reason.
+static bool pathIsInterior(const AccessPath &AP) {
+  return llvm::any_of(AP.getElements(),
+                      [](const PathElement &E) { return E.isInterior(); });
+}
+
 /// True if `Field` is reachable as a (possibly transitive / inherited) data
 /// member of `RD`. `Visited` cuts cycles.
 static bool recordReachesField(const CXXRecordDecl *RD, const FieldDecl *Field,
@@ -1744,9 +1760,12 @@ public:
           FallbackUse = nullptr;
           break;
         }
+        // An Interior path denotes something inside the object whatever the
+        // holder's static type says, so it must not have to pass the type test.
         if (!HaveReport &&
-            originBorrowsInto(OID,
-                              invalidatedObjectRecord(L->getAccessPath())))
+            (pathIsInterior(L->getAccessPath()) ||
+             originBorrowsInto(OID,
+                               invalidatedObjectRecord(L->getAccessPath()))))
           if (const auto *UF =
                   LiveInfo.CausingFact.dyn_cast<const UseFact *>()) {
             ReportLoan = LiveLoanID;
