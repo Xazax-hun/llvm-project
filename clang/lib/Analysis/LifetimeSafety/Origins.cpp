@@ -112,6 +112,18 @@ private:
 } // namespace
 
 bool OriginManager::hasOrigins(QualType QT) const {
+  // A record answers by walking every field of every base, recursively, and the
+  // same types are asked about over and over -- once per expression of that
+  // type. Memoized per canonical type; see HasOriginsCache.
+  const Type *Key = QT.getCanonicalType().getTypePtr();
+  if (auto It = HasOriginsCache.find(Key); It != HasOriginsCache.end())
+    return It->second;
+  bool Result = computeHasOrigins(QT);
+  HasOriginsCache[Key] = Result;
+  return Result;
+}
+
+bool OriginManager::computeHasOrigins(QualType QT) const {
   // An `_Atomic(T)` wraps T transparently for lifetime purposes (the atomic
   // holds the same value); see through it.
   if (const auto *AT = QT->getAs<AtomicType>())
@@ -630,6 +642,8 @@ void OriginManager::registerLifetimeAnnotatedOriginType(QualType QT) {
     return;
 
   LifetimeAnnotatedOriginTypes.insert(QT.getCanonicalType().getTypePtr());
+  // A record holding a field of this type may now have origins too.
+  HasOriginsCache.clear();
 }
 
 const OriginNode *

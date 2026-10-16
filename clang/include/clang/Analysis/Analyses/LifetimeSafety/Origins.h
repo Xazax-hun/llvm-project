@@ -333,6 +333,11 @@ private:
   /// because of lifetime annotations (currently [[clang::lifetimebound]]) on
   /// functions that return them.
   llvm::DenseSet<const Type *> LifetimeAnnotatedOriginTypes;
+  /// Memoizes hasOrigins(QualType) by canonical type. The answer depends only
+  /// on the type and on LifetimeAnnotatedOriginTypes, so it is cleared when
+  /// that set grows (only during the pre-scan).
+  mutable llvm::DenseMap<const Type *, bool> HasOriginsCache;
+  bool computeHasOrigins(QualType QT) const;
   /// Fields accessed in the function body (or constructor init lists).
   /// Fields outside this set are excluded from origin tracking.
   llvm::SmallPtrSet<const FieldDecl *, 8> AccessedFields;
