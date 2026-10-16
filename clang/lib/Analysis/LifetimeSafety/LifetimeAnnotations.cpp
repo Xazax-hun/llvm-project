@@ -927,12 +927,14 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD) {
   return reachesMutableOwner(RD, V, /*AliasOnly=*/false);
 }
 
-bool LifetimeSafetyTUCache::recordContainsMutableOwner(const CXXRecordDecl *RD) {
+bool LifetimeSafetyTUCache::reachesOwner(const CXXRecordDecl *RD,
+                                         bool AliasOnly) {
+  auto &Answers = AliasOnly ? AliasesMutableOwner : ContainsMutableOwner;
   // A "yes" stays true however the translation unit continues -- completing a
   // type only adds what can be reached. A "no" holds only while every record it
   // could not see into is still incomplete, which is cheap to re-check and
   // common: code is full of pointers to classes declared and never defined.
-  if (auto It = ContainsMutableOwner.find(RD); It != ContainsMutableOwner.end()) {
+  if (auto It = Answers.find(RD); It != Answers.end()) {
     const CachedOwnerAnswer &A = It->second;
     if (A.Result || llvm::none_of(A.Incomplete, [](const CXXRecordDecl *D) {
           return D->hasDefinition();
@@ -940,8 +942,8 @@ bool LifetimeSafetyTUCache::recordContainsMutableOwner(const CXXRecordDecl *RD) 
       return A.Result;
   }
   OwnerWalkVisited V;
-  bool Result = reachesMutableOwner(RD, V, /*AliasOnly=*/false);
-  ContainsMutableOwner[RD] = {Result, Result ? decltype(V.Incomplete)()
+  bool Result = reachesMutableOwner(RD, V, AliasOnly);
+  Answers[RD] = {Result, Result ? decltype(V.Incomplete)()
                                              : std::move(V.Incomplete)};
   return Result;
 }
@@ -955,6 +957,12 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD,
 bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
   OwnerWalkVisited V;
   return reachesMutableOwner(RD, V, /*AliasOnly=*/true);
+}
+
+bool recordAliasesMutableOwner(const CXXRecordDecl *RD,
+                               LifetimeSafetyTUCache *Cache) {
+  return Cache ? Cache->recordAliasesMutableOwner(RD)
+               : recordAliasesMutableOwner(RD);
 }
 
 static void

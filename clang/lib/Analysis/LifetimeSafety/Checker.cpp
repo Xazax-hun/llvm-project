@@ -1910,6 +1910,33 @@ public:
   /// loan propagation (or the pointer is null/uninitialized, which is equally
   /// untracked). Reports it so that, with the warning enabled as an error, the
   /// analysis never silently fails to account for a borrow.
+  /// The Unknown loans -- borrows lost to an unmodeled construct -- in ascending
+  /// LoanID order. Computed once the dataflow has created every loan.
+  llvm::ArrayRef<LoanID> unknownLoans() {
+    if (!UnknownLoans) {
+      UnknownLoans.emplace();
+      for (const Loan *L : FactMgr.getLoanMgr().getLoans())
+        if (L->getAccessPath().isUnknown())
+          UnknownLoans->push_back(L->getID());
+      llvm::sort(*UnknownLoans);
+    }
+    return *UnknownLoans;
+  }
+  std::optional<llvm::SmallVector<LoanID, 4>> UnknownLoans;
+
+  /// True if \p Loans holds an Unknown loan. Asked at every use: walking the
+  /// set made that quadratic in a large function, where an origin can hold
+  /// thousands of loans, while there are usually few Unknown ones to look up.
+  bool holdsUnknownLoan(const LoanSet &Loans) {
+    llvm::ArrayRef<LoanID> Unknown = unknownLoans();
+    if (Unknown.size() <= 16)
+      return llvm::any_of(Unknown,
+                          [&](LoanID L) { return Loans.contains(L); });
+    return llvm::any_of(Loans, [&](LoanID L) {
+      return FactMgr.getLoanMgr().getLoan(L)->getAccessPath().isUnknown();
+    });
+  }
+
   void checkLostLoan(const UseFact *UF) {
     if (!SemaHelper || UF->isWritten() || UF->isImplicit() ||
         UF->isPointeeAccess())
@@ -1951,13 +1978,7 @@ public:
     // joins, so it is detected even when a valid borrow on another path would
     // otherwise mask the loss in the (union) loan set.
     LoanSet Loans = LoanPropagation.getLoans(OL->getOriginID(), UF);
-    bool Lost = Loans.isEmpty();
-    for (LoanID L : Loans)
-      if (FactMgr.getLoanMgr().getLoan(L)->getAccessPath().isUnknown()) {
-        Lost = true;
-        break;
-      }
-    if (!Lost)
+    if (!Loans.isEmpty() && !holdsUnknownLoan(Loans))
       return;
     if (!ReportedLostLoanLocs.insert(UseExpr->getExprLoc()).second)
       return;
@@ -2030,6 +2051,37 @@ public:
   /// `EscapeRoute` is set when the borrow outlives this function invocation (it
   /// is stored into global/static storage or a field, or returned to the
   /// caller); `std::nullopt` means the borrow is only used locally.
+  /// The loans rooted at a variable with global storage whose (element) type
+  /// is, or contains, an owner -- the only ones flagBorrowFromMutableGlobal can
+  /// act on -- in ascending LoanID order. A global with no owner anywhere (a
+  /// `volatile int sink`, say) is borrowed by every expression naming it, so
+  /// leaving those in would make the list as long as the function again.
+  /// Computed once the dataflow has created every loan.
+  llvm::ArrayRef<LoanID> globalRootedLoans() {
+    if (!GlobalRootedLoans) {
+      GlobalRootedLoans.emplace();
+      llvm::DenseMap<const VarDecl *, bool> HasOwner;
+      for (const Loan *L : FactMgr.getLoanMgr().getLoans()) {
+        const auto *VD =
+            dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
+        if (!VD || !VD->hasGlobalStorage())
+          continue;
+        auto [It, New] = HasOwner.try_emplace(VD, false);
+        if (New) {
+          QualType GlobalTy = AST.getBaseElementType(VD->getType());
+          const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
+          It->second = isGslOwnerType(GlobalTy) ||
+                       (RD && recordContainsMutableOwner(RD, FactMgr.getTUCache()));
+        }
+        if (It->second)
+          GlobalRootedLoans->push_back(L->getID());
+      }
+      llvm::sort(*GlobalRootedLoans);
+    }
+    return *GlobalRootedLoans;
+  }
+  std::optional<llvm::SmallVector<LoanID, 4>> GlobalRootedLoans;
+
   void flagBorrowFromMutableGlobal(
       OriginID OID, ProgramPoint PP, SourceLocation Loc, SourceRange Range,
       QualType ValueTyHint = QualType(),
@@ -2047,11 +2099,16 @@ public:
     if (!ValueTy->isPointerType() && !ValueTy->isReferenceType() &&
         !isGslPointerType(ValueTy))
       return;
-    for (LoanID L : LoanPropagation.getLoans(OID, PP)) {
-      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
-      const auto *VD = dyn_cast_or_null<VarDecl>(AP.getAsValueDecl());
-      if (!VD || !VD->hasGlobalStorage())
+    // Only a loan rooted at a global can qualify. There are few or none, so
+    // test the origin's set for each of them rather than walking the set -- in
+    // a large function an origin can hold thousands of local loans, and this
+    // runs at every use. Same order as walking the set: ascending LoanID.
+    LoanSet Held = LoanPropagation.getLoans(OID, PP);
+    for (LoanID L : globalRootedLoans()) {
+      if (!Held.contains(L))
         continue;
+      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(L)->getAccessPath();
+      const auto *VD = cast<VarDecl>(AP.getAsValueDecl());
       // Peel array dimensions: a global array of owners (`std::string g[4]`)
       // owns reallocatable storage per element, but the loan roots at the array
       // variable whose own type is the array, not an owner. Test the element
@@ -3009,24 +3066,12 @@ public:
   /// ignored` around ONE use hide the report for every other use. Collected here
   /// because the checker is the only place that sees all the uses AND runs late
   /// enough to ask about diagnostic state safely.
-  struct UseSite {
-    SourceLocation Loc; // Invalid for an implicit use with no location.
-    const UseFact *Use;
-  };
-  llvm::DenseMap<LoanID, llvm::SmallVector<UseSite, 4>> UsesOfLoan;
+  /// Every use that can name a loan, in the order the facts were walked.
+  llvm::SmallVector<const UseFact *, 0> AllUses;
 
   void recordUseOfLoans(const UseFact *UF) {
-    if (!SemaHelper || UF->isWritten())
-      return;
-    const OriginNode *ON = UF->getUsedOrigins();
-    if (!ON)
-      return;
-    // An invalid location is kept: such a use cannot be silenced, so it must
-    // still block suppression rather than vanish from the decision.
-    SourceLocation Loc =
-        UF->isImplicit() ? UF->getImplicitLoc() : UF->getUseExpr()->getExprLoc();
-    for (LoanID L : LoanPropagation.getLoans(ON->getOriginID(), UF))
-      UsesOfLoan[L].push_back({Loc, UF});
+    if (SemaHelper && !UF->isWritten() && UF->getUsedOrigins())
+      AllUses.push_back(UF);
   }
 
   /// True if `Later` can execute after `Earlier` on some path. Decided on the
@@ -3059,17 +3104,19 @@ public:
   /// can execute AFTER `Boundary`, the fact which made the borrow dangle. Uses
   /// only before it are fine and are not what a reader silencing the report
   /// means. With no boundary every use counts, which only makes suppression
-  /// harder.
-  llvm::SmallVector<SourceLocation, 4>
-  suppressionCandidates(LoanID LID, const Fact *Boundary) {
-    llvm::SmallVector<SourceLocation, 4> Out;
-    auto It = UsesOfLoan.find(LID);
-    if (It == UsesOfLoan.end())
-      return Out;
-    for (const UseSite &U : It->second)
-      if (!Boundary || canExecuteAfter(Boundary, U.Use))
-        Out.push_back(U.Loc);
-    return Out;
+  /// harder. A use with no location is kept: it cannot be silenced, so it must
+  /// still block suppression rather than vanish from the decision.
+  void suppressionCandidates(LoanID LID, const Fact *Boundary,
+                             llvm::SmallVectorImpl<SourceLocation> &Out) {
+    for (const UseFact *UF : AllUses) {
+      if (!LoanPropagation.getLoans(UF->getUsedOrigins()->getOriginID(), UF)
+               .contains(LID))
+        continue;
+      if (Boundary && !canExecuteAfter(Boundary, UF))
+        continue;
+      Out.push_back(UF->isImplicit() ? UF->getImplicitLoc()
+                                     : UF->getUseExpr()->getExprLoc());
+    }
   }
 
   void issuePendingWarnings() {
@@ -3129,8 +3176,11 @@ public:
           CausingFact = Warning.CausingFact;
       // Every use of this loan, so the reporter can require that the reader
       // silenced all of them before it suppresses anything.
-      SemaHelper->setSuppressionCandidates(
-          suppressionCandidates(LID, Warning.Boundary));
+      auto Candidates = [&, LID = LID, Boundary = Warning.Boundary](
+                            llvm::SmallVectorImpl<SourceLocation> &Out) {
+        suppressionCandidates(LID, Boundary, Out);
+      };
+      SemaHelper->setSuppressionCandidates(Candidates);
       const ParmVarDecl *InvalidatedPVD =
           L->getAccessPath().getAsPlaceholderParam();
       // A borrow taken through a pointer/view MEMBER of `this` carries the seed
@@ -3287,7 +3337,7 @@ public:
     }
     // The candidates describe the last warning only; never let them leak into
     // a report issued later.
-    SemaHelper->setSuppressionCandidates({});
+    SemaHelper->setSuppressionCandidates(nullptr);
   }
 
   // Returns declarations that should be annotated with lifetime attributes

@@ -266,8 +266,13 @@ private:
 
 class LifetimeSafetyTUCache {
 public:
-  /// recordContainsMutableOwner, memoized.
-  bool recordContainsMutableOwner(const CXXRecordDecl *RD);
+  /// recordContainsMutableOwner and recordAliasesMutableOwner, memoized.
+  bool recordContainsMutableOwner(const CXXRecordDecl *RD) {
+    return reachesOwner(RD, /*AliasOnly=*/false);
+  }
+  bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
+    return reachesOwner(RD, /*AliasOnly=*/true);
+  }
 
   /// collectFieldsIncludingBases, memoized; see FieldListCache.
   llvm::ArrayRef<const FieldDecl *> fieldsIncludingBases(const CXXRecordDecl *RD) {
@@ -286,13 +291,18 @@ private:
     /// had no definition yet; it is stale once any of them has one.
     llvm::SmallVector<const CXXRecordDecl *, 2> Incomplete;
   };
+  bool reachesOwner(const CXXRecordDecl *RD, bool AliasOnly);
   llvm::DenseMap<const CXXRecordDecl *, CachedOwnerAnswer> ContainsMutableOwner;
+  llvm::DenseMap<const CXXRecordDecl *, CachedOwnerAnswer> AliasesMutableOwner;
   FieldListCache Fields;
 };
 
-/// recordContainsMutableOwner through \p Cache when there is one.
+/// recordContainsMutableOwner and recordAliasesMutableOwner through \p Cache
+/// when there is one.
 bool recordContainsMutableOwner(const CXXRecordDecl *RD,
                                 LifetimeSafetyTUCache *Cache);
+bool recordAliasesMutableOwner(const CXXRecordDecl *RD,
+                               LifetimeSafetyTUCache *Cache);
 
 /// Enumerates \p RD's member functions, INCLUDING member templates.
 ///

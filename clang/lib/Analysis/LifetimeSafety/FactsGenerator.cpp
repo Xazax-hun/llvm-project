@@ -256,7 +256,7 @@ static bool paramMayMutateOwner(QualType PT,
   // case above, and the reason a callback parameter is a mutation the signature
   // does not otherwise show. A by-value record that OWNS its owner is excluded,
   // since the copy owns its own.
-  return recordAliasesMutableOwner(PT->getAsCXXRecordDecl());
+  return recordAliasesMutableOwner(PT->getAsCXXRecordDecl(), Cache);
 }
 
 /// Maps a modeled call-argument index to the callee's corresponding

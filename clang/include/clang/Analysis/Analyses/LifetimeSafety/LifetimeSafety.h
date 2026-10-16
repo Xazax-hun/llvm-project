@@ -79,10 +79,17 @@ public:
   LifetimeSafetySemaHelper() = default;
   virtual ~LifetimeSafetySemaHelper() = default;
 
-  /// The locations the next report is ABOUT -- every use of the borrow, not just
-  /// the one the report names. A report is suppressed only when the reader has
-  /// silenced ALL of them, so silencing one use cannot hide another.
-  virtual void setSuppressionCandidates(ArrayRef<SourceLocation> Locs) {}
+  /// Computes the locations the next report is ABOUT -- every use of the borrow,
+  /// not just the one the report names. A report is suppressed only when the
+  /// reader has silenced ALL of them, so silencing one use cannot hide another.
+  ///
+  /// A callback rather than a list: the named use is always among them, so the
+  /// rest is needed only when that one is silenced, which is rare, and
+  /// collecting them for every report was quadratic in large functions. Valid
+  /// until the next call; a null callback clears it.
+  using SuppressionCandidatesFn =
+      llvm::function_ref<void(llvm::SmallVectorImpl<SourceLocation> &)>;
+  virtual void setSuppressionCandidates(SuppressionCandidatesFn Compute) {}
 
   virtual void reportUseAfterScope(const Expr *IssueExpr, const Expr *UseExpr,
                                    const Expr *MovedExpr,

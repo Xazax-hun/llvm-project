@@ -97,7 +97,7 @@ inline bool IsLifetimeSafetyEnabledAnywhere(Sema &S) {
 }
 
 class LifetimeSafetySemaHelperImpl : public LifetimeSafetySemaHelper {
-  llvm::SmallVector<SourceLocation, 4> Candidates;
+  SuppressionCandidatesFn Candidates;
 
 public:
   LifetimeSafetySemaHelperImpl(Sema &S) : S(S) {}
@@ -121,21 +121,26 @@ public:
   ///
   /// So a report is suppressed when it is silenced at the code it is ABOUT, not
   /// only at the code it points at.
-  void setSuppressionCandidates(ArrayRef<SourceLocation> Locs) override {
-    Candidates.assign(Locs.begin(), Locs.end());
+  void setSuppressionCandidates(SuppressionCandidatesFn Compute) override {
+    Candidates = Compute;
   }
 
   bool silencedAt(unsigned DiagID, SourceLocation L) const {
-    // Over every use of the borrow when the checker supplied them: suppressing
-    // on the named use alone would hide the report for the others. A use with
-    // no location cannot have been silenced.
-    if (!Candidates.empty()) {
-      for (SourceLocation C : Candidates)
+    // The named use first: it is one of the candidates, and when it is not
+    // silenced -- nearly always -- nothing else needs computing.
+    if (!silencedAtOne(DiagID, L))
+      return false;
+    // Then every other use of the borrow, when the checker supplies them:
+    // suppressing on the named use alone would hide the report for the others.
+    // A use with no location cannot have been silenced.
+    if (Candidates) {
+      llvm::SmallVector<SourceLocation, 8> Locs;
+      Candidates(Locs);
+      for (SourceLocation C : Locs)
         if (!silencedAtOne(DiagID, C))
           return false;
-      return true;
     }
-    return silencedAtOne(DiagID, L);
+    return true;
   }
 
   bool silencedAtOne(unsigned DiagID, SourceLocation L) const {
