@@ -74,7 +74,7 @@ void LifetimeSafetyAnalysis::run() {
     return;
   }
 
-  FactMgr = std::make_unique<FactManager>(AC, Cfg);
+  FactMgr = std::make_unique<FactManager>(AC, Cfg, LSOpts.TUCache);
 
   FactsGenerator FactGen(*FactMgr, AC);
   FactGen.run();
@@ -127,10 +127,12 @@ void collectLifetimeStats(AnalysisDeclContext &AC, OriginManager &OM,
 
 void runLifetimeSafetyAnalysis(AnalysisDeclContext &AC,
                                LifetimeSafetySemaHelper *SemaHelper,
-                               LifetimeSafetyStats &Stats, bool CollectStats) {
+                               LifetimeSafetyStats &Stats, bool CollectStats,
+                               LifetimeSafetyTUCache *TUCache) {
   LifetimeSafetyOpts LSOpts;
   LSOpts.MaxCFGBlocks =
       AC.getASTContext().getLangOpts().LifetimeSafetyMaxCFGBlocks;
+  LSOpts.TUCache = TUCache;
 
   internal::LifetimeSafetyAnalysis Analysis(AC, SemaHelper, LSOpts);
   Analysis.run();

@@ -236,6 +236,34 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD);
 // reallocate it.
 bool recordAliasesMutableOwner(const CXXRecordDecl *RD);
 
+/// Answers that depend only on a type or a record, kept for a whole translation
+/// unit.
+///
+/// The analysis runs once per function, and each run would otherwise ask the
+/// same questions about the same types again: on a member function of a large
+/// class every run walks the fields of the whole class hierarchy. Owned by
+/// whoever drives the analysis over the translation unit (Sema's
+/// AnalysisBasedWarnings), so the Type and Decl keys stay valid for as long as
+/// the cache does. Never make this static: several translation units can share
+/// a process, and their declarations' addresses get reused.
+class LifetimeSafetyTUCache {
+public:
+  /// recordContainsMutableOwner, memoized.
+  bool recordContainsMutableOwner(const CXXRecordDecl *RD);
+
+  /// OriginManager::hasOrigins, by canonical type, for a function that
+  /// registered no lifetimebound-returned origin type: only then is the answer
+  /// a property of the type alone.
+  llvm::DenseMap<const Type *, bool> PureHasOrigins;
+
+private:
+  llvm::DenseMap<const CXXRecordDecl *, bool> ContainsMutableOwner;
+};
+
+/// recordContainsMutableOwner through \p Cache when there is one.
+bool recordContainsMutableOwner(const CXXRecordDecl *RD,
+                                LifetimeSafetyTUCache *Cache);
+
 /// Enumerates \p RD's member functions, INCLUDING member templates.
 ///
 /// RD->methods() does not list a FunctionTemplateDecl, so a templated member is
@@ -259,7 +287,7 @@ void forEachMemberFunction(
 // peels a reference and the `this` pointer to reach the record. Used by the safe
 // model to treat a non-const member call on an object as invalidating views into
 // its (possibly transitive / inherited) owner fields.
-bool recordHasGslOwnerField(QualType QT);
+bool recordHasGslOwnerField(QualType QT, LifetimeSafetyTUCache *Cache = nullptr);
 
 // Returns true if QT is a user-defined record type that can hold a borrow (has
 // a pointer/reference/gsl::Pointer member, transitively) but is annotated

@@ -855,6 +855,10 @@ namespace {
 struct OwnerWalkVisited {
   llvm::SmallPtrSet<const CXXRecordDecl *, 8> Contains;
   llvm::SmallPtrSet<const CXXRecordDecl *, 8> Aliases;
+  /// Set when the walk met a record with no definition yet. Its "no owner"
+  /// answer is provisional: the record may be completed later in the
+  /// translation unit, so a negative result must not be cached.
+  bool SawIncomplete = false;
   bool markSeen(const CXXRecordDecl *RD, bool AliasOnly) {
     auto &S = AliasOnly ? Aliases : Contains;
     return S.insert(RD->getCanonicalDecl()).second;
@@ -871,8 +875,12 @@ struct OwnerWalkVisited {
 /// gsl::Pointer members, by-value sub-objects -- is the same walk.
 static bool reachesMutableOwner(const CXXRecordDecl *RD, OwnerWalkVisited &V,
                                 bool AliasOnly) {
-  if (!RD || !RD->hasDefinition())
+  if (!RD)
     return false;
+  if (!RD->hasDefinition()) {
+    V.SawIncomplete = true;
+    return false;
+  }
   if (!V.markSeen(RD, AliasOnly))
     return false;
   for (const CXXBaseSpecifier &B : RD->bases())
@@ -919,6 +927,25 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD) {
   return reachesMutableOwner(RD, V, /*AliasOnly=*/false);
 }
 
+bool LifetimeSafetyTUCache::recordContainsMutableOwner(const CXXRecordDecl *RD) {
+  if (auto It = ContainsMutableOwner.find(RD); It != ContainsMutableOwner.end())
+    return It->second;
+  OwnerWalkVisited V;
+  bool Result = reachesMutableOwner(RD, V, /*AliasOnly=*/false);
+  // A "yes" stays true however the translation unit continues -- completing a
+  // type only adds what can be reached. A "no" that met an incomplete record
+  // may not, so it is recomputed next time.
+  if (Result || !V.SawIncomplete)
+    ContainsMutableOwner[RD] = Result;
+  return Result;
+}
+
+bool recordContainsMutableOwner(const CXXRecordDecl *RD,
+                                LifetimeSafetyTUCache *Cache) {
+  return Cache ? Cache->recordContainsMutableOwner(RD)
+               : recordContainsMutableOwner(RD);
+}
+
 bool recordAliasesMutableOwner(const CXXRecordDecl *RD) {
   OwnerWalkVisited V;
   return reachesMutableOwner(RD, V, /*AliasOnly=*/true);
@@ -954,13 +981,13 @@ void forEachMemberFunction(
         Visit(MD);
 }
 
-bool recordHasGslOwnerField(QualType QT) {
+bool recordHasGslOwnerField(QualType QT, LifetimeSafetyTUCache *Cache) {
   QT = QT.getNonReferenceType();
   // The implicit object argument of a member call is the `this` pointer
   // (type `S*`); peel it to reach the record.
   if (QT->isPointerType())
     QT = QT->getPointeeType();
-  return recordContainsMutableOwner(QT->getAsCXXRecordDecl());
+  return recordContainsMutableOwner(QT->getAsCXXRecordDecl(), Cache);
 }
 
 static StringRef getName(const CXXRecordDecl &RD) {

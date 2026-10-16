@@ -930,9 +930,15 @@ public:
 
 class FactManager {
 public:
-  FactManager(const AnalysisDeclContext &AC, const CFG &Cfg) : OriginMgr(AC) {
+  FactManager(const AnalysisDeclContext &AC, const CFG &Cfg,
+              LifetimeSafetyTUCache *TUCache = nullptr)
+      : OriginMgr(AC, TUCache), TUCache(TUCache) {
     BlockToFacts.resize(Cfg.getNumBlockIDs());
   }
+
+  /// Answers kept for the whole translation unit; null when the caller keeps
+  /// none, and then every predicate computes its answer afresh.
+  LifetimeSafetyTUCache *getTUCache() const { return TUCache; }
 
   llvm::ArrayRef<const Fact *> getFacts(const CFGBlock *B) const {
     return BlockToFacts[B->getBlockID()];
@@ -1019,6 +1025,7 @@ private:
   llvm::SmallVector<llvm::SmallVector<const Fact *>> BlockToFacts;
   llvm::BumpPtrAllocator FactAllocator;
   llvm::DenseMap<const Type *, bool> UnknownOwnershipCache;
+  LifetimeSafetyTUCache *TUCache;
 };
 } // namespace clang::lifetimes::internal
 

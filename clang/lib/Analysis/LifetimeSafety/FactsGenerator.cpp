@@ -209,8 +209,10 @@ static bool paramCanMutateThrough(QualType PT) {
 /// argument refers to: a non-const pointer/reference to an owner (or to a record
 /// that transitively contains a mutable owner field), or a gsl::Pointer that
 /// exposes mutable access to a non-const owner pointee. Shared by the assumed-
-/// invalidation and argument-overlap checks.
-static bool paramMayMutateOwner(QualType PT) {
+/// invalidation and argument-overlap checks. \p Cache, when non-null, memoizes
+/// the record walks for the translation unit.
+static bool paramMayMutateOwner(QualType PT,
+                                LifetimeSafetyTUCache *Cache = nullptr) {
   if (PT->isPointerType() || PT->isReferenceType()) {
     // A pointer or reference to an ARRAY reaches the elements, so the element
     // type decides the hazard: `std::string (&)[2]` lets the callee reallocate
@@ -234,7 +236,7 @@ static bool paramMayMutateOwner(QualType PT) {
     if (const CXXRecordDecl *RD = Pointee->getAsCXXRecordDecl();
         RD && !RD->hasDefinition())
       return true;
-    return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl());
+    return recordContainsMutableOwner(Pointee->getAsCXXRecordDecl(), Cache);
   }
   if (isGslPointerType(PT.getNonReferenceType())) {
     if (pointsToMutableOwner(PT.getNonReferenceType()))
@@ -245,7 +247,7 @@ static bool paramMayMutateOwner(QualType PT) {
     // invalidating borrows into it. (A by-value record that OWNS its owner is a
     // copy and must not be treated this way -- hence gated on gsl::Pointer.)
     return recordContainsMutableOwner(
-        PT.getNonReferenceType()->getAsCXXRecordDecl());
+        PT.getNonReferenceType()->getAsCXXRecordDecl(), Cache);
   }
   // A BY-VALUE record that ALIASES a mutable owner: a lambda capturing a
   // container by reference, a std::function wrapping one, a struct holding a
@@ -2699,14 +2701,15 @@ static bool holdsTypeErasedCallable(QualType PT) {
 /// Asking `paramMayMutateOwner` of each capture is what keeps a by-value
 /// capture of an OWNER silent: that capture is a copy, and destroying a copy
 /// invalidates no borrow of the original.
-static bool destructionMayMutateAliasedOwner(QualType PT) {
-  if (paramMayMutateOwner(PT) || holdsTypeErasedCallable(PT))
+static bool destructionMayMutateAliasedOwner(QualType PT,
+                                             LifetimeSafetyTUCache *Cache) {
+  if (paramMayMutateOwner(PT, Cache) || holdsTypeErasedCallable(PT))
     return true;
   const CXXRecordDecl *RD = PT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition() || !RD->isLambda())
     return false;
   for (const FieldDecl *F : RD->fields())
-    if (paramMayMutateOwner(getBaseElementType(F->getType())))
+    if (paramMayMutateOwner(getBaseElementType(F->getType()), Cache))
       return true;
   return false;
 }
@@ -2771,7 +2774,7 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
   if (isGslOwnerType(Ty) && !holdsTypeErasedCallable(Ty) && isLibraryOwned(RD))
     return;
   CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Loc, Node));
-  if (!destructionMayMutateAliasedOwner(Ty))
+  if (!destructionMayMutateAliasedOwner(Ty, FactMgr.getTUCache()))
     return;
   auto invalidate = [&](OriginID OID) {
     CurrentBlockFacts.push_back(FactMgr.createFact<InvalidateOriginFact>(
@@ -3294,7 +3297,7 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     bool MaybeDynamicOwner =
         Method->isVirtual() && RecvRD && RecvRD->isPolymorphic();
     bool StaticallyOwner =
-        OwnerReceiver || recordHasGslOwnerField(RecvTy) || MaybeDynamicOwner;
+        OwnerReceiver || recordHasGslOwnerField(RecvTy, FactMgr.getTUCache()) || MaybeDynamicOwner;
     // A recognized non-invalidating accessor (`data()`, `front()`, `at()`,
     // `operator[]`, ...) does not reallocate, whether the owner is the direct
     // receiver (`v.data()`) or reached through a pointer (`p->data()`). Test the
@@ -3388,7 +3391,7 @@ void FactsGenerator::handleAssumedInvalidatingCall(
     //    the argument carries denotes an object that is-a the parameter's type and
     //    is (or contains) a mutable owner. This is the same loan-based confirmation
     //    the receiver branch uses; an argument denoting no owner yields nothing.
-    bool MayMutate = paramMayMutateOwner(PVD->getType());
+    bool MayMutate = paramMayMutateOwner(PVD->getType(), FactMgr.getTUCache());
     bool LoanConfirmed =
         !MayMutate && paramCanMutateThrough(PVD->getType()) &&
         PVD->getType()->getPointeeType()->getAsCXXRecordDecl() != nullptr;
@@ -3457,12 +3460,12 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
       if (Method->isConst())
         return false;
       QualType RecvTy = Args[0]->getType();
-      return isGslOwnerType(RecvTy) || recordHasGslOwnerField(RecvTy);
+      return isGslOwnerType(RecvTy) || recordHasGslOwnerField(RecvTy, FactMgr.getTUCache());
     }
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
     if (!PVD)
       return false;
-    if (paramMayMutateOwner(PVD->getType()))
+    if (paramMayMutateOwner(PVD->getType(), FactMgr.getTUCache()))
       return true;
     // The parameter's STATIC type does not always reveal the owner the callee
     // can reallocate. Upcasting the argument to an abstract interface erases it
@@ -3507,7 +3510,7 @@ void FactsGenerator::handleAggregateInitOverlap(
   llvm::append_range(InitFields, RD->fields());
   auto IsMutatingInit = [&](unsigned I) -> bool {
     return I < InitFields.size() && InitFields[I] &&
-           paramMayMutateOwner(InitFields[I]->getType());
+           paramMayMutateOwner(InitFields[I]->getType(), FactMgr.getTUCache());
   };
   emitArgumentOverlap(AggExpr, Inits, IsMutatingInit);
 }

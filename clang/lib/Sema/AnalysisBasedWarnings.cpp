@@ -2938,7 +2938,8 @@ static void setLifetimeSafetyCFGBuildOptions(CFG::BuildOptions &BO) {
 
 static void
 LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
-                         clang::lifetimes::LifetimeSafetyStats &LSStats) {
+                         clang::lifetimes::LifetimeSafetyStats &LSStats,
+                         clang::lifetimes::LifetimeSafetyTUCache &LSTUCache) {
   llvm::TimeTraceScope TimeProfile("LifetimeSafetyTUAnalysis");
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
 
@@ -2953,7 +2954,8 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
     AnalysisDeclContext AC(nullptr, D);
     setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
     if (AC.getCFG())
-      runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
+      runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats,
+                                &LSTUCache);
     else
       // No CFG: surface the skip so it is not a silent gap in coverage.
       SemaHelper.reportAnalysisBailout(D,
@@ -4086,6 +4088,7 @@ class LifetimeSafetyTUSweep : public DynamicRecursiveASTVisitor {
   Sema &S;
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper;
   clang::lifetimes::LifetimeSafetyStats &LSStats;
+  clang::lifetimes::LifetimeSafetyTUCache &LSTUCache;
 
 public:
   bool MemberDepth = false;
@@ -4093,8 +4096,9 @@ public:
   bool DestructionOrder = false;
   bool FileVarInit = false;
 
-  LifetimeSafetyTUSweep(Sema &S, clang::lifetimes::LifetimeSafetyStats &LSStats)
-      : S(S), SemaHelper(S), LSStats(LSStats) {
+  LifetimeSafetyTUSweep(Sema &S, clang::lifetimes::LifetimeSafetyStats &LSStats,
+                        clang::lifetimes::LifetimeSafetyTUCache &LSTUCache)
+      : S(S), SemaHelper(S), LSStats(LSStats), LSTUCache(LSTUCache) {
     ShouldVisitImplicitCode = false;
     // Every check must see INSTANTIATED code. In a dependent pattern `static T
     // t;` says nothing -- the hazard only appears once T is known -- and an
@@ -4613,7 +4617,8 @@ private:
     AnalysisDeclContext AC(nullptr, VD);
     setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
     if (AC.getCFG())
-      runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
+      runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats,
+                                &LSTUCache);
     else
       SemaHelper.reportAnalysisBailout(
           VD, lifetimes::BailoutReason::CFGUnavailable);
@@ -4622,9 +4627,10 @@ private:
 } // namespace
 
 static void LifetimeSafetyTUSweeps(Sema &S, TranslationUnitDecl *TU,
-                                   clang::lifetimes::LifetimeSafetyStats &LSStats) {
+                                   clang::lifetimes::LifetimeSafetyStats &LSStats,
+                                   clang::lifetimes::LifetimeSafetyTUCache &LSTUCache) {
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  LifetimeSafetyTUSweep W(S, LSStats);
+  LifetimeSafetyTUSweep W(S, LSStats, LSTUCache);
   W.MemberDepth = !Diags.isIgnoredInEveryState(
       diag::warn_lifetime_safety_multilevel_indirection);
   W.NonInvalidating = !Diags.isIgnoredInEveryState(
@@ -4708,7 +4714,7 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
 
   if (S.getLangOpts().CPlusPlus &&
       S.getLangOpts().EnableLifetimeSafetyTUAnalysis)
-    LifetimeSafetyTUAnalysis(S, TU, LSStats);
+    LifetimeSafetyTUAnalysis(S, TU, LSStats, LSTUCache);
 
   IssueLifetimeSafetyTUWarnings(TU);
 }
@@ -4722,7 +4728,7 @@ void clang::sema::AnalysisBasedWarnings::IssueLifetimeSafetyTUWarnings(
     return;
   // Namespace-scope dynamic initializers, in both modes: neither the per-
   // function path nor the TU sweeps reach them.
-  LifetimeSafetyTUSweeps(S, TU, LSStats);
+  LifetimeSafetyTUSweeps(S, TU, LSStats, LSTUCache);
 }
 
 void clang::sema::AnalysisBasedWarnings::
@@ -4781,7 +4787,7 @@ void clang::sema::AnalysisBasedWarnings::
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
   if (AC.getCFG())
     lifetimes::runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats,
-                                         S.CollectStats);
+                                         S.CollectStats, &LSTUCache);
 }
 
 void clang::sema::AnalysisBasedWarnings::IssueWarnings(
@@ -4955,7 +4961,8 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
     lifetimes::LifetimeSafetySemaHelperImpl LifetimeSafetySemaHelper(S);
     if (AC.getCFG())
       lifetimes::runLifetimeSafetyAnalysis(AC, &LifetimeSafetySemaHelper,
-                                           LSStats, S.CollectStats);
+                                           LSStats, S.CollectStats,
+                                           &LSTUCache);
     else
       // No CFG: surface the skip so it is not a silent gap in coverage.
       LifetimeSafetySemaHelper.reportAnalysisBailout(

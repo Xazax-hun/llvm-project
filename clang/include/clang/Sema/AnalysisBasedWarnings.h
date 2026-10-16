@@ -14,6 +14,7 @@
 #define LLVM_CLANG_SEMA_ANALYSISBASEDWARNINGS_H
 
 #include "clang/AST/Decl.h"
+#include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeStats.h"
 #include "clang/Sema/ScopeInfo.h"
 #include <memory>
@@ -104,6 +105,9 @@ private:
   /// These are accumulated across all analyzed functions and printed
   /// when -print-stats is enabled.
   clang::lifetimes::LifetimeSafetyStats LSStats;
+  /// Type- and record-only answers shared by every function the lifetime
+  /// analysis runs on in this translation unit.
+  clang::lifetimes::LifetimeSafetyTUCache LSTUCache;
 
   /// @}
 

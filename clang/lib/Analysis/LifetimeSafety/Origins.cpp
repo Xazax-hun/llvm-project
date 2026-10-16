@@ -118,8 +118,22 @@ bool OriginManager::hasOrigins(QualType QT) const {
   const Type *Key = QT.getCanonicalType().getTypePtr();
   if (auto It = HasOriginsCache.find(Key); It != HasOriginsCache.end())
     return It->second;
+  // Across functions too, when this one registered no lifetimebound-returned
+  // origin type: then the answer depends on the type alone.
+  LifetimeSafetyTUCache *Shared =
+      LifetimeAnnotatedOriginTypes.empty() ? TUCache : nullptr;
+  if (Shared)
+    if (auto It = Shared->PureHasOrigins.find(Key);
+        It != Shared->PureHasOrigins.end())
+      return HasOriginsCache[Key] = It->second;
   bool Result = computeHasOrigins(QT);
   HasOriginsCache[Key] = Result;
+  // An incomplete record has no fields yet and so no origins; it may be
+  // completed later in the translation unit, so only a "yes" about it is kept.
+  // (A complete record's by-value members are complete, and a pointer answers
+  // "yes" without looking at its pointee, so nothing deeper can change.)
+  if (Shared && (Result || !QT->isIncompleteType()))
+    Shared->PureHasOrigins[Key] = Result;
   return Result;
 }
 
@@ -223,8 +237,9 @@ bool doesDeclHaveStorage(const ValueDecl *D) {
   return !D->getType()->isReferenceType();
 }
 
-OriginManager::OriginManager(const AnalysisDeclContext &AC)
-    : AST(AC.getASTContext()) {
+OriginManager::OriginManager(const AnalysisDeclContext &AC,
+                             LifetimeSafetyTUCache *TUCache)
+    : AST(AC.getASTContext()), TUCache(TUCache) {
   runPreScan(AC);
   initializeThisOrigins(AC.getDecl());
 }

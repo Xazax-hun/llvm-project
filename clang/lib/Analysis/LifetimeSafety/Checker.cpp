@@ -312,23 +312,24 @@ static bool thisBorrowAliasesMutationOf(const CXXMethodDecl *MD,
 /// into. `Visited` cuts cycles.
 static bool recordContainsOwnerSubobjectDerivedFrom(
     const CXXRecordDecl *RD, const CXXRecordDecl *Target,
-    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited) {
+    llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Visited,
+    LifetimeSafetyTUCache *Cache) {
   if (!RD || !RD->hasDefinition() || !Target || !Target->hasDefinition())
     return false;
   if (RD->getCanonicalDecl() == Target->getCanonicalDecl() ||
       RD->isDerivedFrom(Target)) {
-    return isGslOwnerType(RD) || recordContainsMutableOwner(RD);
+    return isGslOwnerType(RD) || recordContainsMutableOwner(RD, Cache);
   }
   if (!Visited.insert(RD->getCanonicalDecl()).second)
     return false;
   for (const CXXBaseSpecifier &B : RD->bases())
     if (recordContainsOwnerSubobjectDerivedFrom(
-            B.getType()->getAsCXXRecordDecl(), Target, Visited))
+            B.getType()->getAsCXXRecordDecl(), Target, Visited, Cache))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
     QualType FT = getBaseElementType(FD->getType().getNonReferenceType());
     if (recordContainsOwnerSubobjectDerivedFrom(FT->getAsCXXRecordDecl(), Target,
-                                                Visited))
+                                                Visited, Cache))
       return true;
   }
   return false;
@@ -1527,11 +1528,11 @@ public:
   /// True if `T` (peeling one pointer/reference) is, or transitively contains, a
   /// mutable owner -- the only thing whose mutation can dangle a borrow a sibling
   /// accessor handed out.
-  static bool pointeeIsMutableOwner(QualType T) {
+  bool pointeeIsMutableOwner(QualType T) const {
     if (T.isNull())
       return false;
     const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-    return isGslOwnerType(T) || (RD && recordContainsMutableOwner(RD));
+    return isGslOwnerType(T) || (RD && recordContainsMutableOwner(RD, FactMgr.getTUCache()));
   }
 
   void checkConstSubversion(const InvalidateOriginFact *IOF) {
@@ -1718,7 +1719,7 @@ public:
         // an owner is excluded -- its type is no such by-value subobject.
         llvm::SmallPtrSet<const CXXRecordDecl *, 8> Visited2;
         bool DirectOwner =
-            IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT));
+            IsA && (isGslOwnerType(RT) || recordContainsMutableOwner(RT, FactMgr.getTUCache()));
         // The enclosing-object fallback is accepted only for a receiver
         // (ReachableOwner), not for the dynamic-dispatch argument case
         // (DenotedOwner) -- see OwnerLoanGate.
@@ -1726,7 +1727,8 @@ public:
             IOF->getOwnerLoanGate() == OwnerLoanGate::ReachableOwner;
         if (DirectOwner ||
             (AllowEnclosing &&
-             recordContainsOwnerSubobjectDerivedFrom(RT, RecvRD, Visited2)))
+             recordContainsOwnerSubobjectDerivedFrom(RT, RecvRD, Visited2,
+                                                     FactMgr.getTUCache())))
           MatchLoans.push_back(InvalidID);
       }
       if (MatchLoans.empty())
@@ -2064,7 +2066,7 @@ public:
       bool WrapsOwner = false;
       if (!DirectOwner)
         if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
-          WrapsOwner = recordContainsMutableOwner(RD);
+          WrapsOwner = recordContainsMutableOwner(RD, FactMgr.getTUCache());
         }
       if (!DirectOwner && !WrapsOwner)
         continue;
@@ -2245,7 +2247,7 @@ public:
     if (isGslOwnerType(GlobalTy))
       return true;
     if (const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl()) {
-      return recordContainsMutableOwner(RD);
+      return recordContainsMutableOwner(RD, FactMgr.getTUCache());
     }
     return false;
   }

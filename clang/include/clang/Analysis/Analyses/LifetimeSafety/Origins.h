@@ -18,6 +18,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/TypeBase.h"
+#include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeStats.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Utils.h"
 #include "clang/Analysis/AnalysisDeclContext.h"
@@ -182,7 +183,8 @@ bool doesDeclHaveStorage(const ValueDecl *D);
 /// variables and expressions.
 class OriginManager {
 public:
-  explicit OriginManager(const AnalysisDeclContext &AC);
+  explicit OriginManager(const AnalysisDeclContext &AC,
+                         LifetimeSafetyTUCache *TUCache = nullptr);
 
   /// Lightweight constructor for standalone, type-structural queries (namely
   /// getIndirectionDepth) outside a function analysis: it sets up only what the
@@ -337,6 +339,9 @@ private:
   /// on the type and on LifetimeAnnotatedOriginTypes, so it is cleared when
   /// that set grows (only during the pre-scan).
   mutable llvm::DenseMap<const Type *, bool> HasOriginsCache;
+  /// Shared across functions; consulted only while LifetimeAnnotatedOriginTypes
+  /// is empty, when hasOrigins is a property of the type alone.
+  LifetimeSafetyTUCache *TUCache = nullptr;
   bool computeHasOrigins(QualType QT) const;
   /// Fields accessed in the function body (or constructor init lists).
   /// Fields outside this set are excluded from origin tracking.

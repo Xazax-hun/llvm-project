@@ -38,6 +38,8 @@ struct LifetimeSafetyOpts {
   /// Maximum number of CFG blocks to analyze. Functions with larger CFGs will
   /// be skipped.
   size_t MaxCFGBlocks;
+  /// Answers kept across the functions of a translation unit; may be null.
+  LifetimeSafetyTUCache *TUCache = nullptr;
 };
 
 /// Enum to track functions visible across or within TU.
@@ -484,7 +486,8 @@ public:
 /// The main entry point for the analysis.
 void runLifetimeSafetyAnalysis(AnalysisDeclContext &AC,
                                LifetimeSafetySemaHelper *SemaHelper,
-                               LifetimeSafetyStats &Stats, bool CollectStats);
+                               LifetimeSafetyStats &Stats, bool CollectStats,
+                               LifetimeSafetyTUCache *TUCache = nullptr);
 
 namespace internal {
 
