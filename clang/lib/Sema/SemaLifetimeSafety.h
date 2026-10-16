@@ -242,215 +242,79 @@ public:
 
   void reportUseAfterInvalidation(const Expr *IssueExpr, const Expr *UseExpr,
                                   const Expr *InvalidationExpr) override {
-    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                        ? diag::warn_lifetime_safety_use_after_free
-                        : diag::warn_lifetime_safety_invalidation;
-    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                       ? diag::note_lifetime_safety_freed_here
-                       : diag::note_lifetime_safety_invalidated_here;
-    if (silencedAt(WarnDiag, UseExpr->getExprLoc()))
-      return;
-    S.Diag(IssueExpr->getExprLoc(), WarnDiag)
-        << false << IssueExpr->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(UseExpr->getExprLoc(), diag::note_lifetime_safety_used_here)
-        << UseExpr->getSourceRange();
+    emitUseAfterInvalidation(anchorAt(IssueExpr), UseExpr->getExprLoc(),
+                             UseExpr->getSourceRange(), InvalidationExpr);
   }
   void reportUseAfterInvalidation(const ParmVarDecl *PVD, const Expr *UseExpr,
                                   const Expr *InvalidationExpr) override {
-
-    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                        ? diag::warn_lifetime_safety_use_after_free
-                        : diag::warn_lifetime_safety_invalidation;
-    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                       ? diag::note_lifetime_safety_freed_here
-                       : diag::note_lifetime_safety_invalidated_here;
-
-    if (silencedAt(WarnDiag, UseExpr->getExprLoc()))
-      return;
-    S.Diag(PVD->getSourceRange().getBegin(), WarnDiag)
-        << true << PVD->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(UseExpr->getExprLoc(), diag::note_lifetime_safety_used_here)
-        << UseExpr->getSourceRange();
+    emitUseAfterInvalidation(anchorAt(PVD), UseExpr->getExprLoc(),
+                             UseExpr->getSourceRange(), InvalidationExpr);
   }
   void reportUseAfterInvalidation(const Expr *IssueExpr, SourceLocation UseLoc,
                                   const Expr *InvalidationExpr) override {
-    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                        ? diag::warn_lifetime_safety_use_after_free
-                        : diag::warn_lifetime_safety_invalidation;
-    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                       ? diag::note_lifetime_safety_freed_here
-                       : diag::note_lifetime_safety_invalidated_here;
-    if (silencedAt(WarnDiag, UseLoc))
-      return;
-    S.Diag(IssueExpr->getExprLoc(), WarnDiag)
-        << false << IssueExpr->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(UseLoc, diag::note_lifetime_safety_used_here);
+    emitUseAfterInvalidation(anchorAt(IssueExpr), UseLoc, SourceRange(),
+                             InvalidationExpr);
   }
   void reportUseAfterInvalidation(const ParmVarDecl *PVD, SourceLocation UseLoc,
                                   const Expr *InvalidationExpr) override {
-    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                        ? diag::warn_lifetime_safety_use_after_free
-                        : diag::warn_lifetime_safety_invalidation;
-    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                       ? diag::note_lifetime_safety_freed_here
-                       : diag::note_lifetime_safety_invalidated_here;
-    if (silencedAt(WarnDiag, UseLoc))
-      return;
-    S.Diag(PVD->getSourceRange().getBegin(), WarnDiag)
-        << true << PVD->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(UseLoc, diag::note_lifetime_safety_used_here);
+    emitUseAfterInvalidation(anchorAt(PVD), UseLoc, SourceRange(),
+                             InvalidationExpr);
   }
-
   void reportUseAfterInvalidation(const CXXMethodDecl *MD, SourceLocation UseLoc,
                                   const Expr *InvalidationExpr) override {
-    auto WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                        ? diag::warn_lifetime_safety_use_after_free
-                        : diag::warn_lifetime_safety_invalidation;
-    auto UseDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                       ? diag::note_lifetime_safety_freed_here
-                       : diag::note_lifetime_safety_invalidated_here;
-    if (silencedAt(WarnDiag, UseLoc))
-      return;
-    S.Diag(MD->getBeginLoc(), WarnDiag)
-        << /*borrow held by this object=*/2 << MD->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), UseDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(UseLoc, diag::note_lifetime_safety_used_here);
+    // A borrow held by this object: anchored at the method.
+    emitUseAfterInvalidation({MD->getBeginLoc(), MD->getSourceRange(), 2},
+                             UseLoc, SourceRange(), InvalidationExpr);
   }
 
   void reportInvalidatedField(const Expr *IssueExpr,
                               const FieldDecl *DanglingField,
                               const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(IssueExpr->getExprLoc(),
-           diag::warn_lifetime_safety_invalidated_field)
-        << false << IssueExpr->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(DanglingField->getLocation(),
-           diag::note_lifetime_safety_dangling_field_here)
-        << DanglingField->getEndLoc();
+    emitInvalidatedField(anchorAt(IssueExpr), DanglingField, InvalidationExpr);
   }
-
   void reportInvalidatedField(const ParmVarDecl *PVD,
                               const FieldDecl *DanglingField,
                               const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(PVD->getSourceRange().getBegin(),
-           diag::warn_lifetime_safety_invalidated_field)
-        << true << PVD->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(DanglingField->getLocation(),
-           diag::note_lifetime_safety_dangling_field_here)
-        << DanglingField->getEndLoc();
+    emitInvalidatedField(anchorAt(PVD), DanglingField, InvalidationExpr);
   }
-
   void reportInvalidatedField(const FieldDecl *HoldingField,
                               const FieldDecl *DanglingField,
                               const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(HoldingField->getLocation(),
-           diag::warn_lifetime_safety_invalidated_field)
-        << /*member=*/2 << HoldingField->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(DanglingField->getLocation(),
-           diag::note_lifetime_safety_dangling_field_here)
-        << DanglingField->getEndLoc();
+    emitInvalidatedField(anchorAt(HoldingField), DanglingField,
+                         InvalidationExpr);
   }
 
   void reportInvalidatedGlobal(const Expr *IssueExpr,
                                const VarDecl *DanglingGlobal,
                                const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(IssueExpr->getExprLoc(),
-           diag::warn_lifetime_safety_invalidated_global)
-        << false << IssueExpr->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    if (DanglingGlobal->isStaticLocal() || DanglingGlobal->isStaticDataMember())
-      S.Diag(DanglingGlobal->getLocation(),
-             diag::note_lifetime_safety_dangling_static_here)
-          << DanglingGlobal->getEndLoc();
-    else
-      S.Diag(DanglingGlobal->getLocation(),
-             diag::note_lifetime_safety_dangling_global_here)
-          << DanglingGlobal->getEndLoc();
+    emitInvalidatedGlobal(anchorAt(IssueExpr), DanglingGlobal,
+                          InvalidationExpr);
   }
-
   void reportInvalidatedGlobal(const ParmVarDecl *PVD,
                                const VarDecl *DanglingGlobal,
                                const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(PVD->getSourceRange().getBegin(),
-           diag::warn_lifetime_safety_invalidated_global)
-        << true << PVD->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    if (DanglingGlobal->isStaticLocal() || DanglingGlobal->isStaticDataMember())
-      S.Diag(DanglingGlobal->getLocation(),
-             diag::note_lifetime_safety_dangling_static_here)
-          << DanglingGlobal->getEndLoc();
-    else
-      S.Diag(DanglingGlobal->getLocation(),
-             diag::note_lifetime_safety_dangling_global_here)
-          << DanglingGlobal->getEndLoc();
+    emitInvalidatedGlobal(anchorAt(PVD), DanglingGlobal, InvalidationExpr);
   }
-
   void reportInvalidatedGlobal(const FieldDecl *HoldingField,
                                const VarDecl *DanglingGlobal,
                                const Expr *InvalidationExpr) override {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(HoldingField->getLocation(),
-           diag::warn_lifetime_safety_invalidated_global)
-        << /*member=*/2 << HoldingField->getSourceRange();
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
-    S.Diag(DanglingGlobal->getLocation(),
-           diag::note_lifetime_safety_dangling_global_here)
-        << DanglingGlobal->getEndLoc();
+    emitInvalidatedGlobal(anchorAt(HoldingField), DanglingGlobal,
+                          InvalidationExpr);
   }
 
   void reportInvalidatedReturn(const Expr *IssueExpr, const Expr *ReturnExpr,
                                const Expr *InvalidationExpr) override {
-    emitInvalidatedReturn(IssueExpr->getExprLoc(), IssueExpr->getSourceRange(),
-                          /*Subject=*/0, ReturnExpr, InvalidationExpr);
+    emitInvalidatedReturn(anchorAt(IssueExpr), ReturnExpr, InvalidationExpr);
   }
-
   void reportInvalidatedReturn(const ParmVarDecl *PVD, const Expr *ReturnExpr,
                                const Expr *InvalidationExpr) override {
-    emitInvalidatedReturn(PVD->getSourceRange().getBegin(),
-                          PVD->getSourceRange(), /*Subject=*/1, ReturnExpr,
-                          InvalidationExpr);
+    emitInvalidatedReturn(anchorAt(PVD), ReturnExpr, InvalidationExpr);
   }
-
   void reportInvalidatedReturn(const FieldDecl *HoldingField,
                                const Expr *ReturnExpr,
                                const Expr *InvalidationExpr) override {
-    emitInvalidatedReturn(HoldingField->getLocation(),
-                          HoldingField->getSourceRange(), /*Subject=*/2,
-                          ReturnExpr, InvalidationExpr);
+    emitInvalidatedReturn(anchorAt(HoldingField), ReturnExpr,
+                          InvalidationExpr);
   }
 
   void suggestLifetimeboundToParmVar(WarningScope Scope,
@@ -1005,19 +869,84 @@ private:
     return {InsertionPoint, " [[clang::lifetimebound]]"};
   }
 
+  /// What an invalidation report is anchored at: the borrow, as the location
+  /// and range of the primary diagnostic and the `%select` index naming it --
+  /// 0 a borrow taken by an expression, 1 a parameter, 2 a member (or, for a
+  /// use-after-invalidation, a borrow held by this object).
+  struct InvalidationAnchor {
+    SourceLocation Loc;
+    SourceRange Range;
+    unsigned Subject;
+  };
+  static InvalidationAnchor anchorAt(const Expr *IssueExpr) {
+    return {IssueExpr->getExprLoc(), IssueExpr->getSourceRange(), 0};
+  }
+  static InvalidationAnchor anchorAt(const ParmVarDecl *PVD) {
+    return {PVD->getSourceRange().getBegin(), PVD->getSourceRange(), 1};
+  }
+  static InvalidationAnchor anchorAt(const FieldDecl *HoldingField) {
+    return {HoldingField->getLocation(), HoldingField->getSourceRange(), 2};
+  }
+
+  /// The note naming the operation: a `delete` frees, anything else
+  /// invalidates.
+  void noteInvalidation(const Expr *InvalidationExpr) {
+    S.Diag(InvalidationExpr->getExprLoc(),
+           isa<CXXDeleteExpr>(InvalidationExpr)
+               ? diag::note_lifetime_safety_freed_here
+               : diag::note_lifetime_safety_invalidated_here)
+        << InvalidationExpr->getSourceRange();
+  }
+
+  /// Shared body of the reportUseAfterInvalidation overloads. `UseRange` is
+  /// empty for an implicit use, which has no expression.
+  void emitUseAfterInvalidation(InvalidationAnchor A, SourceLocation UseLoc,
+                                SourceRange UseRange,
+                                const Expr *InvalidationExpr) {
+    unsigned WarnDiag = isa<CXXDeleteExpr>(InvalidationExpr)
+                            ? diag::warn_lifetime_safety_use_after_free
+                            : diag::warn_lifetime_safety_invalidation;
+    if (silencedAt(WarnDiag, UseLoc))
+      return;
+    S.Diag(A.Loc, WarnDiag) << A.Subject << A.Range;
+    noteInvalidation(InvalidationExpr);
+    S.Diag(UseLoc, diag::note_lifetime_safety_used_here) << UseRange;
+  }
+
+  /// Shared body of the reportInvalidatedField overloads: the invalidated
+  /// borrow rests in a member when the function returns.
+  void emitInvalidatedField(InvalidationAnchor A, const FieldDecl *DanglingField,
+                            const Expr *InvalidationExpr) {
+    S.Diag(A.Loc, diag::warn_lifetime_safety_invalidated_field)
+        << A.Subject << A.Range;
+    noteInvalidation(InvalidationExpr);
+    S.Diag(DanglingField->getLocation(),
+           diag::note_lifetime_safety_dangling_field_here)
+        << DanglingField->getEndLoc();
+  }
+
+  /// Shared body of the reportInvalidatedGlobal overloads: the invalidated
+  /// borrow rests in global or static storage.
+  void emitInvalidatedGlobal(InvalidationAnchor A, const VarDecl *DanglingGlobal,
+                             const Expr *InvalidationExpr) {
+    S.Diag(A.Loc, diag::warn_lifetime_safety_invalidated_global)
+        << A.Subject << A.Range;
+    noteInvalidation(InvalidationExpr);
+    S.Diag(DanglingGlobal->getLocation(),
+           DanglingGlobal->isStaticLocal() || DanglingGlobal->isStaticDataMember()
+               ? diag::note_lifetime_safety_dangling_static_here
+               : diag::note_lifetime_safety_dangling_global_here)
+        << DanglingGlobal->getEndLoc();
+  }
+
   /// Shared body of the reportInvalidatedReturn overloads: the borrow was
   /// invalidated and then handed to the caller, so the report names the borrow,
   /// the operation that invalidated it, and the return that leaks it.
-  void emitInvalidatedReturn(SourceLocation Loc, SourceRange Range,
-                             unsigned Subject, const Expr *ReturnExpr,
+  void emitInvalidatedReturn(InvalidationAnchor A, const Expr *ReturnExpr,
                              const Expr *InvalidationExpr) {
-    auto InvalidationDiag = isa<CXXDeleteExpr>(InvalidationExpr)
-                                ? diag::note_lifetime_safety_freed_here
-                                : diag::note_lifetime_safety_invalidated_here;
-    S.Diag(Loc, diag::warn_lifetime_safety_invalidated_return)
-        << Subject << Range;
-    S.Diag(InvalidationExpr->getExprLoc(), InvalidationDiag)
-        << InvalidationExpr->getSourceRange();
+    S.Diag(A.Loc, diag::warn_lifetime_safety_invalidated_return)
+        << A.Subject << A.Range;
+    noteInvalidation(InvalidationExpr);
     if (ReturnExpr)
       S.Diag(ReturnExpr->getExprLoc(), diag::note_lifetime_safety_returned_here)
           << ReturnExpr->getSourceRange();
