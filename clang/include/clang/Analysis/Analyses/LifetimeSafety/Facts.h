@@ -992,8 +992,8 @@ public:
 
   /// Memoizes `isUnknownOwnershipType` results (keyed by canonical type) for
   /// the duration of the analysis.
-  llvm::DenseMap<const Type *, bool> &getUnknownOwnershipCache() {
-    return UnknownOwnershipCache;
+  UnknownOwnershipCache &getUnknownOwnershipCache() {
+    return TUCache ? TUCache->UnknownOwnership : LocalUnknownOwnership;
   }
 
   /// Bit vector indexed by origin ID. If set, the origin is referenced from
@@ -1024,7 +1024,7 @@ private:
   /// Facts for each CFG block, indexed by block ID.
   llvm::SmallVector<llvm::SmallVector<const Fact *>> BlockToFacts;
   llvm::BumpPtrAllocator FactAllocator;
-  llvm::DenseMap<const Type *, bool> UnknownOwnershipCache;
+  UnknownOwnershipCache LocalUnknownOwnership;
   LifetimeSafetyTUCache *TUCache;
 };
 } // namespace clang::lifetimes::internal

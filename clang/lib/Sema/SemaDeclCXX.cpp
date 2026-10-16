@@ -7222,7 +7222,7 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
     // otherwise fire where the member type is used, so nothing else covers it.
     // Without this, wrapping the offending member in one plain struct silences
     // the check that the direct member form reports.
-    llvm::DenseMap<const Type *, bool> BorrowFieldCache;
+    lifetimes::UnknownOwnershipCache BorrowFieldCache;
     auto CheckPublicBorrowFields = [&](const CXXRecordDecl *RD) {
       for (const FieldDecl *F : RD->fields()) {
         if (F->getAccess() != AS_public)
@@ -7342,7 +7342,7 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
        !getDiagnostics().isIgnored(
            diag::warn_lifetime_safety_pointer_of_indirection,
            Record->getLocation()))) {
-    llvm::DenseMap<const Type *, bool> Cache;
+    lifetimes::UnknownOwnershipCache Cache;
     for (const auto *F : Record->fields()) {
       // Peel C-array dimensions so an array member `T arr[N]` is treated like
       // the scalar member `T`. A ConstantArrayType is neither an owner-/pointer-

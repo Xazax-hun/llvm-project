@@ -477,7 +477,7 @@ template <typename AttrT> static QualType gslAttrDerefType(QualType QT) {
 }
 
 static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
-                                 llvm::DenseMap<const Type *, bool> &Cache);
+                                 UnknownOwnershipCache &Cache);
 
 // Whether a record field / lambda capture / template-argument of type T holds a
 // borrow the enclosing record cannot track through it: a raw pointer/reference
@@ -497,14 +497,19 @@ static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
 // the ownership checks (e.g. unique_ptr<struct{std::function<...>}> was trusted
 // as a plain owner).
 static bool fieldTypeHoldsBorrow(QualType T,
-                                 llvm::DenseMap<const Type *, bool> &Cache) {
+                                 UnknownOwnershipCache &Cache) {
   // Peel array dimensions: `P a[N]` holds a borrow iff `P` does.
   T = getBaseElementType(T);
   if (isPointerLikeType(T) || T->isReferenceType())
     return true;
   const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
-  if (!RD || !RD->hasDefinition())
+  if (!RD)
     return false;
+  if (!RD->hasDefinition()) {
+    // Not yet inspectable; the answer may change once it is completed.
+    ++Cache.IncompleteSeen;
+    return false;
+  }
   if (isStdCallableWrapperType(RD))
     return true;
   if (RD->isLambda())
@@ -519,14 +524,14 @@ static bool fieldTypeHoldsBorrow(QualType T,
 // than the outer container tracks. Shared by the gsl::Owner-of-indirection check
 // and the std::variant/any check below.
 static bool isIndirectionElement(QualType T,
-                                 llvm::DenseMap<const Type *, bool> &Cache) {
+                                 UnknownOwnershipCache &Cache) {
   if (isGslOwnerOfIndirection(T, Cache))
     return true;
   return fieldTypeHoldsBorrow(T, Cache);
 }
 
 bool isGslOwnerOfIndirection(QualType QT,
-                             llvm::DenseMap<const Type *, bool> &Cache) {
+                             UnknownOwnershipCache &Cache) {
   if (!isGslOwnerType(QT))
     return false;
   // A [[gsl::Owner(T)]] whose declared owned type T is itself an indirection
@@ -605,7 +610,7 @@ static QualType gslPointerPointeeType(QualType QT) {
 }
 
 bool isGslPointerOfIndirection(QualType QT,
-                               llvm::DenseMap<const Type *, bool> &Cache) {
+                               UnknownOwnershipCache &Cache) {
   if (!isGslPointerType(QT))
     return false;
   QualType Pointee = gslPointerPointeeType(QT);
@@ -626,14 +631,14 @@ bool isGslPointerOfIndirection(QualType QT,
 }
 
 static QualType findNestedOwnerOrPointerOfIndirectionImpl(
-    QualType QT, llvm::DenseMap<const Type *, bool> &Cache,
+    QualType QT, UnknownOwnershipCache &Cache,
     llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer);
 
 // Inspects one template argument: a type argument is descended into; a pack
 // argument (variadic template, e.g. std::tuple<...>) is flattened into its
 // elements; other argument kinds are ignored.
 static QualType findIndirectionInTemplateArg(
-    const TemplateArgument &Arg, llvm::DenseMap<const Type *, bool> &Cache,
+    const TemplateArgument &Arg, UnknownOwnershipCache &Cache,
     llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer) {
   if (Arg.getKind() == TemplateArgument::Pack) {
     for (const TemplateArgument &Elt : Arg.pack_elements())
@@ -650,7 +655,7 @@ static QualType findIndirectionInTemplateArg(
 }
 
 static QualType findNestedOwnerOrPointerOfIndirectionImpl(
-    QualType QT, llvm::DenseMap<const Type *, bool> &Cache,
+    QualType QT, UnknownOwnershipCache &Cache,
     llvm::SmallPtrSetImpl<const Type *> &Visited, bool &IsPointer) {
   // A type that is itself an owner-/pointer-of-indirection is the answer. (For a
   // recognized owner/view these already recurse through their own template
@@ -719,7 +724,7 @@ static QualType findNestedOwnerOrPointerOfIndirectionImpl(
 }
 
 QualType findNestedOwnerOrPointerOfIndirection(
-    QualType QT, llvm::DenseMap<const Type *, bool> &Cache, bool &IsPointer) {
+    QualType QT, UnknownOwnershipCache &Cache, bool &IsPointer) {
   llvm::SmallPtrSet<const Type *, 8> Visited;
   return findNestedOwnerOrPointerOfIndirectionImpl(QT, Cache, Visited,
                                                    IsPointer);
@@ -736,7 +741,7 @@ QualType findNestedOwnerOrPointerOfIndirection(
 // fields -- so the containing record must see the captured borrow. This inspects
 // the capture fields the lambda exemption would otherwise skip.
 static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
-                                 llvm::DenseMap<const Type *, bool> &Cache) {
+                                 UnknownOwnershipCache &Cache) {
   for (const FieldDecl *F : Lambda->fields())
     if (fieldTypeHoldsBorrow(F->getType(), Cache))
       return true;
@@ -744,48 +749,60 @@ static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
 }
 
 bool isUnknownOwnershipType(QualType QT,
-                            llvm::DenseMap<const Type *, bool> &Cache) {
+                            UnknownOwnershipCache &Cache) {
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD)
     return false;
-  // Annotated/recognized types have known semantics.
-  if (isGslOwnerType(QT) || isGslPointerType(QT) || isStdCallableWrapperType(RD))
-    return false;
-  if (RD->isLambda())
-    return false;
+  // An incomplete type cannot be inspected, so its ownership is conservatively
+  // unknown -- unless annotated. Not cached: its definition, which may also
+  // carry the annotation, can still appear (see UnknownOwnershipCache).
+  const CXXRecordDecl *Def = RD->getDefinition();
+  auto IsRecognized = [&] {
+    return isGslOwnerType(QT) || isGslPointerType(QT) ||
+           isStdCallableWrapperType(RD) || RD->isLambda();
+  };
+  if (!Def) {
+    ++Cache.IncompleteSeen;
+    return !IsRecognized();
+  }
 
+  // Looked up before the recognition checks: for a complete type those are
+  // properties of the type too, and recomputing them dominated this function.
   // Tentatively cache `false` to break any cyclic recursion.
   const Type *Key = QT.getCanonicalType().getTypePtr();
-  if (auto [It, Inserted] = Cache.try_emplace(Key, false); !Inserted)
+  if (auto [It, Inserted] = Cache.Map.try_emplace(Key, false); !Inserted)
     return It->second;
+  // Annotated/recognized types have known semantics (cached as `false`).
+  if (IsRecognized())
+    return false;
+  unsigned IncompleteBefore = Cache.IncompleteSeen;
 
-  // An incomplete type cannot be inspected, so its ownership is conservatively
-  // unknown.
-  const CXXRecordDecl *Def = RD->getDefinition();
-  bool Result = !Def;
-  if (Def) {
-    // The type's ownership is "unknown" if it (or a base) has a member that
-    // holds a borrow the record cannot track through it (see
-    // fieldTypeHoldsBorrow): a pointer/reference/view, a type-erased callable
-    // wrapper, a closure capturing a borrow, or another unknown-ownership type.
-    auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
-      for (const FieldDecl *F : R->fields())
-        if (fieldTypeHoldsBorrow(F->getType(), Cache))
-          return true;
-      return false;
-    };
-    Result = RecordHoldsBorrow(Def);
-    if (!Result)
-      Def->forallBases([&](const CXXRecordDecl *Base) {
-        if (RecordHoldsBorrow(Base)) {
-          Result = true;
-          return false; // Stop traversing bases.
-        }
+  // The type's ownership is "unknown" if it (or a base) has a member that
+  // holds a borrow the record cannot track through it (see
+  // fieldTypeHoldsBorrow): a pointer/reference/view, a type-erased callable
+  // wrapper, a closure capturing a borrow, or another unknown-ownership type.
+  auto RecordHoldsBorrow = [&](const CXXRecordDecl *R) {
+    for (const FieldDecl *F : R->fields())
+      if (fieldTypeHoldsBorrow(F->getType(), Cache))
         return true;
-      });
-  }
+    return false;
+  };
+  bool Result = RecordHoldsBorrow(Def);
+  if (!Result)
+    Def->forallBases([&](const CXXRecordDecl *Base) {
+      if (RecordHoldsBorrow(Base)) {
+        Result = true;
+        return false; // Stop traversing bases.
+      }
+      return true;
+    });
   // Looked up again: the recursion above inserts into Cache and may rehash it.
-  Cache[Key] = Result;
+  // An answer that depended on an incomplete record is not a property of the
+  // type alone; drop it rather than let it go stale (see UnknownOwnershipCache).
+  if (Cache.IncompleteSeen != IncompleteBefore)
+    Cache.Map.erase(Key);
+  else
+    Cache.Map[Key] = Result;
   return Result;
 }
 

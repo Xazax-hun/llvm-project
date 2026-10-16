@@ -144,6 +144,16 @@ bool isGslPointerType(QualType QT);
 bool isGslOwnerType(QualType QT);
 bool isGslOwnerType(const CXXRecordDecl *RD);
 
+/// Memo for isUnknownOwnershipType, by canonical type, shared by the checks
+/// below. It may outlive one function (see LifetimeSafetyTUCache), so it keeps
+/// only answers that are properties of the type alone: an answer that looked
+/// into a record without a definition is dropped, because completing the record
+/// later in the translation unit can flip it. IncompleteSeen counts those looks.
+struct UnknownOwnershipCache {
+  llvm::DenseMap<const Type *, bool> Map;
+  unsigned IncompleteSeen = 0;
+};
+
 // Returns true if QT is a [[gsl::Owner]] class template specialization with a
 // type template argument that is an indirection: a pointer, reference,
 // gsl::Pointer, or a user type that itself holds a borrow but is unannotated
@@ -154,7 +164,7 @@ bool isGslOwnerType(const CXXRecordDecl *RD);
 // arguments (e.g. std::vector<std::vector<int*>>). \p Cache memoizes the
 // unknown-ownership sub-check by canonical type.
 bool isGslOwnerOfIndirection(QualType QT,
-                             llvm::DenseMap<const Type *, bool> &Cache);
+                             UnknownOwnershipCache &Cache);
 
 // Returns true if the given gsl::Pointer (view) type has a pointee/element type
 // that is itself an indirection (pointer, reference, gsl::Pointer, a container
@@ -166,7 +176,7 @@ bool isGslOwnerOfIndirection(QualType QT,
 // else a sole template argument. \p Cache memoizes the unknown-ownership
 // sub-check by canonical type.
 bool isGslPointerOfIndirection(QualType QT,
-                               llvm::DenseMap<const Type *, bool> &Cache);
+                               UnknownOwnershipCache &Cache);
 
 // Searches \p QT and, recursively, the type template arguments of any non-owner
 // class template specialization nested within it for a type that is an
@@ -183,7 +193,7 @@ bool isGslPointerOfIndirection(QualType QT,
 // std::pair/std::tuple are not recognized owners and so their template arguments
 // are never inspected. \p Cache memoizes the of-indirection sub-checks.
 QualType findNestedOwnerOrPointerOfIndirection(
-    QualType QT, llvm::DenseMap<const Type *, bool> &Cache, bool &IsPointer);
+    QualType QT, UnknownOwnershipCache &Cache, bool &IsPointer);
 
 // Returns the indirection depth of QT for lifetime-tracking purposes: the length
 // of its pointee chain. A pointer/reference adds one level over what it points
@@ -297,6 +307,9 @@ public:
   /// a property of the type alone.
   llvm::DenseMap<const Type *, bool> PureHasOrigins;
 
+  /// isUnknownOwnershipType and friends; see UnknownOwnershipCache.
+  UnknownOwnershipCache UnknownOwnership;
+
 private:
   struct CachedOwnerAnswer {
     bool Result = false;
@@ -349,7 +362,7 @@ bool recordHasGslOwnerField(QualType QT, LifetimeSafetyTUCache *Cache = nullptr)
 // is conservatively treated as having unknown ownership. \p Cache memoizes
 // results by canonical type.
 bool isUnknownOwnershipType(QualType QT,
-                            llvm::DenseMap<const Type *, bool> &Cache);
+                            UnknownOwnershipCache &Cache);
 
 // Returns true if the given method is std::unique_ptr::release().
 // This is treated as a move in lifetime analysis to avoid false-positives
