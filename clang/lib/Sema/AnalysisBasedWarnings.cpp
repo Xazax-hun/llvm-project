@@ -2911,6 +2911,31 @@ public:
   }
 };
 
+/// The CFG the lifetime-safety analysis needs. Every entry point that builds a
+/// CFG for it must use this: the analysis depends on the elements these
+/// options create -- lifetime ends, parameter lifetimes, implicit and temporary
+/// destructors, default member initializers -- and a CFG missing one silently
+/// loses whatever is modelled through it. The copies used to be written out at
+/// each entry point and drifted: TU-analysis mode lacked the destructor
+/// elements, so every borrow read by a destructor went unseen there.
+static void setLifetimeSafetyCFGBuildOptions(CFG::BuildOptions &BO) {
+  // No EH edges: avoids the n^2 explosion of destructor edges per call.
+  BO.PruneTriviallyFalseEdges = true;
+  BO.AddEHEdges = false;
+  BO.AddInitializers = true;
+  BO.AddImplicitDtors = true;
+  BO.AddLifetime = true;
+  BO.AddParameterLifetimes = true;
+  BO.AddTemporaryDtors = true;
+  BO.AddCXXNewAllocator = false;
+  // A default member initializer's code enters the CFG only when asked for,
+  // both through a constructor and through aggregate initialization, where
+  // there is no constructor to carry it.
+  BO.AddCXXDefaultInitExprInCtors = true;
+  BO.AddCXXDefaultInitExprInAggregates = true;
+  BO.setAllAlwaysAdd();
+}
+
 static void
 LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
                          clang::lifetimes::LifetimeSafetyStats &LSStats) {
@@ -2926,17 +2951,7 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
     if (!D || !Analyzed.insert(D->getCanonicalDecl()).second)
       return;
     AnalysisDeclContext AC(nullptr, D);
-    AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
-    AC.getCFGBuildOptions().AddLifetime = true;
-    AC.getCFGBuildOptions().AddParameterLifetimes = true;
-    AC.getCFGBuildOptions().AddInitializers = true;
-    AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
-  // ...and through AGGREGATE initialization, where there is no constructor to carry
-  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
-  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
-  // ever handed to the analysis.
-  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
-    AC.getCFGBuildOptions().setAllAlwaysAdd();
+    setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
     if (AC.getCFG())
       runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
     else
@@ -4613,19 +4628,7 @@ static void LifetimeSafetyFileVarInitAnalysis(
       if (!Seen.insert(VD->getCanonicalDecl()).second)
         return;
       AnalysisDeclContext AC(nullptr, VD);
-      AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
-      AC.getCFGBuildOptions().AddLifetime = true;
-      AC.getCFGBuildOptions().AddInitializers = true;
-      AC.getCFGBuildOptions().AddImplicitDtors = true;
-      AC.getCFGBuildOptions().AddTemporaryDtors = true;
-      // A default member initializer's body enters the CFG only when asked for, and this
-      // sweep is the ONLY entry point that reaches a namespace-scope initializer or a
-      // default argument -- so omitting these left `Agg g{};` at namespace scope with the
-      // initializer's code in no CFG anywhere, while the same aggregate as a local was
-      // covered by the per-function path, which does ask.
-      AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
-      AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
-      AC.getCFGBuildOptions().setAllAlwaysAdd();
+      setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
       if (AC.getCFG())
         runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
       else
@@ -4805,21 +4808,7 @@ void clang::sema::AnalysisBasedWarnings::
   }
 
   AnalysisDeclContext AC(/*AnalysisDeclContextManager=*/nullptr, D);
-  AC.getCFGBuildOptions().PruneTriviallyFalseEdges = true;
-  AC.getCFGBuildOptions().AddEHEdges = false;
-  AC.getCFGBuildOptions().AddInitializers = true;
-  AC.getCFGBuildOptions().AddImplicitDtors = true;
-  AC.getCFGBuildOptions().AddParameterLifetimes = true;
-  AC.getCFGBuildOptions().AddTemporaryDtors = true;
-  AC.getCFGBuildOptions().AddCXXNewAllocator = false;
-  AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
-  // ...and through AGGREGATE initialization, where there is no constructor to carry
-  // the initializer: the CXXDefaultInitExpr sits inline in the enclosing function and
-  // its subexpression is in no CFG unless this is asked for, so nothing inside it was
-  // ever handed to the analysis.
-  AC.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates = true;
-  AC.getCFGBuildOptions().setAllAlwaysAdd();
-  AC.getCFGBuildOptions().AddLifetime = true;
+  setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
 
   lifetimes::LifetimeSafetySemaHelperImpl SemaHelper(S);
   if (AC.getCFG())
@@ -4901,8 +4890,10 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
       .setAlwaysAdd(Stmt::ImplicitCastExprClass)
       .setAlwaysAdd(Stmt::UnaryOperatorClass);
   }
+  // Everything else the lifetime analysis needs is shared with the other
+  // analyses above, but go through the one definition so the two cannot drift.
   if (EnableLifetimeSafetyAnalysis)
-    AC.getCFGBuildOptions().AddLifetime = true;
+    setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
 
   // Install the logical handler.
   std::optional<LogicalErrorHandler> LEH;

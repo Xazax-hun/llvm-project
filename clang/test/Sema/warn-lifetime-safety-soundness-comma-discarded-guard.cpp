@@ -1,4 +1,8 @@
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-soundness -Wno-unused-value -verify %s
+// TU-analysis mode must see the same CFG: it used to build one without the
+// implicit and temporary destructor elements, losing every finding below that is
+// modelled through a destructor.
+// RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety-soundness -Wno-unused-value -fexperimental-lifetime-safety-tu-analysis -verify %s
 
 #include "Inputs/lifetime-analysis.h"
 
