@@ -236,6 +236,12 @@ public:
   unsigned getNumOrigins() const { return NextOriginID.Value; }
 
   bool hasOrigins(QualType QT) const;
+
+  /// The fields of \p RD and of its bases, base fields first; memoized.
+  llvm::ArrayRef<const FieldDecl *>
+  fieldsIncludingBases(const CXXRecordDecl *RD) const {
+    return TUCache ? TUCache->fieldsIncludingBases(RD) : LocalFields.get(RD);
+  }
   bool hasOrigins(const Expr *E) const;
 
   /// The indirection depth of \p QT -- the metric used by the
@@ -343,6 +349,8 @@ private:
   /// is empty, when hasOrigins is a property of the type alone.
   LifetimeSafetyTUCache *TUCache = nullptr;
   bool computeHasOrigins(QualType QT) const;
+  /// Per-function fallback for fieldsIncludingBases when there is no TUCache.
+  mutable FieldListCache LocalFields;
   /// Fields accessed in the function body (or constructor init lists).
   /// Fields outside this set are excluded from origin tracking.
   llvm::SmallPtrSet<const FieldDecl *, 8> AccessedFields;

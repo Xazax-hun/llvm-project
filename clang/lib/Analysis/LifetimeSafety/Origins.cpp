@@ -181,9 +181,7 @@ bool OriginManager::computeHasOrigins(QualType QT) const {
   // from a base looked as though it had no origins at all -- and a store into
   // that member, and the dangling read after it, went unreported while the same
   // member declared directly in the derived class was caught.
-  llvm::SmallVector<const FieldDecl *, 8> Fields;
-  collectFieldsIncludingBases(RD, Fields);
-  for (const auto *FD : Fields)
+  for (const auto *FD : fieldsIncludingBases(RD))
     if ((FD->getAccess() == AS_public || TrackNonPublic) &&
         hasOrigins(FD->getType()))
       return true;
@@ -192,9 +190,13 @@ bool OriginManager::computeHasOrigins(QualType QT) const {
 
 bool OriginManager::isTrackedField(const CXXRecordDecl *RD,
                                    const FieldDecl *FD) const {
+  // Asked first: a lookup in a small set, and false for most fields of a
+  // large class.
+  if (!isAccessedField(FD))
+    return false;
   bool Accessible = FD->getAccess() == AS_public ||
                     (isGslOwnerType(RD) && !isLibraryOwned(RD));
-  return Accessible && hasOrigins(FD->getType()) && isAccessedField(FD);
+  return Accessible && hasOrigins(FD->getType());
 }
 
 /// Determines if an expression has origins that need to be tracked.
@@ -399,9 +401,7 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
       // the record being expanded, not the one that declares the field, so an
       // inherited non-public member of a TU-local owner is tracked exactly as a
       // directly declared one is.
-      llvm::SmallVector<const FieldDecl *, 8> AllFields;
-      collectFieldsIncludingBases(RD, AllFields);
-      for (const FieldDecl *F : AllFields)
+      for (const FieldDecl *F : fieldsIncludingBases(RD))
         if (isTrackedField(RD, F)) {
           OriginNode *Sub = buildNodeForTypeImpl(F->getType(), Node, Visited);
           FieldChildren.push_back({F, Sub});

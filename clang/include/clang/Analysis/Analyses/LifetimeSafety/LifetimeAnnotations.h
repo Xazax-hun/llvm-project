@@ -14,6 +14,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace clang ::lifetimes {
 
@@ -246,10 +247,32 @@ bool recordAliasesMutableOwner(const CXXRecordDecl *RD);
 /// AnalysisBasedWarnings), so the Type and Decl keys stay valid for as long as
 /// the cache does. Never make this static: several translation units can share
 /// a process, and their declarations' addresses get reused.
+/// collectFieldsIncludingBases, memoized per record.
+///
+/// `RD->fields()` walks every declaration of the class, member functions
+/// included, and the analysis asks for a class's fields each time it builds an
+/// origin tree for it. A record's fields are fixed once it is defined, so the
+/// list is kept; an incomplete record has none. The lists live on the heap, so
+/// an ArrayRef stays valid while further records are added.
+class FieldListCache {
+public:
+  llvm::ArrayRef<const FieldDecl *> get(const CXXRecordDecl *RD);
+
+private:
+  llvm::DenseMap<const CXXRecordDecl *,
+                 std::unique_ptr<llvm::SmallVector<const FieldDecl *, 0>>>
+      Lists;
+};
+
 class LifetimeSafetyTUCache {
 public:
   /// recordContainsMutableOwner, memoized.
   bool recordContainsMutableOwner(const CXXRecordDecl *RD);
+
+  /// collectFieldsIncludingBases, memoized; see FieldListCache.
+  llvm::ArrayRef<const FieldDecl *> fieldsIncludingBases(const CXXRecordDecl *RD) {
+    return Fields.get(RD);
+  }
 
   /// OriginManager::hasOrigins, by canonical type, for a function that
   /// registered no lifetimebound-returned origin type: only then is the answer
@@ -257,7 +280,14 @@ public:
   llvm::DenseMap<const Type *, bool> PureHasOrigins;
 
 private:
-  llvm::DenseMap<const CXXRecordDecl *, bool> ContainsMutableOwner;
+  struct CachedOwnerAnswer {
+    bool Result;
+    /// For a negative answer, the records it could not see into because they
+    /// had no definition yet; it is stale once any of them has one.
+    llvm::SmallVector<const CXXRecordDecl *, 2> Incomplete;
+  };
+  llvm::DenseMap<const CXXRecordDecl *, CachedOwnerAnswer> ContainsMutableOwner;
+  FieldListCache Fields;
 };
 
 /// recordContainsMutableOwner through \p Cache when there is one.

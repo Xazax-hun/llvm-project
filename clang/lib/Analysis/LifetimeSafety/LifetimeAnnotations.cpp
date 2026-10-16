@@ -855,10 +855,10 @@ namespace {
 struct OwnerWalkVisited {
   llvm::SmallPtrSet<const CXXRecordDecl *, 8> Contains;
   llvm::SmallPtrSet<const CXXRecordDecl *, 8> Aliases;
-  /// Set when the walk met a record with no definition yet. Its "no owner"
-  /// answer is provisional: the record may be completed later in the
-  /// translation unit, so a negative result must not be cached.
-  bool SawIncomplete = false;
+  /// The records with no definition yet that the walk met. A "no owner" answer
+  /// is provisional on them: one may be completed later in the translation
+  /// unit.
+  llvm::SmallVector<const CXXRecordDecl *, 2> Incomplete;
   bool markSeen(const CXXRecordDecl *RD, bool AliasOnly) {
     auto &S = AliasOnly ? Aliases : Contains;
     return S.insert(RD->getCanonicalDecl()).second;
@@ -878,7 +878,7 @@ static bool reachesMutableOwner(const CXXRecordDecl *RD, OwnerWalkVisited &V,
   if (!RD)
     return false;
   if (!RD->hasDefinition()) {
-    V.SawIncomplete = true;
+    V.Incomplete.push_back(RD);
     return false;
   }
   if (!V.markSeen(RD, AliasOnly))
@@ -928,15 +928,21 @@ bool recordContainsMutableOwner(const CXXRecordDecl *RD) {
 }
 
 bool LifetimeSafetyTUCache::recordContainsMutableOwner(const CXXRecordDecl *RD) {
-  if (auto It = ContainsMutableOwner.find(RD); It != ContainsMutableOwner.end())
-    return It->second;
+  // A "yes" stays true however the translation unit continues -- completing a
+  // type only adds what can be reached. A "no" holds only while every record it
+  // could not see into is still incomplete, which is cheap to re-check and
+  // common: code is full of pointers to classes declared and never defined.
+  if (auto It = ContainsMutableOwner.find(RD); It != ContainsMutableOwner.end()) {
+    const CachedOwnerAnswer &A = It->second;
+    if (A.Result || llvm::none_of(A.Incomplete, [](const CXXRecordDecl *D) {
+          return D->hasDefinition();
+        }))
+      return A.Result;
+  }
   OwnerWalkVisited V;
   bool Result = reachesMutableOwner(RD, V, /*AliasOnly=*/false);
-  // A "yes" stays true however the translation unit continues -- completing a
-  // type only adds what can be reached. A "no" that met an incomplete record
-  // may not, so it is recomputed next time.
-  if (Result || !V.SawIncomplete)
-    ContainsMutableOwner[RD] = Result;
+  ContainsMutableOwner[RD] = {Result, Result ? decltype(V.Incomplete)()
+                                             : std::move(V.Incomplete)};
   return Result;
 }
 
@@ -966,6 +972,18 @@ void collectFieldsIncludingBases(const CXXRecordDecl *RD,
                                  llvm::SmallVectorImpl<const FieldDecl *> &Out) {
   llvm::SmallPtrSet<const CXXRecordDecl *, 4> Seen;
   collectFieldsIncludingBasesImpl(RD, Seen, Out);
+}
+
+llvm::ArrayRef<const FieldDecl *>
+FieldListCache::get(const CXXRecordDecl *RD) {
+  if (!RD || !RD->hasDefinition())
+    return {};
+  auto &Slot = Lists[RD];
+  if (!Slot) {
+    Slot = std::make_unique<llvm::SmallVector<const FieldDecl *, 0>>();
+    collectFieldsIncludingBases(RD, *Slot);
+  }
+  return *Slot;
 }
 
 void forEachMemberFunction(
