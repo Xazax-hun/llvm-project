@@ -3219,6 +3219,18 @@ public:
               // Without this the invalidation is detected and then emits nothing.
               SemaHelper->reportUseAfterInvalidation(
                   MD, UF->getImplicitLoc(), Warning.InvalidatedByExpr);
+            else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
+              // Any other loan with no anchor of its own -- typically the seed
+              // of a pointer/view member of `this` (InvalidatedField), read by a
+              // destructor at scope end -- is a borrow held by this object.
+              SemaHelper->reportUseAfterInvalidation(
+                  MD, UF->getImplicitLoc(), Warning.InvalidatedByExpr);
+            else
+              // Never drop a detected invalidation: with nothing better, anchor
+              // at the operation itself.
+              SemaHelper->reportUseAfterInvalidation(Warning.InvalidatedByExpr,
+                                                     UF->getImplicitLoc(),
+                                                     Warning.InvalidatedByExpr);
           } else
             SemaHelper->reportUseAfterScope(IssueExpr, UF->getImplicitLoc(),
                                             MovedExpr, ExpiryLoc);

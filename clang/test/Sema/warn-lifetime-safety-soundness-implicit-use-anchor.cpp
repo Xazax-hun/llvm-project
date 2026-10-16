@@ -40,6 +40,26 @@ struct [[gsl::Owner]] Doc {
   }
 };
 
+// The same gap for a borrow taken through a POINTER MEMBER of `this`: its loan
+// is the member's seed, which has neither an issuing expression, a parameter,
+// nor the `$this` placeholder, so the implicit-use branch again emitted nothing.
+// The parameter spelling of the same code was reported.
+struct [[gsl::Pointer]] Guard {
+  explicit Guard(string_view v [[clang::lifetimebound]]) : v_(v) {}
+  ~Guard(); // out-of-line: reads v_
+private:
+  string_view v_;
+};
+
+struct [[gsl::Pointer]] HoldsPointerMember {
+  string *s;
+  // expected-warning@+1 {{borrow held by this object is later invalidated}}
+  void implicit_use_through_member() {
+    Guard g(*s);
+    s->push_back('x'); // expected-note {{invalidated here}}
+  }                    // expected-note {{later used here}}
+};
+
 //===----------------------------------------------------------------------===//
 // Negatives.
 //===----------------------------------------------------------------------===//
