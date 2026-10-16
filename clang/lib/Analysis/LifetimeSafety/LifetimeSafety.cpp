@@ -136,7 +136,7 @@ void runLifetimeSafetyAnalysis(AnalysisDeclContext &AC,
 
   internal::LifetimeSafetyAnalysis Analysis(AC, SemaHelper, LSOpts);
   Analysis.run();
-  if (CollectStats)
+  if (CollectStats && Analysis.hasRun())
     collectLifetimeStats(AC, Analysis.getFactManager().getOriginMgr(), Stats);
 }
 } // namespace clang::lifetimes

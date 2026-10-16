@@ -1,5 +1,7 @@
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety -lifetime-safety-max-cfg-blocks=3 -Wno-dangling -verify=bailout %s
 // RUN: %clang_cc1 -fsyntax-only -Wlifetime-safety -Wno-dangling -verify=bailout -verify=nobailout %s
+// Collecting stats for a function the analysis skipped must not crash.
+// RUN: %clang_cc1 -fsyntax-only -print-stats -Wlifetime-safety -lifetime-safety-max-cfg-blocks=3 -Wno-dangling -verify=bailout %s 2>/dev/null
 
 struct MyObj {
   int id;

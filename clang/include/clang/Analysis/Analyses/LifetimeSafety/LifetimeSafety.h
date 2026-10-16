@@ -520,6 +520,10 @@ public:
 
   void run();
 
+  /// False when run() bailed out (e.g. the CFG was too large) and built no
+  /// facts; the accessors below must not be used then.
+  bool hasRun() const { return FactMgr != nullptr; }
+
   /// \note These are provided only for testing purposes.
   LoanPropagationAnalysis &getLoanPropagation() const {
     return *LoanPropagation;
