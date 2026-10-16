@@ -275,7 +275,7 @@ static bool paramMayMutateOwner(QualType PT) {
 ///     Args[I] maps to getParamDecl(I) 1:1 (including the object at I == 0).
 ///   - free function / static method: Args[I] maps to getParamDecl(I).
 /// `IsInstance` is the caller's "instance method with a leading object argument"
-/// flag (false for constructors).
+/// flag (false for constructors); see argsIncludeObject.
 static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
                                       unsigned I) {
   const auto *MD = dyn_cast<CXXMethodDecl>(FD);
@@ -285,6 +285,15 @@ static const ParmVarDecl *paramForArg(const FunctionDecl *FD, bool IsInstance,
     I -= 1;
   }
   return I < FD->getNumParams() ? FD->getParamDecl(I) : nullptr;
+}
+
+/// Whether the modeled argument list of a call to \p FD starts with the object
+/// argument: true for an instance method, including a C++23 explicit object
+/// member function, and false for a constructor, whose object is the one being
+/// built rather than an argument.
+static bool argsIncludeObject(const FunctionDecl *FD) {
+  const auto *MD = dyn_cast<CXXMethodDecl>(FD);
+  return MD && MD->isInstance() && !isa<CXXConstructorDecl>(MD);
 }
 
 /// Recognizes a call into the setjmp/longjmp family, whose non-local control
@@ -3167,10 +3176,9 @@ void FactsGenerator::handleGSLPointerConstruction(const CXXConstructExpr *CCE) {
 
 void FactsGenerator::handleMovedArgsInCall(const FunctionDecl *FD,
                                            ArrayRef<const Expr *> Args) {
-  unsigned IsInstance = 0;
-  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD);
-      MD && MD->isInstance() && !isa<CXXConstructorDecl>(FD)) {
-    IsInstance = 1;
+  bool IsInstance = argsIncludeObject(FD);
+  if (IsInstance) {
+    const auto *MD = cast<CXXMethodDecl>(FD);
     // std::unique_ptr::release() transfers ownership.
     // Treat it as a move to prevent false-positive warnings when the unique_ptr
     // destructor runs after ownership has been transferred.
@@ -3183,11 +3191,12 @@ void FactsGenerator::handleMovedArgsInCall(const FunctionDecl *FD,
     }
   }
 
-  // Skip 'this' arg as it cannot be moved.
-  for (unsigned I = IsInstance;
-       I < Args.size() && I < FD->getNumParams() + IsInstance; ++I) {
-    const ParmVarDecl *PVD = FD->getParamDecl(I - IsInstance);
-    if (!Args[I] || !PVD->getType()->isRValueReferenceType())
+  // An implicit `this` has no parameter and cannot be moved, so paramForArg
+  // skips it; a C++23 explicit object parameter `this Self &&self` is an
+  // ordinary rvalue-reference parameter and can.
+  for (unsigned I = 0; I < Args.size(); ++I) {
+    const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
+    if (!Args[I] || !PVD || !PVD->getType()->isRValueReferenceType())
       continue;
     const Expr *Arg = Args[I];
     OriginNode *MovedOrigins = getOriginNode(*Arg);
@@ -3254,8 +3263,7 @@ void FactsGenerator::handleInvalidatingCall(const Expr *Call,
 void FactsGenerator::handleAssumedInvalidatingCall(
     const Expr *Call, const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  bool IsInstance =
-      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  bool IsInstance = argsIncludeObject(FD);
 
   // The origin of the call's own result, if it has one. A borrow the call returns
   // is taken after whatever the call does, so this same call cannot have
@@ -3485,8 +3493,7 @@ void FactsGenerator::handleArgumentOverlap(const Expr *Call,
                                            const FunctionDecl *FD,
                                            ArrayRef<const Expr *> Args) {
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  bool IsInstance =
-      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  bool IsInstance = argsIncludeObject(FD);
 
   // Whether the call may mutate the storage argument `I` refers to in a way
   // that reallocates/invalidates borrows into it -- i.e. it is (or contains) an
@@ -3662,9 +3669,7 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
   // FIXME: Add support for capture_by on constructors.
   if (isa<CXXConstructorDecl>(FD))
     return;
-  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  bool IsInstance =
-      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  bool IsInstance = argsIncludeObject(FD);
   auto getArgCaptureBy = [FD, IsInstance](unsigned I) -> LifetimeCaptureByAttr * {
     // FIXME: Add support for capture_by on the implicit object (I == 0).
     const ParmVarDecl *PVD = paramForArg(FD, IsInstance, I);
@@ -3821,9 +3826,7 @@ static bool isComparisonOperator(const FunctionDecl *FD) {
 ///    reported in the callee, against its own annotations.
 void FactsGenerator::handleDefaultArgTemporaries(
     const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
-  const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  bool IsInstance =
-      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  bool IsInstance = argsIncludeObject(FD);
   for (unsigned I = 0; I < Args.size(); ++I) {
     const auto *DAE = dyn_cast_or_null<CXXDefaultArgExpr>(Args[I]);
     if (!DAE)
@@ -3843,8 +3846,7 @@ void FactsGenerator::handleDefaultArgTemporaries(
 void FactsGenerator::handleUnannotatedIndirectionArgs(
     const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-  bool IsInstance =
-      Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD);
+  bool IsInstance = argsIncludeObject(FD);
   // Comparison/relational operators do not capture their operands.
   if (isComparisonOperator(FD))
     return;
@@ -4036,14 +4038,12 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // callee's own class" would also exempt a user-written `assign(const Str &)`,
   // whose body can hold the very borrow this is meant to catch.
   bool CalleeCopies = false;
-  bool ArgsIncludeObject = false;
-  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD)) {
+  bool ArgsIncludeObject = argsIncludeObject(FD);
+  if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
     CalleeCopies = Ctor->isCopyOrMoveConstructor();
-  } else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
+  else if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
     CalleeCopies =
         MD->isCopyAssignmentOperator() || MD->isMoveAssignmentOperator();
-    ArgsIncludeObject = MD->isInstance();
-  }
   for (unsigned I = 0, E = Args.size(); I != E; ++I) {
     const ParmVarDecl *PVD =
         CalleeCopies ? nullptr : paramForArg(FD, ArgsIncludeObject, I);
@@ -4144,35 +4144,22 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
     return;
   }
   auto IsArgLifetimeBound = [FD, &Args](unsigned I) -> bool {
-    const ParmVarDecl *PVD = nullptr;
-    if (const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-        Method && Method->isInstance() && !isa<CXXConstructorDecl>(FD)) {
-      if (Method->isExplicitObjectMemberFunction()) {
-        // C++23 deducing-this: the explicit object parameter `self` is
-        // getParamDecl(0), and the argument list (object first, then the
-        // explicit arguments) maps 1:1 to the parameters. So Args[I]'s
-        // lifetimebound-ness -- including the object argument at I == 0 -- comes
-        // from getParamDecl(I), not the method itself.
-        if (I < Method->getNumParams())
-          PVD = Method->getParamDecl(I);
-      } else if (I == 0) {
-        // For the implicit 'this' argument, the attribute is on the method.
+    bool IncludesObject = argsIncludeObject(FD);
+    if (IncludesObject) {
+      // The implicit `this` has no parameter: its attribute is on the method.
+      // A C++23 explicit object parameter `self` is an ordinary parameter, and
+      // paramForArg maps it like the rest.
+      const auto *Method = cast<CXXMethodDecl>(FD);
+      if (I == 0 && !Method->isExplicitObjectMemberFunction())
         return implicitObjectParamIsLifetimeBound(Method) ||
                shouldTrackImplicitObjectArg(
                    *Args[0], Method, /*RunningUnderLifetimeSafety=*/true);
-      } else if ((I - 1) < Method->getNumParams()) {
-        // For explicit arguments, find the corresponding parameter declaration.
-        PVD = Method->getParamDecl(I - 1);
-      }
-    } else if (I == 0 && shouldTrackFirstArgument(FD)) {
+    } else if ((I == 0 && shouldTrackFirstArgument(FD)) ||
+               (I == 1 && shouldTrackSecondArgument(FD))) {
       return true;
-    } else if (I == 1 && shouldTrackSecondArgument(FD)) {
-      return true;
-    } else if (I < FD->getNumParams()) {
-      // For free functions or static methods.
-      PVD = FD->getParamDecl(I);
     }
-    return PVD ? PVD->hasAttr<clang::LifetimeBoundAttr>() : false;
+    const ParmVarDecl *PVD = paramForArg(FD, IncludesObject, I);
+    return PVD && PVD->hasAttr<clang::LifetimeBoundAttr>();
   };
   // '[[clang::lifetimebound(pointee)]]' on the implicit object: the result refers
   // to what the object refers TO rather than to the object. Saying it explicitly
@@ -4184,15 +4171,16 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // ordinary parameter, C++23 explicit object parameters included, so there is
   // nothing to ask about argument positions other than 0.
   auto isPointeeBoundImplicitObject = [FD](unsigned I) -> bool {
-    const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-    return I == 0 && Method && Method->isInstance() &&
-           !Method->isExplicitObjectMemberFunction() &&
+    if (I != 0 || !argsIncludeObject(FD))
+      return false;
+    const auto *Method = cast<CXXMethodDecl>(FD);
+    return !Method->isExplicitObjectMemberFunction() &&
            implicitObjectParamIsPointeeBound(Method);
   };
   auto shouldTrackPointerImplicitObjectArg = [FD, &Args](unsigned I) -> bool {
-    const auto *Method = dyn_cast<CXXMethodDecl>(FD);
-    if (!Method || !Method->isInstance())
+    if (!argsIncludeObject(FD))
       return false;
+    const auto *Method = cast<CXXMethodDecl>(FD);
     // Not for a C++23 explicit object parameter. There, argument 0 is a real
     // parameter -- `getParamDecl(0)`, as IsArgLifetimeBound above already
     // accounts for -- and it can be taken BY VALUE, in which case the argument is
