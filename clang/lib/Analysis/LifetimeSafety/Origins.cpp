@@ -115,25 +115,25 @@ bool OriginManager::hasOrigins(QualType QT) const {
   // A record answers by walking every field of every base, recursively, and the
   // same types are asked about over and over -- once per expression of that
   // type. Memoized per canonical type; see HasOriginsCache.
+  //
+  // Shared across functions when this one registered no lifetimebound-returned
+  // origin type -- then the answer depends on the type alone -- and kept for
+  // this function otherwise. Exactly one of the two is used, so a hit costs
+  // one lookup. A miss costs two: the recursion inserts into the same map and
+  // may rehash it, so the slot is looked up again to store the result.
   const Type *Key = QT.getCanonicalType().getTypePtr();
-  if (auto It = HasOriginsCache.find(Key); It != HasOriginsCache.end())
+  bool Shared = TUCache && LifetimeAnnotatedOriginTypes.empty();
+  auto &Memo = Shared ? TUCache->PureHasOrigins : HasOriginsCache;
+  if (auto It = Memo.find(Key); It != Memo.end())
     return It->second;
-  // Across functions too, when this one registered no lifetimebound-returned
-  // origin type: then the answer depends on the type alone.
-  LifetimeSafetyTUCache *Shared =
-      LifetimeAnnotatedOriginTypes.empty() ? TUCache : nullptr;
-  if (Shared)
-    if (auto It = Shared->PureHasOrigins.find(Key);
-        It != Shared->PureHasOrigins.end())
-      return HasOriginsCache[Key] = It->second;
   bool Result = computeHasOrigins(QT);
-  HasOriginsCache[Key] = Result;
   // An incomplete record has no fields yet and so no origins; it may be
-  // completed later in the translation unit, so only a "yes" about it is kept.
-  // (A complete record's by-value members are complete, and a pointer answers
-  // "yes" without looking at its pointee, so nothing deeper can change.)
-  if (Shared && (Result || !QT->isIncompleteType()))
-    Shared->PureHasOrigins[Key] = Result;
+  // completed later in the translation unit, so a "no" about it is not kept
+  // across functions. (A complete record's by-value members are complete, and
+  // a pointer answers "yes" without looking at its pointee, so nothing deeper
+  // can change.) Within one function nothing is completed.
+  if (!Shared || Result || !QT->isIncompleteType())
+    Memo[Key] = Result;
   return Result;
 }
 
@@ -418,10 +418,15 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
 OriginNode *OriginManager::getOrCreateNode(const ValueDecl *D) {
   if (!hasOrigins(D->getType()))
     return nullptr;
-  auto It = DeclToNode.find(D);
-  if (It != DeclToNode.end())
-    return It->second;
-  return DeclToNode[D] = buildNodeForType(D->getType(), D);
+  // One lookup: building the node does not touch DeclToNode, so the slot
+  // stays put.
+  auto [It, Inserted] = DeclToNode.try_emplace(D, nullptr);
+  if (Inserted) {
+    It->second = buildNodeForType(D->getType(), D);
+    if (It->second)
+      DeclAnchoredNodes.insert(It->second);
+  }
+  return It->second;
 }
 
 bool OriginManager::isStableStorageOrigin(const OriginNode *N) const {
@@ -432,9 +437,9 @@ bool OriginManager::isStableStorageOrigin(const OriginNode *N) const {
   // decl-origin (storage-having decls/fields: `&v` borrows v's slot). Check
   // both N and its pointee against the declaration and `this` anchors.
   const OriginNode *Pointee = N->getPointeeChild();
-  for (const auto &KV : DeclToNode)
-    if (KV.second == N || (Pointee && KV.second == Pointee))
-      return true;
+  if (DeclAnchoredNodes.contains(N) ||
+      (Pointee && DeclAnchoredNodes.contains(Pointee)))
+    return true;
   if (ThisOrigins && (*ThisOrigins == N || *ThisOrigins == Pointee))
     return true;
   return false;

@@ -754,11 +754,10 @@ bool isUnknownOwnershipType(QualType QT,
   if (RD->isLambda())
     return false;
 
-  const Type *Key = QT.getCanonicalType().getTypePtr();
-  if (auto It = Cache.find(Key); It != Cache.end())
-    return It->second;
   // Tentatively cache `false` to break any cyclic recursion.
-  Cache[Key] = false;
+  const Type *Key = QT.getCanonicalType().getTypePtr();
+  if (auto [It, Inserted] = Cache.try_emplace(Key, false); !Inserted)
+    return It->second;
 
   // An incomplete type cannot be inspected, so its ownership is conservatively
   // unknown.
@@ -785,6 +784,7 @@ bool isUnknownOwnershipType(QualType QT,
         return true;
       });
   }
+  // Looked up again: the recursion above inserts into Cache and may rehash it.
   Cache[Key] = Result;
   return Result;
 }
@@ -934,18 +934,22 @@ bool LifetimeSafetyTUCache::reachesOwner(const CXXRecordDecl *RD,
   // type only adds what can be reached. A "no" holds only while every record it
   // could not see into is still incomplete, which is cheap to re-check and
   // common: code is full of pointers to classes declared and never defined.
-  if (auto It = Answers.find(RD); It != Answers.end()) {
-    const CachedOwnerAnswer &A = It->second;
-    if (A.Result || llvm::none_of(A.Incomplete, [](const CXXRecordDecl *D) {
-          return D->hasDefinition();
-        }))
-      return A.Result;
-  }
+  //
+  // One lookup: the walk below does not consult the cache, so the slot stays
+  // put while it runs.
+  auto [It, Inserted] = Answers.try_emplace(RD);
+  CachedOwnerAnswer &A = It->second;
+  if (!Inserted && (A.Result || llvm::none_of(A.Incomplete,
+                                              [](const CXXRecordDecl *D) {
+                                                return D->hasDefinition();
+                                              })))
+    return A.Result;
   OwnerWalkVisited V;
-  bool Result = reachesMutableOwner(RD, V, AliasOnly);
-  Answers[RD] = {Result, Result ? decltype(V.Incomplete)()
-                                             : std::move(V.Incomplete)};
-  return Result;
+  A.Result = reachesMutableOwner(RD, V, AliasOnly);
+  A.Incomplete.clear();
+  if (!A.Result)
+    A.Incomplete = std::move(V.Incomplete);
+  return A.Result;
 }
 
 bool recordContainsMutableOwner(const CXXRecordDecl *RD,

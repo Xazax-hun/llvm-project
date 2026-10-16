@@ -486,10 +486,25 @@ private:
   ParentMap &PM;
   const Decl *FD;
   AnalysisDeclContext &ADC;
-  /// Block and index within it, for the facts whose relative order the pragma
-  /// suppression decision needs (expiries, invalidations and uses).
+  /// Block and index within it of every fact, and every use that can name a
+  /// loan, for the pragma-suppression decision. Built on first demand: only a
+  /// report whose named use the reader silenced needs them.
   llvm::DenseMap<const Fact *, std::pair<const CFGBlock *, unsigned>>
       FactPosition;
+  llvm::SmallVector<const UseFact *, 0> AllUses;
+  void indexFacts() {
+    if (!FactPosition.empty())
+      return;
+    for (const CFGBlock *B : *ADC.getAnalysis<PostOrderCFGView>()) {
+      unsigned Index = 0;
+      for (const Fact *F : FactMgr.getFacts(B)) {
+        FactPosition.try_emplace(F, B, Index++);
+        if (const auto *UF = F->getAs<UseFact>();
+            UF && !UF->isWritten() && UF->getUsedOrigins())
+          AllUses.push_back(UF);
+      }
+    }
+  }
 
 public:
   LifetimeChecker(const LoanPropagationAnalysis &LoanPropagation,
@@ -502,11 +517,7 @@ public:
         AST(ADC.getASTContext()), PM(ADC.getParentMap()), FD(ADC.getDecl()),
         ADC(ADC) {
     for (const CFGBlock *B : *ADC.getAnalysis<PostOrderCFGView>()) {
-      unsigned Index = 0;
       for (const Fact *F : FactMgr.getFacts(B)) {
-        if (isa<ExpireFact, InvalidateOriginFact, UseFact>(F))
-          FactPosition[F] = {B, Index};
-        ++Index;
         if (const auto *EF = F->getAs<ExpireFact>())
           checkExpiry(EF);
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
@@ -537,7 +548,6 @@ public:
           checkConstSubversionEscape(OEF);
         }
         else if (const auto *UF = F->getAs<UseFact>()) {
-          recordUseOfLoans(UF);
           checkLostLoan(UF);
           checkBorrowFromMutableGlobal(UF);
           checkAssignmentDereferencesOwnBorrow(UF);
@@ -1228,7 +1238,9 @@ public:
 
       for (LoanID LiveLoanID : Invalidated) {
         bool CurDomination = causingFactDominatesExpiry(LiveInfo.Kind);
-        const PendingWarning &Last = FinalWarningsMap.lookup(LiveLoanID);
+        // One lookup: an absent entry is default-constructed in place, which
+        // is not dominating and so is always overwritten below.
+        PendingWarning &Last = FinalWarningsMap[LiveLoanID];
         bool LastDomination = Last.CausingFactDominatesExpiry;
         // FinalWarningsMap is keyed by loan, so one entry per loan survives.
         // Prefer a *reportable* one: a loan with no anchor of its own can only be
@@ -1240,7 +1252,7 @@ public:
         bool TakeOver = !warningIsReportable(LiveLoanID, Last.CausingFact) &&
                         warningIsReportable(LiveLoanID, LiveInfo.CausingFact);
         if (!LastDomination || TakeOver) {
-          FinalWarningsMap[LiveLoanID] = {
+          Last = {
               /*ExpiryLoc=*/{},
               /*CausingFact=*/LiveInfo.CausingFact,
               /*MovedExpr=*/nullptr,
@@ -1913,14 +1925,9 @@ public:
   /// The Unknown loans -- borrows lost to an unmodeled construct -- in ascending
   /// LoanID order. Computed once the dataflow has created every loan.
   llvm::ArrayRef<LoanID> unknownLoans() {
-    if (!UnknownLoans) {
-      UnknownLoans.emplace();
-      for (const Loan *L : FactMgr.getLoanMgr().getLoans())
-        if (L->getAccessPath().isUnknown())
-          UnknownLoans->push_back(L->getID());
-      llvm::sort(*UnknownLoans);
-    }
-    return *UnknownLoans;
+    return loansWhere(UnknownLoans, [](const Loan *L) {
+      return L->getAccessPath().isUnknown();
+    });
   }
   std::optional<llvm::SmallVector<LoanID, 4>> UnknownLoans;
 
@@ -2058,29 +2065,41 @@ public:
   /// leaving those in would make the list as long as the function again.
   /// Computed once the dataflow has created every loan.
   llvm::ArrayRef<LoanID> globalRootedLoans() {
-    if (!GlobalRootedLoans) {
-      GlobalRootedLoans.emplace();
-      llvm::DenseMap<const VarDecl *, bool> HasOwner;
-      for (const Loan *L : FactMgr.getLoanMgr().getLoans()) {
-        const auto *VD =
-            dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
-        if (!VD || !VD->hasGlobalStorage())
-          continue;
-        auto [It, New] = HasOwner.try_emplace(VD, false);
-        if (New) {
-          QualType GlobalTy = AST.getBaseElementType(VD->getType());
-          const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
-          It->second = isGslOwnerType(GlobalTy) ||
-                       (RD && recordContainsMutableOwner(RD, FactMgr.getTUCache()));
-        }
-        if (It->second)
-          GlobalRootedLoans->push_back(L->getID());
+    llvm::DenseMap<const VarDecl *, bool> HasOwner;
+    return loansWhere(GlobalRootedLoans, [&](const Loan *L) {
+      const auto *VD =
+          dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
+      if (!VD || !VD->hasGlobalStorage())
+        return false;
+      auto [It, New] = HasOwner.try_emplace(VD, false);
+      if (New) {
+        QualType GlobalTy = AST.getBaseElementType(VD->getType());
+        const CXXRecordDecl *RD = GlobalTy->getAsCXXRecordDecl();
+        It->second =
+            isGslOwnerType(GlobalTy) ||
+            (RD && recordContainsMutableOwner(RD, FactMgr.getTUCache()));
       }
-      llvm::sort(*GlobalRootedLoans);
-    }
-    return *GlobalRootedLoans;
+      return It->second;
+    });
   }
   std::optional<llvm::SmallVector<LoanID, 4>> GlobalRootedLoans;
+
+  /// The loans satisfying \p Pred, in ascending LoanID order, computed into
+  /// \p List on first use -- after the dataflow, which has created every loan.
+  /// A per-use check then tests a few loans for membership instead of walking
+  /// a loan set that can hold thousands.
+  llvm::ArrayRef<LoanID>
+  loansWhere(std::optional<llvm::SmallVector<LoanID, 4>> &List,
+             llvm::function_ref<bool(const Loan *)> Pred) {
+    if (!List) {
+      List.emplace();
+      for (const Loan *L : FactMgr.getLoanMgr().getLoans())
+        if (Pred(L))
+          List->push_back(L->getID());
+      llvm::sort(*List);
+    }
+    return *List;
+  }
 
   void flagBorrowFromMutableGlobal(
       OriginID OID, ProgramPoint PP, SourceLocation Loc, SourceRange Range,
@@ -2870,9 +2889,13 @@ public:
       auto IsPrecise = [&](LoanID L) {
         return hasOwnAnchor(FactMgr.getLoanMgr().getLoan(L));
       };
+      // Claim the (storage, operation) slot up front -- one lookup either way.
+      decltype(ReportedArgOverlap)::iterator Slot;
       if (Storage) {
-        auto It = ReportedArgOverlap.find({Storage, Op});
-        if (It != ReportedArgOverlap.end()) {
+        auto [It, Inserted] = ReportedArgOverlap.try_emplace(
+            {Storage, Op}, PendingAssumedInval.size());
+        Slot = It;
+        if (!Inserted) {
           // The pair can disagree on anchor QUALITY while keying to the same
           // storage: `grow(v, this)` gives one fact only a widened `$this`
           // borrow, reportable at the method, and the other the precise
@@ -2887,11 +2910,10 @@ public:
         }
       }
       // Reuse the assumed-invalidation reporting (the operation is the call).
-      if (ReportedAssumedInval.insert({ReportLoan.Value, Op}).second) {
-        if (Storage)
-          ReportedArgOverlap[{Storage, Op}] = PendingAssumedInval.size();
+      if (ReportedAssumedInval.insert({ReportLoan.Value, Op}).second)
         PendingAssumedInval.push_back({ReportLoan, Op, /*FallbackUse=*/nullptr});
-      }
+      else if (Storage)
+        ReportedArgOverlap.erase(Slot); // Nothing was queued under it.
     }
   }
 
@@ -3066,14 +3088,6 @@ public:
   /// ignored` around ONE use hide the report for every other use. Collected here
   /// because the checker is the only place that sees all the uses AND runs late
   /// enough to ask about diagnostic state safely.
-  /// Every use that can name a loan, in the order the facts were walked.
-  llvm::SmallVector<const UseFact *, 0> AllUses;
-
-  void recordUseOfLoans(const UseFact *UF) {
-    if (SemaHelper && !UF->isWritten() && UF->getUsedOrigins())
-      AllUses.push_back(UF);
-  }
-
   /// True if `Later` can execute after `Earlier` on some path. Decided on the
   /// CFG, not on source order: in a loop a use written before the expiry runs
   /// after it on the next iteration, and macro-expansion locations do not
@@ -3108,6 +3122,7 @@ public:
   /// still block suppression rather than vanish from the decision.
   void suppressionCandidates(LoanID LID, const Fact *Boundary,
                              llvm::SmallVectorImpl<SourceLocation> &Out) {
+    indexFacts();
     for (const UseFact *UF : AllUses) {
       if (!LoanPropagation.getLoans(UF->getUsedOrigins()->getOriginID(), UF)
                .contains(LID))
@@ -3154,21 +3169,23 @@ public:
       // projection is typically a seeded loan with no anchor of its own). When
       // neither is use-caused the two reports are equivalent, so keep the base
       // and drop the projection, which is the pre-existing attribution.
-      auto CausedByUse = [&](LoanID Other) {
-        return FinalWarningsMap.lookup(Other)
-                   .CausingFact.template dyn_cast<const UseFact *>() != nullptr;
+      auto CausedByUse = [](const PendingWarning &W) {
+        return isa<const UseFact *>(W.CausingFact);
       };
-      bool ThisFromUse = CausedByUse(LID);
+      bool ThisFromUse = CausedByUse(Warning);
       if (std::optional<LoanID> Base = FactMgr.getLoanMgr().getBaseLoan(LID))
         if (!L->getAccessPath().getElements().empty() &&
-            L->getAccessPath().getElements().back().isInterior() &&
-            FinalWarningsMap.contains(*Base) &&
-            (CausedByUse(*Base) || !ThisFromUse))
-          continue;
+            L->getAccessPath().getElements().back().isInterior())
+          if (auto BaseIt = FinalWarningsMap.find(*Base);
+              BaseIt != FinalWarningsMap.end() &&
+              (CausedByUse(BaseIt->second) || !ThisFromUse))
+            continue;
       // The mirror case: this is the base and its projection reports from a use.
+      // InteriorProjectionOf only holds loans that are keys of FinalWarningsMap.
       if (!ThisFromUse) {
         auto It = InteriorProjectionOf.find(LID);
-        if (It != InteriorProjectionOf.end() && CausedByUse(It->second))
+        if (It != InteriorProjectionOf.end() &&
+            CausedByUse(FinalWarningsMap.find(It->second)->second))
           continue;
       }
       const Expr *IssueExpr = L->getIssuingExpr();

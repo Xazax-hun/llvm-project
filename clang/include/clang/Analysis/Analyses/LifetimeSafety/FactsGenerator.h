@@ -286,8 +286,9 @@ private:
   /// a callee through a reference or pointer parameter, so the callee keeps
   /// aliasing the designated object: the outer origin -- the one holding the borrow
   /// of the object itself -- is what it receives, and must not be peeled to the
-  /// r-value origin the way reading a variable's value is.
-  void handleUse(const Expr *E, bool BoundToReference = false);
+  /// r-value origin the way reading a variable's value is. Returns the fact
+  /// when this call created it, or null.
+  UseFact *handleUse(const Expr *E, bool BoundToReference = false);
 
   /// Soundness: flag a *use* of a global variable whose type is a "container of
   /// indirection" -- an owner/pointer whose elements or pointees are themselves

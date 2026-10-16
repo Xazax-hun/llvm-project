@@ -299,7 +299,7 @@ public:
 
 private:
   struct CachedOwnerAnswer {
-    bool Result;
+    bool Result = false;
     /// For a negative answer, the records it could not see into because they
     /// had no definition yet; it is stale once any of them has one.
     llvm::SmallVector<const CXXRecordDecl *, 2> Incomplete;

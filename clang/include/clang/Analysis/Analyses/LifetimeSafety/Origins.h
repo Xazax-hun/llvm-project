@@ -22,6 +22,7 @@
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeStats.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Utils.h"
 #include "clang/Analysis/AnalysisDeclContext.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -219,6 +220,13 @@ public:
   /// declaration is an instance method.
   std::optional<OriginNode *> getThisOrigins() const { return ThisOrigins; }
 
+  /// Returns the origin lists created for declarations (parameters and locals).
+  /// Used by soundness checks (e.g. detecting multi-level indirection).
+  const llvm::DenseMap<const clang::ValueDecl *, OriginNode *> &
+  getDeclOriginLists() const {
+    return DeclToNode;
+  }
+
   /// Whether \p N is an origin that later reads of the same storage re-resolve
   /// to -- i.e. it is anchored to a declaration (a local/param/field, tracked
   /// in DeclToNode) or to `this`, directly or as the pointee of the lvalue
@@ -267,12 +275,6 @@ public:
   /// Collects statistics about expressions that lack associated origins.
   void collectMissingOrigins(Stmt &FunctionBody, LifetimeSafetyStats &LSStats);
 
-  /// Returns the origin lists created for declarations (parameters and locals).
-  /// Used by soundness checks (e.g. detecting multi-level indirection).
-  const llvm::DenseMap<const clang::ValueDecl *, OriginNode *> &
-  getDeclOriginLists() const {
-    return DeclToNode;
-  }
 
   /// The origin holding what \p AP names, or null if the path does not resolve
   /// to one.
@@ -339,6 +341,8 @@ private:
   llvm::SmallVector<Origin> AllOrigins;
   llvm::BumpPtrAllocator Allocator;
   llvm::DenseMap<const clang::ValueDecl *, OriginNode *> DeclToNode;
+  /// The values of DeclToNode, for isStableStorageOrigin's membership test.
+  llvm::DenseSet<const OriginNode *> DeclAnchoredNodes;
   llvm::DenseMap<const clang::Expr *, OriginNode *> ExprToNode;
   std::optional<OriginNode *> ThisOrigins;
   /// Types that are not inherently pointer-like but require origin tracking

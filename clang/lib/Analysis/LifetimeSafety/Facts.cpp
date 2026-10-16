@@ -61,19 +61,24 @@ static void collectDynamicStoreDestinations(const FactManager &FactMgr,
   while (!Work.empty()) {
     OriginID Cur = Work.pop_back_val();
     // Any loan issued into a reachable origin may reach the store's lvalue.
-    for (LoanID LID : IssuedTo.lookup(Cur.Value)) {
-      const AccessPath &AP = FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
-      // Exactly the origin the routing would write, so the two stay in step:
-      // a destination the routing can reach but the prepass does not mark is
-      // one whose deposit is discarded at the next block boundary.
-      if (const OriginNode *Dest = OM.getOriginForAccessPath(AP))
-        Out.set(Dest->getOriginID().Value);
-    }
-    for (OriginID Pred : FlowsInto.lookup(Cur.Value))
-      if (!Seen.test(Pred.Value)) {
-        Seen.set(Pred.Value);
-        Work.push_back(Pred);
+    // Through find(), not lookup(): lookup() returns the vector by value, a
+    // copy at every visit. Neither map changes during the walk.
+    if (auto It = IssuedTo.find(Cur.Value); It != IssuedTo.end())
+      for (LoanID LID : It->second) {
+        const AccessPath &AP =
+            FactMgr.getLoanMgr().getLoan(LID)->getAccessPath();
+        // Exactly the origin the routing would write, so the two stay in
+        // step: a destination the routing can reach but the prepass does not
+        // mark is one whose deposit is discarded at the next block boundary.
+        if (const OriginNode *Dest = OM.getOriginForAccessPath(AP))
+          Out.set(Dest->getOriginID().Value);
       }
+    if (auto It = FlowsInto.find(Cur.Value); It != FlowsInto.end())
+      for (OriginID Pred : It->second)
+        if (!Seen.test(Pred.Value)) {
+          Seen.set(Pred.Value);
+          Work.push_back(Pred);
+        }
   }
 }
 

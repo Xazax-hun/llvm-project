@@ -958,13 +958,14 @@ void FactsGenerator::VisitMemberExpr(const MemberExpr *ME) {
     // E.g., for `(void)s.inner`, without narrowing, the UseFact at `s`
     // would keep `s.v`'s subtree live and falsely flag a UAF when a loan
     // held by `s.v` has already expired.
-    if (UseFact *UF = UseFacts.lookup(ME->getBase())) {
-      assert(!UseFacts.contains(ME) && "ME already has a UseFact");
+    if (auto It = UseFacts.find(ME->getBase()); It != UseFacts.end()) {
+      UseFact *UF = It->second;
       OriginNode *NewUsedOrigins =
           doesDeclHaveStorage(FD) ? Dst->getPointeeChild() : Dst;
       UF->setUsedOrigins(NewUsedOrigins);
-      UseFacts[ME] = UF;
-      UseFacts.erase(ME->getBase());
+      UseFacts.erase(It);
+      [[maybe_unused]] bool Inserted = UseFacts.try_emplace(ME, UF).second;
+      assert(Inserted && "ME already has a UseFact");
     }
   }
 
@@ -4321,11 +4322,8 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
 /// otherwise report a lost borrow that never existed. It also stopped a second,
 /// duplicate lost-loan appearing wherever the sentinel already fires.
 void FactsGenerator::markPointeeAccess(const Expr *E) {
-  bool IsNew = !UseFacts.contains(E);
-  handleUse(E);
-  if (IsNew)
-    if (UseFact *UF = UseFacts.lookup(E))
-      UF->markAsPointeeAccess();
+  if (UseFact *UF = handleUse(E))
+    UF->markAsPointeeAccess();
 }
 
 /// Classifies how the value read from \p E touches the pointer: see UseShape.
@@ -4436,10 +4434,10 @@ UseShape FactsGenerator::classifyUse(const Expr *E) const {
   return UseShape::AccessesPointee;
 }
 
-void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
+UseFact *FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
   OriginNode *Node = getOriginNode(*E);
   if (!Node)
-    return;
+    return nullptr;
   // For DeclRefExpr: Remove the outer layer of origin which borrows from the
   // decl directly (e.g., when this is not a reference). This is a use of the
   // underlying decl. A static data member reached as `obj.member` denotes that
@@ -4463,17 +4461,20 @@ void FactsGenerator::handleUse(const Expr *E, bool BoundToReference) {
     Node = getRValueOrigins(E, Node);
   // Skip if there is no inner origin (e.g., when it is not a pointer type).
   if (!Node)
-    return;
-  if (!UseFacts.contains(E)) {
-    UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
+    return nullptr;
+  auto [It, Inserted] = UseFacts.try_emplace(E, nullptr);
+  if (!Inserted) {
     if (BoundToReference)
-      UF->markAsReferenceBinding();
-    UF->setShape(classifyUse(E));
-    CurrentBlockFacts.push_back(UF);
-    UseFacts[E] = UF;
-  } else if (BoundToReference) {
-    UseFacts[E]->markAsReferenceBinding();
+      It->second->markAsReferenceBinding();
+    return nullptr;
   }
+  UseFact *UF = FactMgr.createFact<UseFact>(E, Node);
+  if (BoundToReference)
+    UF->markAsReferenceBinding();
+  UF->setShape(classifyUse(E));
+  CurrentBlockFacts.push_back(UF);
+  It->second = UF;
+  return UF;
 }
 
 // Creates an IssueFact for a new placeholder loan for each pointer or reference

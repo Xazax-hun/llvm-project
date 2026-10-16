@@ -112,9 +112,9 @@ Loan *LoanManager::getOrCreateProjectedLoan(LoanID BaseLoanID,
     Anchor = ProjectingExpr;
   Loan *NewLoan = createLoan(ExtendedPath, Anchor);
   BaseLoansMap[NewLoan->getID()] = BaseLoanID;
-  // try_emplace may have rehashed during createLoan; re-find rather than reuse
-  // the iterator.
-  LoanProjectionCache[Key] = NewLoan;
+  // createLoan only appends to AllLoans, so the slot found above is still
+  // valid.
+  It->second = NewLoan;
   return NewLoan;
 }
 
