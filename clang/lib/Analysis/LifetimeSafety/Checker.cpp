@@ -1674,6 +1674,14 @@ public:
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
+        // An Unknown path names no record, so the owner test below cannot
+        // vouch for it -- but it also cannot rule it out: the receiver's borrow
+        // was lost, and it may denote any owner. Keep it; IsInvalidated treats
+        // it as reaching everything.
+        if (AP.isUnknown()) {
+          MatchLoans.push_back(InvalidID);
+          continue;
+        }
         const CXXRecordDecl *RT = invalidatedObjectRecord(AP);
         if (!RT || !RecvRD)
           continue;
@@ -1714,6 +1722,13 @@ public:
       for (LoanID InvalidID : MatchLoans) {
         const AccessPath &AP =
             FactMgr.getLoanMgr().getLoan(InvalidID)->getAccessPath();
+        // As in checkInvalidation: an Unknown path says the receiver's borrow
+        // was lost, so which storage the mutation reaches is exactly what is
+        // not known. isPrefixOf compares kind and root, so without this an
+        // Unknown path matched nothing and `std::max(q, q)->grow()` invalidated
+        // no borrow at all, while `q->grow()` was reported.
+        if (AP.isUnknown())
+          return true;
         // A loan naming the mutated storage EXACTLY denotes the object, and an
         // object survives a mutation of its own contents -- the same rule the
         // precise invalidation check applies. Without it, any use of the receiver

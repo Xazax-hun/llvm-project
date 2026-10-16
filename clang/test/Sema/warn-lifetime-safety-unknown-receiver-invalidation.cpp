@@ -17,6 +17,14 @@
 std::vector<int> *const &sysmax(std::vector<int> *const &a [[clang::lifetimebound]],
                                 std::vector<int> *const &b [[clang::lifetimebound]]);
 
+struct W {
+  std::vector<int> v;
+  void grow();
+  const int *first() const [[clang::lifetimebound]];
+};
+W *const &sysmaxW(W *const &a [[clang::lifetimebound]],
+                  W *const &b [[clang::lifetimebound]]);
+
 //--- use.cpp
 #include "sysmax.h"
 
@@ -53,4 +61,14 @@ void unrelated_borrow_also_reported(std::vector<int> *q [[clang::noescape]],
 // an error, which is what keeps this narrow.
 void no_live_borrow(std::vector<int> *q [[clang::noescape]]) {
   sysmax(q, q)->push_back(99);
+}
+
+// The same lost receiver with an ASSUMED invalidation -- a non-const method
+// whose body the analysis does not see -- went silent: the assumed check had no
+// Unknown rule, so the receiver's only loan invalidated nothing while `q->grow()`
+// was reported.
+void assumed_through_lost_receiver(W *q [[clang::noescape]]) { // expected-warning {{parameter may be invalidated by an operation that lifetime safety analysis assumes mutates the owner}}
+  const int *p = q->first();
+  sysmaxW(q, q)->grow(); // expected-note {{assumed to be invalidated by this operation}}
+  sink = *p;
 }
