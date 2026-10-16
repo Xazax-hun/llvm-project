@@ -267,10 +267,6 @@ public:
   /// (e.g. one with `__attribute__((malloc))`); the root is the allocating
   /// expression.
   bool isHeapAllocation() const { return K == Kind::NewAllocation; }
-  const clang::Expr *getAsHeapAllocation() const {
-    return K == Kind::NewAllocation ? Root.dyn_cast<const clang::Expr *>()
-                                    : nullptr;
-  }
   const FunctionDecl *getAsImmortal() const {
     return K == Kind::Immortal
                ? cast<const FunctionDecl>(cast<const clang::Decl *>(Root))

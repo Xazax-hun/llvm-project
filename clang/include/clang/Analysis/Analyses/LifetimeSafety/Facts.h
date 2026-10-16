@@ -503,7 +503,14 @@ public:
       : Fact(Kind::InvalidateOrigin), OID(OID),
         InvalidationOp(InvalidationOp), Assumed(Assumed),
         Deallocation(Deallocation), MutatedField(MutatedField),
-        LoanGate(LoanGate), ResultOrigin(ResultOrigin) {}
+        LoanGate(LoanGate), ResultOrigin(ResultOrigin) {
+    // The checker relies on both: the assumed check never considers a
+    // deallocation, and only it consults the result origin.
+    assert(!(Assumed && Deallocation) &&
+           "a deallocation is a precise invalidation");
+    assert((!ResultOrigin || Assumed) &&
+           "only an assumed invalidation carries a result origin");
+  }
 
   OriginID getInvalidatedOrigin() const { return OID; }
   /// The invalidating operation as a statement (never null). Use this for the
@@ -621,21 +628,6 @@ enum class UntrackedConstructReason : uint8_t {
   /// indirection (e.g. std::span<int*>). The view hands out borrows one level
   /// deeper than it tracks; those inner pointees are not modeled.
   PointerOfIndirection,
-  /// A view (gsl::Pointer) constructed from a mutable global/static owner (e.g.
-  /// 'std::string_view sv = some_global_string;'). The global can be mutated
-  /// from anywhere -- including other functions or translation units the
-  /// intra-procedural analysis cannot see -- invalidating the view, so the
-  /// borrow cannot be tracked.
-  ViewOnMutableGlobal,
-  /// A `const` member function that mutates an owner reached through the
-  /// pointee
-  /// of an owning smart-pointer data member (e.g. `void f() const {
-  /// uptr_->append(...); }` where `uptr_` is `std::unique_ptr<std::string>`).
-  /// `const` does not propagate through a smart pointer, so the pointee is
-  /// mutable; this subverts the analysis's assumption that a const member
-  /// function does not invalidate borrows into the object (it can dangle a view
-  /// returned by a sibling accessor).
-  ConstMethodIndirectMutation,
   /// An expression that forms more than one level of indirection, e.g. `&p`
   /// where `p` is itself a pointer/view (taking the address of an indirection),
   /// or constructing a view over a pointer/view. The declaration-level

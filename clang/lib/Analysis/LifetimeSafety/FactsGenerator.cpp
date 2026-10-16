@@ -1183,11 +1183,9 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     // `int *p, *q; p = q;`) should propagate the inner origin (what the pointer
     // points to), not the outer origin (the pointer's storage location). Strip
     // the outer lvalue origin.
-    flow(getOriginNode(*CE), getRValueOrigins(SubExpr, Src),
-         /*Kill=*/true);
+    flow(Dest, getRValueOrigins(SubExpr, Src), /*Kill=*/true);
     return;
   case CK_NullToPointer:
-    getOriginNode(*CE);
     // TODO: Flow into them a null origin.
     return;
   case CK_NoOp:
@@ -1197,40 +1195,23 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     return;
   case CK_UncheckedDerivedToBase:
   case CK_DerivedToBase:
-    // An UPCAST denotes the same object as its operand, exactly as the downcast
-    // below does, so the object's loan must carry through. The shapes can differ
-    // (the derived and base classes may have different gsl::Pointer annotations, or
-    // the base may hold no origins at all), and the mismatch used to be skipped
-    // silently -- so a member of a base subobject reached through the implicit
-    // `this` upcast started from an EMPTY origin. A view member bound to an owner
-    // member of a SIBLING base then carried no loan, and the self-referential store
-    // went unrecorded, while the identical store with the owner as a direct member
-    // was reported.
-    //
-    // Same treatment as the downcast: carry the outer object loan and seed the
-    // deeper levels with an Unknown loan, so a borrow this flow cannot carry
-    // surfaces as -Wlifetime-safety-lost-loan rather than vanishing.
-    if (Dest && Src) {
-      if (Dest->getLength() == Src->getLength())
-        flow(Dest, Src, /*Kill=*/true);
-      else
-        flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true,
-                                        /*MarkLostWhenShallower=*/true);
-    }
-    return;
   case CK_BaseToDerived:
   case CK_Dynamic:
-    // A downcast (`static_cast<Derived*>(base)`, `dynamic_cast<Derived&>(base)`)
-    // denotes the same object as its operand, so the object's loan must carry
-    // through -- otherwise a borrow taken via `static_cast<Derived*>(b)->member`
-    // roots at nothing and a later `delete b` / scope exit is never connected
-    // (a silent use-after-free). If the derived/base origin shapes line up, flow
-    // precisely; otherwise (derived adds owner fields / differing gsl::Pointer
-    // annotations, so the loan trees cannot be mapped) carry the outer object
-    // loan and seed the deeper levels with an Unknown loan, so any inner borrow
-    // this flow could not carry surfaces as -Wlifetime-safety-lost-loan rather
-    // than being silently dropped.
-    if (Dest && Src) {
+    // An upcast or downcast (`static_cast<Derived*>(base)`,
+    // `dynamic_cast<Derived&>(base)`) denotes the same object as its operand, so
+    // the object's loan must carry through -- otherwise a borrow taken via
+    // `static_cast<Derived*>(b)->member` roots at nothing and a later `delete b`
+    // / scope exit is never connected (a silent use-after-free), and a member of
+    // a base subobject reached through the implicit `this` upcast starts from an
+    // EMPTY origin.
+    //
+    // If the origin shapes line up, flow precisely. They can differ (the classes
+    // may have different gsl::Pointer annotations, the derived class may add
+    // owner fields, or the base may hold no origins at all); then carry the
+    // outer object loan and seed the deeper levels with an Unknown loan, so a
+    // borrow this flow cannot carry surfaces as -Wlifetime-safety-lost-loan
+    // rather than vanishing.
+    if (Src) {
       if (Dest->getLength() == Src->getLength())
         flow(Dest, Src, /*Kill=*/true);
       else
@@ -1269,7 +1250,7 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
   case CK_BitCast:
     // OriginLists for Src and Dst may differ here. For example when casting
     // from int** to void*
-    if (Src && Dest && Dest->getLength() == Src->getLength())
+    if (Src && Dest->getLength() == Src->getLength())
       flow(Dest, Src, /*Kill=*/true);
     return;
   case CK_LValueToRValueBitCast: {
@@ -1318,7 +1299,7 @@ void FactsGenerator::VisitCastExpr(const CastExpr *CE) {
     // borrow surfaces as -Wlifetime-safety-lost-loan. The outer level flows
     // precisely, so a genuinely borrow-free result stays empty (no false
     // positive); only an unmodeled deeper indirection is flagged.
-    if (Dest && Src)
+    if (Src)
       flowSingleLevelWithUnknownDepth(Dest, Src, CE, /*Kill=*/true,
                                       /*MarkLostWhenShallower=*/true);
     return;
@@ -2630,8 +2611,6 @@ void FactsGenerator::handleTryStatements() {
     for (const CXXCtorInitializer *Init : CD->inits())
       if (const Expr *InitE = Init->getInit())
         Worklist.push_back(InitE);
-  if (Worklist.empty())
-    return;
   while (!Worklist.empty()) {
     const Stmt *S = Worklist.pop_back_val();
     if (!S || isa<LambdaExpr>(S))
@@ -3698,8 +3677,6 @@ void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
     OriginNode *CapturedOriginNode = getOriginNode(*Args[I]);
     if (!CapturedOriginNode)
       continue;
-    if (!CapturedOriginNode)
-      continue;
     for (int CapturingArgIdx : Attr->params()) {
       // FIXME: Add support for capturing to Global/unknown.
       if (CapturingArgIdx == LifetimeCaptureByAttr::Global ||
@@ -3963,7 +3940,6 @@ void FactsGenerator::handleUnannotatedIndirectionArgs(
 
 
 void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
-                                                  const FunctionDecl *FD,
                                                   ArrayRef<const Expr *> Args) {
   // A call may invoke a callable it receives -- for `closure()` the closure is
   // the receiver (argument 0 of operator()); for `run(closure)` it is a passed
@@ -3982,7 +3958,6 @@ void FactsGenerator::handleLambdaCallInvalidation(const Expr *Call,
   // let the checker connect them to any live borrow. The invocation may happen
   // in a callee we cannot see, so this is done at the call site, where a borrow
   // into the captured owner may be live.
-  (void)FD;
   for (const Expr *Arg : Args) {
     const CXXRecordDecl *RD =
         Arg->getType().getNonReferenceType()->getAsCXXRecordDecl();
@@ -4127,9 +4102,9 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   // existed *before* the call is live there either way, so real invalidations are
   // unaffected. Deferring to scope exit keeps this correct on every early-return
   // path below.
-  auto EmitAssumedInvalidation = llvm::make_scope_exit(
+  llvm::scope_exit EmitAssumedInvalidation(
       [&] { handleAssumedInvalidatingCall(Call, FD, Args); });
-  handleLambdaCallInvalidation(Call, FD, Args);
+  handleLambdaCallInvalidation(Call, Args);
   handleDestructiveCall(Call, FD, Args);
   handleArgumentOverlap(Call, FD, Args);
   handleMovedArgsInCall(FD, Args);

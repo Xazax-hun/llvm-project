@@ -494,20 +494,6 @@ private:
   llvm::DenseMap<const Fact *, std::pair<const CFGBlock *, unsigned>>
       FactPosition;
 
-  static SourceLocation
-  GetFactLoc(llvm::PointerUnion<const UseFact *, const OriginEscapesFact *> F) {
-    if (const auto *UF = F.dyn_cast<const UseFact *>())
-      return UF->isImplicit() ? UF->getImplicitLoc()
-                              : UF->getUseExpr()->getExprLoc();
-    if (const auto *OEF = F.dyn_cast<const OriginEscapesFact *>()) {
-      if (auto *ReturnEsc = dyn_cast<ReturnEscapeFact>(OEF))
-        return ReturnEsc->getReturnExpr()->getExprLoc();
-      if (auto *FieldEsc = dyn_cast<FieldEscapeFact>(OEF))
-        return FieldEsc->getFieldDecl()->getLocation();
-    }
-    llvm_unreachable("unhandled causing fact in PointerUnion");
-  }
-
 public:
   LifetimeChecker(const LoanPropagationAnalysis &LoanPropagation,
                   const MovedLoansAnalysis &MovedLoans,
@@ -1184,13 +1170,6 @@ public:
     // For each live origin, check if it holds an invalidated loan and report.
     for (auto &[OID, LiveInfo] :
          LiveOrigins.getLiveOriginsAt(IOF).allLive()) {
-      // Skip the invalidating call's own result: a borrow the call returns is
-      // taken after whatever the call does, so that call cannot have invalidated
-      // it. It is nonetheless live here and carries the receiver's loan (that is
-      // what [[clang::lifetimebound]] means), so without this every non-const
-      // method returning a borrow of its object would report its own result.
-      if (IOF->getResultOrigin() == OID)
-        continue;
       LoanSet HeldLoans = LoanPropagation.getLoans(OID, IOF);
       // Does the use keeping this origin live FOLLOW the pointer (`*p`, `p->m`,
       // `p->method()`) rather than just read its value (`++p`, `p != end`)? Only
@@ -1737,9 +1716,9 @@ public:
         //
         // The exemption is granted only on positively recognising a pointer or
         // reference AT the mutated record, so a view, a closure, or an origin
-        // whose type is unknown still reports. A deallocation is exempt from the
-        // exemption: it destroys the object, so a pointer at it is what dangles.
-        if (!IOF->isDeallocation() && AP == L->getAccessPath() &&
+        // whose type is unknown still reports. (A deallocation, which would be
+        // exempt from the exemption, is never an assumed invalidation.)
+        if (AP == L->getAccessPath() &&
             !originMayBorrowInto(OID, invalidatedObjectRecord(AP)))
           continue;
         // See IsExactInvalidated: containment, not equality.
@@ -2346,16 +2325,6 @@ public:
     case UntrackedConstructReason::Coroutine:
       if (ReportedUntrackedLocs.insert(UCF->getConstructLoc()).second)
         SemaHelper->reportCoroutine(UCF->getConstructLoc());
-      break;
-    case UntrackedConstructReason::ViewOnMutableGlobal:
-      // Currently the view-on-mutable-global diagnostic is emitted loan-based
-      // (checkBorrowFromMutableGlobal), not via this fact; kept for completeness.
-      if (E)
-        SemaHelper->reportViewOnMutableGlobal(E->getExprLoc(), E->getType(),
-                                              E->getSourceRange());
-      break;
-    case UntrackedConstructReason::ConstMethodIndirectMutation:
-      SemaHelper->reportConstMethodIndirectMutation(E);
       break;
     case UntrackedConstructReason::MultiLevelIndirectionExpr:
       SemaHelper->reportMultiLevelIndirection(E);

@@ -268,7 +268,7 @@ void OriginManager::attachChildren(OriginNode *Parent,
 template <typename T>
 OriginNode *OriginManager::buildNodeForType(QualType QT, const T *Node) {
   llvm::SmallPtrSet<const Type *, 4> Visited;
-  return buildNodeForTypeImpl(QT, Node, Visited, 0);
+  return buildNodeForTypeImpl(QT, Node, Visited);
 }
 
 bool OriginManager::isBorrowLikeRecord(QualType QT) const {
@@ -325,13 +325,12 @@ unsigned OriginManager::getIndirectionDepth(QualType QT) {
 template <typename T>
 OriginNode *
 OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
-                                    llvm::SmallPtrSet<const Type *, 4> &Visited,
-                                    unsigned FieldDepth) {
+                                    llvm::SmallPtrSet<const Type *, 4> &Visited) {
   assert(hasOrigins(QT) && "buildNodeForType called for type without origins");
 
   // `_Atomic(T)` is transparent for lifetime purposes: build the node for T.
   if (const auto *AT = QT->getAs<AtomicType>())
-    return buildNodeForTypeImpl(AT->getValueType(), Node, Visited, FieldDepth);
+    return buildNodeForTypeImpl(AT->getValueType(), Node, Visited);
 
   // An array shares a single origin across all of its elements; model it as if
   // it were one element. `arr[i]` accesses (built in getOrCreateNode) reuse
@@ -339,7 +338,7 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
   // every element.
   if (QT->isArrayType())
     return buildNodeForTypeImpl(QT->getAsArrayTypeUnsafe()->getElementType(),
-                                Node, Visited, FieldDepth);
+                                Node, Visited);
 
   const auto *RD = QT->getAsCXXRecordDecl();
   const Type *Canonical = QT.getCanonicalType().getTypePtr();
@@ -362,13 +361,11 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
     // level in the origin tree. E.g., for T*& / View&.
     if (hasOrigins(PointeeTy))
       attachPointeeChild(
-          Head, buildNodeForTypeImpl(PointeeTy, Node, Visited, FieldDepth));
+          Head, buildNodeForTypeImpl(PointeeTy, Node, Visited));
   } else if (RD) {
-    bool WithinFieldDepthLimit = !MaxFieldDepth || FieldDepth < *MaxFieldDepth;
     bool shouldExpandFields =
         !(isGslPointerType(QT) || isStdCallableWrapperType(RD) ||
-          LifetimeAnnotatedOriginTypes.contains(Canonical) || RD->isLambda()) &&
-        WithinFieldDepthLimit;
+          LifetimeAnnotatedOriginTypes.contains(Canonical) || RD->isLambda());
     if (shouldExpandFields) {
       SmallVector<OriginNode::Edge, 4> FieldChildren;
       // Bases' fields too, for the reason above. isTrackedField is asked about
@@ -379,8 +376,7 @@ OriginManager::buildNodeForTypeImpl(QualType QT, const T *Node,
       collectFieldsIncludingBases(RD, AllFields);
       for (const FieldDecl *F : AllFields)
         if (isTrackedField(RD, F)) {
-          OriginNode *Sub =
-              buildNodeForTypeImpl(F->getType(), Node, Visited, FieldDepth + 1);
+          OriginNode *Sub = buildNodeForTypeImpl(F->getType(), Node, Visited);
           FieldChildren.push_back({F, Sub});
         }
       attachChildren(Head, FieldChildren);

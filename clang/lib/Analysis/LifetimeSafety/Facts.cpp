@@ -359,12 +359,6 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
   case UntrackedConstructReason::PointerOfIndirection:
     OS << "PointerOfIndirection";
     break;
-  case UntrackedConstructReason::ViewOnMutableGlobal:
-    OS << "ViewOnMutableGlobal";
-    break;
-  case UntrackedConstructReason::ConstMethodIndirectMutation:
-    OS << "ConstMethodIndirectMutation";
-    break;
   case UntrackedConstructReason::MultiLevelIndirectionExpr:
     OS << "MultiLevelIndirectionExpr";
     break;
@@ -400,6 +394,18 @@ void UntrackedConstructFact::dump(llvm::raw_ostream &OS, const LoanManager &,
     break;
   case UntrackedConstructReason::Coroutine:
     OS << "Coroutine";
+    break;
+  case UntrackedConstructReason::DefaultArgTemporary:
+    OS << "DefaultArgTemporary";
+    break;
+  case UntrackedConstructReason::UnmodeledExpr:
+    OS << "UnmodeledExpr";
+    break;
+  case UntrackedConstructReason::InlineAsm:
+    OS << "InlineAsm";
+    break;
+  case UntrackedConstructReason::OpenMPDirective:
+    OS << "OpenMPDirective";
     break;
   }
   OS << ")\n";

@@ -261,13 +261,8 @@ private:
   // a call argument the callee may invoke -- whose value holds borrows of
   // by-reference captures: invoking it may mutate those captured owners,
   // invalidating borrows into them.
-  void handleLambdaCallInvalidation(const Expr *Call, const FunctionDecl *FD,
+  void handleLambdaCallInvalidation(const Expr *Call,
                                     ArrayRef<const Expr *> Args);
-
-  template <typename Destination, typename Source>
-  void flowOrigin(const Destination &D, const Source &S) {
-    flow(getOriginNode(D), getOriginNode(S), /*Kill=*/false);
-  }
 
   template <typename Destination, typename Source>
   void killAndFlowOrigin(const Destination &D, const Source &S) {

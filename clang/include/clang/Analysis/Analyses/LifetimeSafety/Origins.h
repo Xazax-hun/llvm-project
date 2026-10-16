@@ -213,17 +213,6 @@ public:
   /// can refer to a single level of an existing OriginNode.
   OriginNode *createSingleOriginNode(OriginID OID);
 
-  /// Creates a fresh, detached single-level origin (not tied to any declaration
-  /// or expression), for synthesizing a loan that has no AST anchor -- e.g. a
-  /// borrow into a variable captured by reference into a lambda, which has no
-  /// DeclRefExpr at the call site. The origin has a null type, like a synthetic
-  /// lvalue origin.
-  OriginNode *createDetachedOrigin() {
-    OriginID NewID = getNextOriginID();
-    AllOrigins.emplace_back(NewID, static_cast<const Expr *>(nullptr), nullptr);
-    return createSingleOriginNode(NewID);
-  }
-
   /// Returns the OriginNode for the implicit 'this' parameter if the current
   /// declaration is an instance method.
   std::optional<OriginNode *> getThisOrigins() const { return ThisOrigins; }
@@ -314,8 +303,7 @@ private:
   OriginNode *buildNodeForType(QualType QT, const T *Node);
   template <typename T>
   OriginNode *buildNodeForTypeImpl(QualType QT, const T *Node,
-                                   llvm::SmallPtrSet<const Type *, 4> &Visited,
-                                   unsigned FieldDepth);
+                                   llvm::SmallPtrSet<const Type *, 4> &Visited);
 
   /// Whether a record field participates in origin tracking. Plain records
   /// only track public fields; lambdas track all fields.
@@ -348,13 +336,6 @@ private:
   /// Fields accessed in the function body (or constructor init lists).
   /// Fields outside this set are excluded from origin tracking.
   llvm::SmallPtrSet<const FieldDecl *, 8> AccessedFields;
-
-  /// Field-edge depth limit when building origin trees for record types:
-  ///   - `std::nullopt`: no limit (full field tree).
-  ///   - `0`: disable field tracking (records become single-origin).
-  ///   - `N > 0`: track up to N levels of field edges.
-  /// Pointee edges are not subject to this limit.
-  std::optional<size_t> MaxFieldDepth = std::nullopt;
 };
 } // namespace clang::lifetimes::internal
 
