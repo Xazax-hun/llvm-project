@@ -4077,409 +4077,448 @@ public:
 };
 } // namespace
 
-/// Enforces the single-indirection rule on DATA MEMBERS.
+/// The end-of-translation-unit lifetime-safety checks: four declaration-level
+/// properties that no function body reaches, checked in ONE traversal.
 ///
-/// The analysis models one level of indirection. A member whose type is a
-/// multi-level indirection -- a pointer/reference to a pointer/reference/view
-/// (`T**`, `T*&`, or a reference to a [[gsl::Pointer]]) -- cannot be
-/// represented: a borrow flowing through it lands on a level the object's
-/// origin tree does not track, so it is dropped and a later read dangles
-/// silently. This mirrors the rule already enforced for locals, parameters and
-/// return types.
+/// They used to be four walkers with identical traversal settings and the same
+/// root enumeration copied into each, which drifted: only the file-variable
+/// sweep also visited what this translation unit instantiated from a template
+/// that came from a PCH or module, so the other three were blind to those
+/// specializations (a `PV<int>` with a `T **` member, a `Holder<Logger>::t`
+/// static) while the same code reached by a plain #include was checked.
 ///
-/// Runs at TU end rather than on class completion because measuring the depth
-/// requires the MEMBER's referent type to be complete. `struct Fwd; struct
-/// [[gsl::Pointer]] H { Fwd &f; }; struct Fwd { std::string_view sv; };`
-/// measures H's depth while Fwd is still incomplete: Fwd contributes no fields
-/// yet, so `Fwd &` looks like depth 1 instead of 2 and the member is accepted.
-/// Defining Fwd first reported it, so the declaration order alone decided
-/// whether the rule applied.
-///
-/// A referent that is never completed in this TU still measures as depth 1 and
-/// is accepted. That is not a hole: the multi-level path cannot be spelled
-/// without completing the type, so the TU that can actually express the hazard
-/// is one where the referent IS complete -- and this walk fires there. Refusing
-/// the opaque-handle idiom outright would only add noise.
-///
-/// Restricted to a [[gsl::Owner]]/[[gsl::Pointer]] record (a tracked leaf whose
-/// fields are not individually modeled, so a depth-2 member is a silent drop),
-/// and excluding the standard library: a plain record with such a member is
-/// already rejected as unknown-ownership at its use, a std container of
-/// indirection is rejected at the type level, and a lambda's by-reference
-/// capture is reported as a capture (its unnamed field must not be flagged
-/// here).
-static void LifetimeSafetyMemberIndirectionDepth(Sema &S,
-                                                 TranslationUnitDecl *TU) {
-  DiagnosticsEngine &Diags = S.getDiagnostics();
-  // See the note on the destruction-order sweep: this must be a
-  // whole-translation-unit question.
-  if (Diags.isIgnoredInEveryState(
-          diag::warn_lifetime_safety_multilevel_indirection))
-    return;
-  llvm::TimeTraceScope TimeProfile("LifetimeSafetyMemberIndirectionDepth");
+/// Each check is gated on its own diagnostic being enabled ANYWHERE in the
+/// translation unit -- not on the command-line state: a `#pragma clang
+/// diagnostic` may enable it for part of a file, and this traversal is the only
+/// thing that produces it.
+namespace {
+class LifetimeSafetyTUSweep : public DynamicRecursiveASTVisitor {
+  Sema &S;
+  lifetimes::LifetimeSafetySemaHelperImpl SemaHelper;
+  clang::lifetimes::LifetimeSafetyStats &LSStats;
 
-  struct Walker : DynamicRecursiveASTVisitor {
-    Sema &S;
-    explicit Walker(Sema &S) : S(S) {
-      ShouldVisitTemplateInstantiations = true;
-      ShouldVisitImplicitCode = false;
+public:
+  bool MemberDepth = false;
+  bool NonInvalidating = false;
+  bool DestructionOrder = false;
+  bool FileVarInit = false;
+
+  LifetimeSafetyTUSweep(Sema &S, clang::lifetimes::LifetimeSafetyStats &LSStats)
+      : S(S), SemaHelper(S), LSStats(LSStats) {
+    ShouldVisitImplicitCode = false;
+    // Every check must see INSTANTIATED code. In a dependent pattern `static T
+    // t;` says nothing -- the hazard only appears once T is known -- and an
+    // implicitly-instantiated specialization lives in its template's folding
+    // set, in no enclosing DeclContext::decls() chain, so only a recursive
+    // visitor that follows instantiations reaches it.
+    ShouldVisitTemplateInstantiations = true;
+  }
+
+  bool any() const {
+    return MemberDepth || NonInvalidating || DestructionOrder || FileVarInit;
+  }
+
+  /// A record or a static variable is reached both through the traversal and
+  /// as a recorded instantiation (see run), and the nested members of a
+  /// recorded specialization are recorded too. Visit each once, or every
+  /// diagnostic about it is emitted twice.
+  bool TraverseDecl(Decl *D) override {
+    if (D && (isa<CXXRecordDecl>(D) ||
+              (isa<VarDecl>(D) && cast<VarDecl>(D)->hasGlobalStorage())) &&
+        !Traversed.insert(D).second)
+      return true;
+    return DynamicRecursiveASTVisitor::TraverseDecl(D);
+  }
+
+  void run(TranslationUnitDecl *TU) {
+    // Only the declarations that belong to THIS translation unit. Iterating
+    // TU->decls() splices in every lazily-stored declaration from a PCH or
+    // module, which analyzes another translation unit's code: the hazard is
+    // then reported by every consumer rather than once where it is written,
+    // and the load is observable to -error-on-deserialized-decl. noload_decls
+    // avoids forcing the load; the isFromASTFile check makes the choice
+    // deterministic even when something else already loaded them.
+    for (Decl *D : TU->noload_decls())
+      if (!D->isFromASTFile())
+        TraverseDecl(D);
+    // The traversal above cannot reach a specialization this translation unit
+    // instantiated from a template that came from a PCH or module: it lives in
+    // the template's folding set, and noload_decls() deliberately leaves the
+    // template in lazy storage. So it was checked NOWHERE -- not at produce,
+    // where no instantiation exists yet, and not at consume, where nothing
+    // enumerated it. Sema records what it instantiated, which is exactly the
+    // right set: membership means this translation unit generated the code.
+    // An entry whose definition came from the AST file after all belongs to
+    // whoever produced it.
+    for (CXXRecordDecl *RD : S.InstantiatedClassDefinitions)
+      if (!RD->isFromASTFile())
+        TraverseDecl(RD);
+    for (VarDecl *VD : S.InstantiatedVarDefinitions)
+      if (!VD->isFromASTFile())
+        TraverseDecl(VD);
+  }
+
+  bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
+    if (MemberDepth)
+      checkMemberIndirectionDepth(RD);
+    if (NonInvalidating)
+      checkNonInvalidatingBodyAvailability(RD);
+    if (DestructionOrder)
+      checkDestructionOrderSafeSubobjects(RD);
+    return true;
+  }
+
+  bool VisitVarDecl(VarDecl *VD) override {
+    if (DestructionOrder)
+      checkStaticDestruction(VD);
+    if (FileVarInit)
+      analyzeFileVarInit(VD);
+    return true;
+  }
+
+  bool VisitFieldDecl(FieldDecl *FD) override {
+    if (FileVarInit)
+      analyzeAggregateOnlyInitializer(FD);
+    return true;
+  }
+
+  bool VisitFunctionDecl(FunctionDecl *FD) override {
+    if (DestructionOrder)
+      checkDestructionOrderBody(FD);
+    if (FileVarInit)
+      analyzeDefaultArguments(FD);
+    return true;
+  }
+
+  bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *MTE) override {
+    if (DestructionOrder)
+      checkStaticTemporary(MTE);
+    return true;
+  }
+
+  /// Visits the instantiations of a GENERIC lambda's call operator.
+  ///
+  /// ShouldVisitTemplateInstantiations reaches instantiated bodies through the
+  /// specializations of the templates the traversal enumerates -- which are the
+  /// ones declared at file or class scope. A generic lambda's call operator is a
+  /// function template minted inside an expression, so its specializations are
+  /// never enumerated and only the dependent PATTERN is seen. Everything
+  /// dependent is then invisible: `static T t;` in `[]<class T>(){}` reopened the
+  /// templated Meyers singleton, and a dependent call
+  /// (`[](auto tag){ decltype(tag)::helper(); }`) let a verified destructor reach
+  /// arbitrary unverified code, defeating the body check outright.
+  ///
+  /// A lambda's call operator is not reached as a declaration: the traversal visits its
+  /// body and its parameters through the EXPRESSION and never calls TraverseDecl on the
+  /// operator itself. So a default argument on a lambda parameter stayed invisible even
+  /// once statements were walked, while the same default argument on a local class's
+  /// member function was found.
+  ///
+  /// A generic lambda needs its specializations too: its call operator is a function
+  /// template minted inside an expression, so the specializations the traversal
+  /// enumerates -- those of templates declared at file or class scope -- never include
+  /// it, and only the dependent pattern would be seen.
+  bool VisitLambdaExpr(LambdaExpr *LE) override {
+    if (FileVarInit)
+      if (CXXMethodDecl *Call = LE->getCallOperator())
+        analyzeDefaultArguments(Call);
+    const CXXRecordDecl *RD = LE->getLambdaClass();
+    if (!RD)
+      return true;
+    FunctionTemplateDecl *FTD = RD->getDependentLambdaCallOperator();
+    if (!FTD)
+      return true;
+    for (FunctionDecl *Spec : FTD->specializations()) {
+      if (DestructionOrder && Spec->doesThisDeclarationHaveABody() &&
+          SeenLambdaSpecs.insert(Spec->getCanonicalDecl()).second)
+        TraverseDecl(Spec);
+      if (FileVarInit)
+        analyzeDefaultArguments(Spec);
     }
+    return true;
+  }
 
-    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
-      if (RD != RD->getDefinition() || RD->isDependentType() ||
-          RD->isInvalidDecl() || RD->isLambda() ||
-          lifetimes::isInStlNamespace(RD))
-        return true;
-      ASTContext &Ctx = S.getASTContext();
-      if (!lifetimes::isGslPointerType(Ctx.getCanonicalTagType(RD)) &&
-          !lifetimes::isGslOwnerType(RD))
-        return true;
-      if (S.getDiagnostics().isIgnored(
-              diag::warn_lifetime_safety_multilevel_indirection,
-              RD->getLocation()))
-        return true;
-      for (const FieldDecl *F : RD->fields()) {
-        QualType FT = F->getType();
-        // Peel C-array dimensions: an array shares a single origin across its
-        // elements, so `T* arr[N]` has the indirection depth of `T*`.
-        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-          FT = AT->getElementType();
-        if (lifetimes::getIndirectionDepth(FT, Ctx) <= 1)
-          continue;
-        std::string Subject = "field '";
-        llvm::raw_string_ostream OS(Subject);
-        F->getDeclName().print(OS, S.getPrintingPolicy());
-        OS << "'";
-        S.Diag(F->getLocation(),
-               diag::warn_lifetime_safety_multilevel_indirection)
-            << Subject << F->getSourceRange();
+private:
+  llvm::SmallPtrSet<const Decl *, 32> Traversed;
+  /// Lambda call-operator specializations already visited, since the same
+  /// closure can be reached from more than one place.
+  llvm::SmallPtrSet<const Decl *, 8> SeenLambdaSpecs;
+  /// Guards against analyzing one declaration twice, which would double its
+  /// diagnostics: a default argument is reachable both through its function
+  /// and through a generic lambda's specializations.
+  llvm::SmallPtrSet<const Decl *, 16> Analyzed;
+
+  //===--------------------------------------------------------------------===//
+  // Member indirection depth
+  //===--------------------------------------------------------------------===//
+
+  /// Enforces the single-indirection rule on DATA MEMBERS.
+  ///
+  /// The analysis models one level of indirection. A member whose type is a
+  /// multi-level indirection -- a pointer/reference to a pointer/reference/view
+  /// (`T**`, `T*&`, or a reference to a [[gsl::Pointer]]) -- cannot be
+  /// represented: a borrow flowing through it lands on a level the object's
+  /// origin tree does not track, so it is dropped and a later read dangles
+  /// silently. This mirrors the rule already enforced for locals, parameters and
+  /// return types.
+  ///
+  /// Runs at TU end rather than on class completion because measuring the depth
+  /// requires the MEMBER's referent type to be complete. `struct Fwd; struct
+  /// [[gsl::Pointer]] H { Fwd &f; }; struct Fwd { std::string_view sv; };`
+  /// measures H's depth while Fwd is still incomplete: Fwd contributes no fields
+  /// yet, so `Fwd &` looks like depth 1 instead of 2 and the member is accepted.
+  /// Defining Fwd first reported it, so the declaration order alone decided
+  /// whether the rule applied.
+  ///
+  /// A referent that is never completed in this TU still measures as depth 1 and
+  /// is accepted. That is not a hole: the multi-level path cannot be spelled
+  /// without completing the type, so the TU that can actually express the hazard
+  /// is one where the referent IS complete -- and this walk fires there. Refusing
+  /// the opaque-handle idiom outright would only add noise.
+  ///
+  /// Restricted to a [[gsl::Owner]]/[[gsl::Pointer]] record (a tracked leaf whose
+  /// fields are not individually modeled, so a depth-2 member is a silent drop),
+  /// and excluding the standard library: a plain record with such a member is
+  /// already rejected as unknown-ownership at its use, a std container of
+  /// indirection is rejected at the type level, and a lambda's by-reference
+  /// capture is reported as a capture (its unnamed field must not be flagged
+  /// here).
+  void checkMemberIndirectionDepth(CXXRecordDecl *RD) {
+    if (RD != RD->getDefinition() || RD->isDependentType() ||
+        RD->isInvalidDecl() || RD->isLambda() ||
+        lifetimes::isInStlNamespace(RD))
+      return;
+    ASTContext &Ctx = S.getASTContext();
+    if (!lifetimes::isGslPointerType(Ctx.getCanonicalTagType(RD)) &&
+        !lifetimes::isGslOwnerType(RD))
+      return;
+    if (S.getDiagnostics().isIgnored(
+            diag::warn_lifetime_safety_multilevel_indirection,
+            RD->getLocation()))
+      return;
+    for (const FieldDecl *F : RD->fields()) {
+      QualType FT = F->getType();
+      // Peel C-array dimensions: an array shares a single origin across its
+      // elements, so `T* arr[N]` has the indirection depth of `T*`.
+      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
+        FT = AT->getElementType();
+      if (lifetimes::getIndirectionDepth(FT, Ctx) <= 1)
+        continue;
+      std::string Subject = "field '";
+      llvm::raw_string_ostream OS(Subject);
+      F->getDeclName().print(OS, S.getPrintingPolicy());
+      OS << "'";
+      S.Diag(F->getLocation(),
+             diag::warn_lifetime_safety_multilevel_indirection)
+          << Subject << F->getSourceRange();
+    }
+  }
+
+  //===--------------------------------------------------------------------===//
+  // lifetime_non_invalidating body availability
+  //===--------------------------------------------------------------------===//
+
+  /// Refuses a '[[clang::lifetime_non_invalidating]]' promise the body verifier
+  /// can never check.
+  ///
+  /// The attribute suppresses the assumed-invalidation fact at every call site,
+  /// so nothing but that verifier stands between an untrue promise and a silently
+  /// dangling borrow in the caller -- and the verifier walks a BODY. A method
+  /// with no body in this translation unit is therefore accepted for free. A
+  /// defaulted copy/move assignment of a type that owns reallocatable storage is
+  /// exactly such a lie: its implicit body assigns the owner member, freeing the
+  /// old buffer a caller's borrow may point at. Deleting the attribute makes the
+  /// same TU report the invalidation, which is the shape worth refusing -- an
+  /// annotation that REMOVES a diagnostic and verifies nothing in exchange.
+  ///
+  /// A const method cannot reallocate, and a type owning nothing reallocatable
+  /// has nothing to free; both keep the promise trivially and are left alone.
+  /// Runs at TU end rather than on class completion because a body written out of
+  /// line is perfectly verifiable, and at class completion it has not been parsed
+  /// yet.
+  void checkNonInvalidatingBodyAvailability(CXXRecordDecl *RD) {
+    if (RD != RD->getDefinition() || RD->isDependentType())
+      return;
+    if (!lifetimes::recordContainsMutableOwner(RD))
+      return;
+    // Member TEMPLATES make the promise too, and are honored at every call
+    // site the same way, so they owe the same body. RD->methods() does not
+    // list them; forEachMemberFunction does.
+    lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
+      if (!M->hasAttr<LifetimeNonInvalidatingAttr>() || M->isConst())
+        return;
+      // A body anywhere in this TU is what the verifier needs. Ask the
+      // DEFINITION, not this declaration: `= default` written out of line
+      // leaves the in-class declaration looking like an ordinary one, and a
+      // defaulted method is "defined" while having no body to walk.
+      const FunctionDecl *Def = nullptr;
+      if (M->isDefined(Def) && Def && !Def->isDefaulted())
+        return;
+      // For a method of a class template, ask the PATTERN the same question.
+      // An instantiated member function that is never odr-used has no body
+      // instantiated, so isDefined() is false on it -- but the body is written
+      // right there in the template, which is what "a body in this
+      // translation unit" means and what the verifier walks. Without this, any
+      // uninstantiated method of an instantiated class template looked
+      // body-less and the promise looked unverifiable.
+      if (const FunctionDecl *Pattern = M->getTemplateInstantiationPattern()) {
+        const FunctionDecl *PatternDef = nullptr;
+        if (Pattern->isDefined(PatternDef) && PatternDef &&
+            !PatternDef->isDefaulted())
+          return;
       }
-      return true;
-    }
-  };
-  // Only the declarations that belong to THIS translation unit. Iterating
-  // TU->decls() splices in every lazily-stored declaration from a PCH or
-  // module, which analyzes another translation unit's code: the hazard is then
-  // reported by every consumer rather than once where it is written, and the
-  // load is observable to -error-on-deserialized-decl. noload_decls avoids
-  // forcing the load; the isFromASTFile check makes the choice deterministic
-  // even when something else already loaded them.
-  {
-    Walker W(S);
-    for (Decl *D : TU->noload_decls())
-      if (!D->isFromASTFile())
-        W.TraverseDecl(D);
+      S.Diag(M->getLocation(),
+             diag::warn_lifetime_safety_non_invalidating_unverifiable)
+          << ((Def && Def->isDefaulted()) || M->isDefaulted() ? 0 : 1)
+          << M->getSourceRange();
+    });
   }
-}
 
-/// Refuses a '[[clang::lifetime_non_invalidating]]' promise the body verifier
-/// can never check.
-///
-/// The attribute suppresses the assumed-invalidation fact at every call site,
-/// so nothing but that verifier stands between an untrue promise and a silently
-/// dangling borrow in the caller -- and the verifier walks a BODY. A method
-/// with no body in this translation unit is therefore accepted for free. A
-/// defaulted copy/move assignment of a type that owns reallocatable storage is
-/// exactly such a lie: its implicit body assigns the owner member, freeing the
-/// old buffer a caller's borrow may point at. Deleting the attribute makes the
-/// same TU report the invalidation, which is the shape worth refusing -- an
-/// annotation that REMOVES a diagnostic and verifies nothing in exchange.
-///
-/// A const method cannot reallocate, and a type owning nothing reallocatable
-/// has nothing to free; both keep the promise trivially and are left alone.
-/// Runs at TU end rather than on class completion because a body written out of
-/// line is perfectly verifiable, and at class completion it has not been parsed
-/// yet.
-static void
-LifetimeSafetyNonInvalidatingBodyAvailability(Sema &S,
-                                              TranslationUnitDecl *TU) {
-  DiagnosticsEngine &Diags = S.getDiagnostics();
-  // See the note on the destruction-order sweep: this must be a
-  // whole-translation-unit question.
-  if (Diags.isIgnoredInEveryState(
-          diag::warn_lifetime_safety_non_invalidating_unverifiable))
-    return;
-  llvm::TimeTraceScope TimeProfile("LifetimeSafetyNonInvalidatingAvailability");
+  //===--------------------------------------------------------------------===//
+  // Static destruction order
+  //===--------------------------------------------------------------------===//
 
-  struct Walker : DynamicRecursiveASTVisitor {
-    Sema &S;
-    explicit Walker(Sema &S) : S(S) {
-      ShouldVisitTemplateInstantiations = true;
-      ShouldVisitImplicitCode = false;
-    }
+  /// Enforces static destruction order safety across the TU.
+  ///
+  /// Two rules, checked together because the second is what makes the first
+  /// meaningful:
+  ///   - an object of static storage duration must be trivially destructible or
+  ///     have a 'destruction_order_safe' type;
+  ///   - the destructor of such a type, and the body of any annotated function,
+  ///     must not reach another static object or call an unchecked function.
+  void checkStaticDestruction(VarDecl *VD) {
+    // Only objects that are actually destroyed at shutdown.
+    if (!VD->hasGlobalStorage() || VD->isInvalidDecl())
+      return;
+    // Report the definition, not every declaration: a static data member is
+    // declared in-class and defined out-of-line, and an `extern` declaration
+    // is destroyed in whichever TU defines it -- which will report it there.
+    if (VD->isThisDeclarationADefinition() != VarDecl::Definition)
+      return;
+    if (S.SourceMgr.isInSystemHeader(VD->getLocation()))
+      return;
+    // A dependent type is normally judged at the instantiation, which the walk
+    // also visits -- except where no instantiation is ever produced.
+    if (!isUninstantiableDependentStatic(VD) &&
+        isDestructionOrderSafeType(VD->getType()))
+      return;
+    // The non-reference type: for a reference bound to a temporary it is the
+    // temporary's type that has the destructor, and advising the reader to give
+    // `const T &` a trivial destructor made no sense.
+    S.Diag(VD->getLocation(),
+           diag::warn_lifetime_safety_unsafe_static_destruction)
+        << (VD->isStaticDataMember() ? 1 : 0)
+        << VD->getType().getNonReferenceType().getUnqualifiedType();
+  }
 
-    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
-      if (RD != RD->getDefinition() || RD->isDependentType())
-        return true;
-      if (!lifetimes::recordContainsMutableOwner(RD))
-        return true;
-      // Member TEMPLATES make the promise too, and are honored at every call
-      // site the same way, so they owe the same body. RD->methods() does not
-      // list them; forEachMemberFunction does.
-      lifetimes::forEachMemberFunction(RD, [&](const CXXMethodDecl *M) {
-        if (!M->hasAttr<LifetimeNonInvalidatingAttr>() || M->isConst())
-          return;
-        // A body anywhere in this TU is what the verifier needs. Ask the
-        // DEFINITION, not this declaration: `= default` written out of line
-        // leaves the in-class declaration looking like an ordinary one, and a
-        // defaulted method is "defined" while having no body to walk.
-        const FunctionDecl *Def = nullptr;
-        if (M->isDefined(Def) && Def && !Def->isDefaulted())
-          return;
-        // For a method of a class template, ask the PATTERN the same question.
-        // An instantiated member function that is never odr-used has no body
-        // instantiated, so isDefined() is false on it -- but the body is written
-        // right there in the template, which is what "a body in this
-        // translation unit" means and what the verifier walks. Without this, any
-        // uninstantiated method of an instantiated class template looked
-        // body-less and the promise looked unverifiable.
-        if (const FunctionDecl *Pattern = M->getTemplateInstantiationPattern()) {
-          const FunctionDecl *PatternDef = nullptr;
-          if (Pattern->isDefined(PatternDef) && PatternDef &&
-              !PatternDef->isDefaulted())
-            return;
+  /// A static-duration reference bound to a temporary creates a SECOND object of
+  /// static storage duration -- the lifetime-extended temporary -- and its type need
+  /// not be the reference's.
+  ///
+  /// `static const Base &r = Reader();` judged `Base`, which is trivially
+  /// destructible, so the walk stopped there while `~Reader` ran at shutdown
+  /// unverified. Binding to a subobject makes the two types unrelated entirely:
+  /// `static const int &r = Nasty().n;` declares an `int` and creates a `Nasty`.
+  ///
+  /// The model already had the right check for this -- written inside a verified body
+  /// the same construct is caught, by checkDestroyedType at the CXXBindTemporaryExpr
+  /// -- but a namespace-scope initializer has no verified body for it to run in.
+  void checkStaticTemporary(MaterializeTemporaryExpr *MTE) {
+    if (MTE->getStorageDuration() != SD_Static &&
+        MTE->getStorageDuration() != SD_Thread)
+      return;
+    // When the extending declaration's own type is already unsafe, VisitVarDecl
+    // reported it there; that is the case which always worked, and reporting the
+    // temporary as well would say the same thing twice.
+    if (const ValueDecl *Extending = MTE->getExtendingDecl())
+      if (!isDestructionOrderSafeType(Extending->getType()))
+        return;
+    QualType QT = MTE->getSubExpr()->getType().getUnqualifiedType();
+    if (isDestructionOrderSafeType(QT))
+      return;
+    S.Diag(MTE->getExprLoc(),
+           diag::warn_lifetime_safety_unsafe_static_destruction)
+        << /*lifetime-extended temporary=*/2 << QT;
+  }
+
+  void checkDestructionOrderSafeSubobjects(CXXRecordDecl *RD) {
+    if (!RD->hasAttr<DestructionOrderSafeAttr>() || !RD->hasDefinition())
+      return;
+    if (S.SourceMgr.isInSystemHeader(RD->getLocation()))
+      return;
+    // Destroying the object destroys its bases and members too, and those
+    // destructor calls are implicit -- the body checker never sees them. So the
+    // promise has to extend to every subobject.
+    for (const CXXBaseSpecifier &B : RD->bases())
+      if (!isDestructionOrderSafeType(B.getType()))
+        S.Diag(B.getBeginLoc(),
+               diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
+            << RD << 0 << (const NamedDecl *)nullptr << B.getType();
+    for (FieldDecl *FD : RD->fields())
+      if (!isDestructionOrderSafeType(FD->getType()))
+        S.Diag(FD->getLocation(),
+               diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
+            << RD << 1 << FD << FD->getType();
+  }
+
+  void checkDestructionOrderBody(FunctionDecl *FD) {
+    if (!FD->doesThisDeclarationHaveABody() || FD->isImplicit())
+      return;
+    if (S.SourceMgr.isInSystemHeader(FD->getLocation()))
+      return;
+    // Verify a body that carries the promise, either directly or by being the
+    // destructor of a type that carries it.
+    bool Promised = lifetimes::carriesDestructionOrderPromise(FD);
+    // '__attribute__((destructor))' registers a function to run during shutdown
+    // without it being the destructor of anything, so the variable-level rule
+    // never reaches it. A user-REPLACED global `operator delete` (or `new`) is
+    // the same situation from the other direction: it runs whenever anything is
+    // freed, including while static objects are being destroyed, and there is no
+    // type at fault to ban. Both are subject to exactly the same hazard, so hold
+    // them to the same requirements -- no annotation needed, since writing them
+    // at all IS the declaration that they run then.
+    bool ShutdownHandler = FD->hasAttr<DestructorAttr>() ||
+                           FD->isReplaceableGlobalAllocationFunction();
+    if (!Promised && !ShutdownHandler)
+      return;
+    // Verified independently, right here. Callees are not followed: they must
+    // carry the promise themselves, and the walk reaches each of them in turn.
+    DestructionOrderSafeBodyChecker Checker(S, FD,
+                                            /*SubjectKind=*/Promised ? 0 : 1);
+    Checker.TraverseStmt(FD->getBody());
+    // A constructor's member-initializer list is code too, and it is not reachable
+    // from getBody(). A marked constructor whose body is `{}` would otherwise pass
+    // while its initializers read an object already destroyed at shutdown.
+    // Every initializer, not only the written ones: an implicit base or member
+    // initializer runs the same way and calls the same constructors.
+    if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
+      for (const CXXCtorInitializer *Init : Ctor->inits())
+        if (Expr *E = Init->getInit()) {
+          Checker.markConstructionCoveredByParent(E);
+          Checker.TraverseStmt(E);
         }
-        S.Diag(M->getLocation(),
-               diag::warn_lifetime_safety_non_invalidating_unverifiable)
-            << ((Def && Def->isDefaulted()) || M->isDefaulted() ? 0 : 1)
-            << M->getSourceRange();
-      });
-      return true;
-    }
-  };
-  // Only the declarations that belong to THIS translation unit. Iterating
-  // TU->decls() splices in every lazily-stored declaration from a PCH or
-  // module, which analyzes another translation unit's code: the hazard is then
-  // reported by every consumer rather than once where it is written, and the
-  // load is observable to -error-on-deserialized-decl. noload_decls avoids
-  // forcing the load; the isFromASTFile check makes the choice deterministic
-  // even when something else already loaded them.
-  {
-    Walker W(S);
-    for (Decl *D : TU->noload_decls())
-      if (!D->isFromASTFile())
-        W.TraverseDecl(D);
   }
-}
 
-/// Enforces static destruction order safety across the TU.
-///
-/// Two rules, checked together because the second is what makes the first
-/// meaningful:
-///   - an object of static storage duration must be trivially destructible or
-///     have a 'destruction_order_safe' type;
-///   - the destructor of such a type, and the body of any annotated function,
-///     must not reach another static object or call an unchecked function.
-static void LifetimeSafetyDestructionOrderAnalysis(Sema &S,
-                                                   TranslationUnitDecl *TU) {
-  DiagnosticsEngine &Diags = S.getDiagnostics();
-  // Asked of the WHOLE translation unit, not of the command-line state: a
-  // `#pragma clang diagnostic` may enable this for part of a file, and this
-  // sweep is the only thing that produces the diagnostic.
-  if (Diags.isIgnoredInEveryState(
-          diag::warn_lifetime_safety_unsafe_static_destruction))
-    return;
-  llvm::TimeTraceScope TimeProfile("LifetimeSafetyDestructionOrder");
+  //===--------------------------------------------------------------------===//
+  // Namespace-scope initializers, default arguments, default member
+  // initializers
+  //===--------------------------------------------------------------------===//
 
-  struct Walker : DynamicRecursiveASTVisitor {
-    Sema &S;
-    /// Lambda call-operator specializations already visited, since the same closure
-    /// can be reached from more than one place.
-    llvm::SmallPtrSet<const Decl *, 8> SeenLambdaSpecs;
-    explicit Walker(Sema &S) : S(S) {
-      ShouldVisitImplicitCode = false;
-      // The ban and the verification must both see INSTANTIATED bodies. In a
-      // dependent pattern `static T t;` says nothing -- the hazard only appears
-      // once T is known -- so checking the pattern alone lets an arbitrary unsafe
-      // type acquire static storage duration with no annotation anywhere (the
-      // templated Meyers singleton).
-      ShouldVisitTemplateInstantiations = true;
-    }
-
-    /// Visits the instantiations of a GENERIC lambda's call operator.
-    ///
-    /// ShouldVisitTemplateInstantiations reaches instantiated bodies through the
-    /// specializations of the templates the traversal enumerates -- which are the
-    /// ones declared at file or class scope. A generic lambda's call operator is a
-    /// function template minted inside an expression, so its specializations are
-    /// never enumerated and only the dependent PATTERN is seen. Everything
-    /// dependent is then invisible: `static T t;` in `[]<class T>(){}` reopened the
-    /// templated Meyers singleton, and a dependent call
-    /// (`[](auto tag){ decltype(tag)::helper(); }`) let a verified destructor reach
-    /// arbitrary unverified code, defeating the body check outright.
-    bool VisitLambdaExpr(LambdaExpr *LE) override {
-      const CXXRecordDecl *RD = LE->getLambdaClass();
-      if (!RD)
-        return true;
-      FunctionTemplateDecl *FTD = RD->getDependentLambdaCallOperator();
-      if (!FTD)
-        return true;
-      for (FunctionDecl *Spec : FTD->specializations())
-        if (Spec->doesThisDeclarationHaveABody() &&
-            SeenLambdaSpecs.insert(Spec->getCanonicalDecl()).second)
-          TraverseDecl(Spec);
-      return true;
-    }
-
-    bool VisitVarDecl(VarDecl *VD) override {
-      // Only objects that are actually destroyed at shutdown.
-      if (!VD->hasGlobalStorage() || VD->isInvalidDecl())
-        return true;
-      // Report the definition, not every declaration: a static data member is
-      // declared in-class and defined out-of-line, and an `extern` declaration
-      // is destroyed in whichever TU defines it -- which will report it there.
-      if (VD->isThisDeclarationADefinition() != VarDecl::Definition)
-        return true;
-      if (S.SourceMgr.isInSystemHeader(VD->getLocation()))
-        return true;
-      // A dependent type is normally judged at the instantiation, which the walk
-      // also visits -- except where no instantiation is ever produced.
-      if (!isUninstantiableDependentStatic(VD) &&
-          isDestructionOrderSafeType(VD->getType()))
-        return true;
-      // The non-reference type: for a reference bound to a temporary it is the
-      // temporary's type that has the destructor, and advising the reader to give
-      // `const T &` a trivial destructor made no sense.
-      S.Diag(VD->getLocation(),
-             diag::warn_lifetime_safety_unsafe_static_destruction)
-          << (VD->isStaticDataMember() ? 1 : 0)
-          << VD->getType().getNonReferenceType().getUnqualifiedType();
-      return true;
-    }
-
-    /// A static-duration reference bound to a temporary creates a SECOND object of
-    /// static storage duration -- the lifetime-extended temporary -- and its type need
-    /// not be the reference's.
-    ///
-    /// `static const Base &r = Reader();` judged `Base`, which is trivially
-    /// destructible, so the walk stopped there while `~Reader` ran at shutdown
-    /// unverified. Binding to a subobject makes the two types unrelated entirely:
-    /// `static const int &r = Nasty().n;` declares an `int` and creates a `Nasty`.
-    ///
-    /// The model already had the right check for this -- written inside a verified body
-    /// the same construct is caught, by checkDestroyedType at the CXXBindTemporaryExpr
-    /// -- but a namespace-scope initializer has no verified body for it to run in.
-    bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *MTE) override {
-      if (MTE->getStorageDuration() != SD_Static &&
-          MTE->getStorageDuration() != SD_Thread)
-        return true;
-      // When the extending declaration's own type is already unsafe, VisitVarDecl
-      // reported it there; that is the case which always worked, and reporting the
-      // temporary as well would say the same thing twice.
-      if (const ValueDecl *Extending = MTE->getExtendingDecl())
-        if (!isDestructionOrderSafeType(Extending->getType()))
-          return true;
-      QualType QT = MTE->getSubExpr()->getType().getUnqualifiedType();
-      if (isDestructionOrderSafeType(QT))
-        return true;
-      S.Diag(MTE->getExprLoc(),
-             diag::warn_lifetime_safety_unsafe_static_destruction)
-          << /*lifetime-extended temporary=*/2 << QT;
-      return true;
-    }
-
-    bool VisitCXXRecordDecl(CXXRecordDecl *RD) override {
-      if (!RD->hasAttr<DestructionOrderSafeAttr>() || !RD->hasDefinition())
-        return true;
-      if (S.SourceMgr.isInSystemHeader(RD->getLocation()))
-        return true;
-      // Destroying the object destroys its bases and members too, and those
-      // destructor calls are implicit -- the body checker never sees them. So the
-      // promise has to extend to every subobject.
-      for (const CXXBaseSpecifier &B : RD->bases())
-        if (!isDestructionOrderSafeType(B.getType()))
-          S.Diag(B.getBeginLoc(),
-                 diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
-              << RD << 0 << (const NamedDecl *)nullptr << B.getType();
-      for (FieldDecl *FD : RD->fields())
-        if (!isDestructionOrderSafeType(FD->getType()))
-          S.Diag(FD->getLocation(),
-                 diag::warn_lifetime_safety_destruction_order_unsafe_subobject)
-              << RD << 1 << FD << FD->getType();
-      return true;
-    }
-
-    bool VisitFunctionDecl(FunctionDecl *FD) override {
-      if (!FD->doesThisDeclarationHaveABody() || FD->isImplicit())
-        return true;
-      if (S.SourceMgr.isInSystemHeader(FD->getLocation()))
-        return true;
-      // Verify a body that carries the promise, either directly or by being the
-      // destructor of a type that carries it.
-      bool Promised = lifetimes::carriesDestructionOrderPromise(FD);
-      // '__attribute__((destructor))' registers a function to run during shutdown
-      // without it being the destructor of anything, so the variable-level rule
-      // never reaches it. A user-REPLACED global `operator delete` (or `new`) is
-      // the same situation from the other direction: it runs whenever anything is
-      // freed, including while static objects are being destroyed, and there is no
-      // type at fault to ban. Both are subject to exactly the same hazard, so hold
-      // them to the same requirements -- no annotation needed, since writing them
-      // at all IS the declaration that they run then.
-      bool ShutdownHandler = FD->hasAttr<DestructorAttr>() ||
-                             FD->isReplaceableGlobalAllocationFunction();
-      if (!Promised && !ShutdownHandler)
-        return true;
-      // Verified independently, right here. Callees are not followed: they must
-      // carry the promise themselves, and the walk reaches each of them in turn.
-      DestructionOrderSafeBodyChecker Checker(S, FD,
-                                              /*SubjectKind=*/Promised ? 0 : 1);
-      Checker.TraverseStmt(FD->getBody());
-      // A constructor's member-initializer list is code too, and it is not reachable
-      // from getBody(). A marked constructor whose body is `{}` would otherwise pass
-      // while its initializers read an object already destroyed at shutdown.
-      // Every initializer, not only the written ones: an implicit base or member
-      // initializer runs the same way and calls the same constructors.
-      if (const auto *Ctor = dyn_cast<CXXConstructorDecl>(FD))
-        for (const CXXCtorInitializer *Init : Ctor->inits())
-          if (Expr *E = Init->getInit()) {
-            Checker.markConstructionCoveredByParent(E);
-            Checker.TraverseStmt(E);
-          }
-      return true;
-    }
-  };
-  // Only the declarations that belong to THIS translation unit. Iterating
-  // TU->decls() splices in every lazily-stored declaration from a PCH or
-  // module, which analyzes another translation unit's code: the hazard is then
-  // reported by every consumer rather than once where it is written, and the
-  // load is observable to -error-on-deserialized-decl. noload_decls avoids
-  // forcing the load; the isFromASTFile check makes the choice deterministic
-  // even when something else already loaded them.
-  {
-    Walker W(S);
-    for (Decl *D : TU->noload_decls())
-      if (!D->isFromASTFile())
-        W.TraverseDecl(D);
-  }
-}
-
-/// Runs the lifetime safety analysis over every namespace-scope variable whose
-/// initializer is dynamic.
-///
-/// Such an initializer is code, but no other entry point reaches it. The
-/// per-declaration path runs when a *function* scope is popped, and the TU-mode
-/// sweeps walk callables and the call graph -- a file-scope VarDecl is neither,
-/// and CallGraph does not descend into initializer statements. So a borrow
-/// stored by one of these initializers was never analyzed at all: not refused,
-/// simply invisible. The classic bug it hides is a store into another global
-/// that reads it from a destructor, after the borrowed global has already been
-/// destroyed.
-///
-/// AnalysisDeclContext already models a file-scope VarDecl by treating its
-/// initializer as the body, so this needs no new machinery.
-static void LifetimeSafetyFileVarInitAnalysis(
-    Sema &S, TranslationUnitDecl *TU,
-    clang::lifetimes::LifetimeSafetyStats &LSStats) {
-  // Gate BEFORE the traversal, not per variable inside the visitor: walking the
-  // translation unit is itself the expensive and observable part, since
-  // ShouldVisitTemplateInstantiations forces every lazily-stored declaration out
-  // of a PCH or module. Asked of the whole translation unit so that a
-  // `#pragma clang diagnostic` enabling a lifetime warning for part of a file
-  // still runs the sweep.
-  if (!lifetimes::IsLifetimeSafetyEnabledAnywhere(S))
-    return;
-  llvm::TimeTraceScope TimeProfile("LifetimeSafetyFileVarInitAnalysis");
-
+  /// Runs the lifetime safety analysis over every namespace-scope variable whose
+  /// initializer is dynamic.
+  ///
+  /// Such an initializer is code, but no other entry point reaches it. The
+  /// per-declaration path runs when a *function* scope is popped, and the TU-mode
+  /// sweeps walk callables and the call graph -- a file-scope VarDecl is neither,
+  /// and CallGraph does not descend into initializer statements. So a borrow
+  /// stored by one of these initializers was never analyzed at all: not refused,
+  /// simply invisible. The classic bug it hides is a store into another global
+  /// that reads it from a destructor, after the borrowed global has already been
+  /// destroyed.
+  ///
+  /// AnalysisDeclContext already models a file-scope VarDecl by treating its
+  /// initializer as the body, so this needs no new machinery.
+  //
   // Enumerating these declarations by hand does not work. A hand-rolled recursion
   // has to name every DeclContext that can nest a file-scope variable, and two
   // kinds are not reachable that way at all:
@@ -4495,178 +4534,122 @@ static void LifetimeSafetyFileVarInitAnalysis(
   //     omit -- as this one did, silently skipping every exported namespace-scope
   //     initializer in the TU.
   //
-  // A RecursiveASTVisitor enumerates both, so use one. ShouldVisitTemplateInstantiations
-  // is what reaches the specializations, mirroring the destruction-order sweep above,
-  // which already visits class-template statics for exactly this reason.
-  struct Walker : DynamicRecursiveASTVisitor {
-    Sema &S;
-    lifetimes::LifetimeSafetySemaHelperImpl SemaHelper;
-    clang::lifetimes::LifetimeSafetyStats &LSStats;
-    /// Guards against analyzing one variable twice, which would double its
-    /// diagnostics: a specialization is reachable both through its lexical parent
-    /// and through the enumeration of the template's specializations.
-    llvm::SmallPtrSet<const Decl *, 16> Seen;
-
-    Walker(Sema &S, clang::lifetimes::LifetimeSafetyStats &LSStats)
-        : S(S), SemaHelper(S), LSStats(LSStats) {
-      ShouldVisitImplicitCode = false;
-      ShouldVisitTemplateInstantiations = true;
-    }
-
-    bool VisitVarDecl(VarDecl *VD) override {
-      if (!VD->isFileVarDecl() || !VD->hasInit() ||
-          VD->getDeclContext()->isDependentContext())
-        return true;
-      // A constant initializer performs no stores at runtime, so it usually needs
-      // no CFG -- but it can still CAPTURE a borrow. Binding a reference or
-      // pointer to another object of static storage duration is a constant
-      // expression, and it is exactly the destruction-order hazard: the value is
-      // computed at compile time, yet the captured reference outlives whatever it
-      // refers to. So skip only when the variable cannot hold a borrow at all.
-      if (VD->hasConstantInitialization() && !typeMayHoldBorrow(VD->getType()))
-        return true;
-      analyze(VD);
-      return true;
-    }
-
-    /// A DEFAULT ARGUMENT is code in the same position as a namespace-scope initializer:
-    /// owned by a declaration, run whenever a call omits the argument, and reached by no
-    /// other entry point. The CFG deliberately does not descend into a
-    /// CXXDefaultArgExpr -- the expression belongs to the callee's declaration, so
-    /// adding it to each caller's CFG would make one Expr appear in several (PR13385) --
-    /// and the per-function path analyzes bodies, which this is not. So a hazard written
-    /// wholly inside one was invisible, while the identical expression at the call site
-    /// is reported.
-    ///
-    /// Driven from the function rather than from a ParmVarDecl visit, because the
-    /// traversal reaches a function's parameters only when it has written parameter
-    /// source information.
-    ///
-    /// Analyzing it once, here, is well defined: a default argument cannot name a local
-    /// or another parameter, so only globals, static members and its own temporaries are
-    /// in scope, and those mean the same thing from here as from any call site.
-    /// A DEFAULT MEMBER INITIALIZER is code owned by a declaration, exactly like a
-    /// default argument above. It is normally carried by whichever constructor runs
-    /// it, and analyzed there -- but a class that is only ever AGGREGATE-initialized
-    /// has no constructor at all, so the initializer's code appears in no CFG and a
-    /// hazard written in it is invisible. `struct A { std::string t; std::string_view
-    /// v = t; };` used as `A a{...}` was silent, while the same class with `A() =
-    /// default;` reported a self-referential member.
-    ///
-    /// Analyzed only when NO constructor of the record is defined in this
-    /// translation unit: otherwise the constructor carries the initializer and
-    /// reports it, and analyzing it again here would say the same thing twice.
-    bool VisitFieldDecl(FieldDecl *FD) override {
-      if (!FD->hasInClassInitializer() ||
-          FD->getDeclContext()->isDependentContext())
-        return true;
-      const auto *RD = dyn_cast<CXXRecordDecl>(FD->getParent());
-      if (!RD || !RD->hasDefinition())
-        return true;
-      // A COPY or MOVE constructor copies the member rather than running its
-      // initializer, so it carries nothing; any other defined constructor does run
-      // it, and reports there. Only when none exists is this the initializer's sole
-      // home -- which is the aggregate-only case.
-      for (const CXXConstructorDecl *C : RD->ctors())
-        if (C->isDefined() && !C->isCopyOrMoveConstructor())
-          return true;
-      // Nothing that can hold a borrow, nothing to say.
-      if (!typeMayHoldBorrow(FD->getType()))
-        return true;
-      analyze(FD);
-      return true;
-    }
-
-    bool VisitFunctionDecl(FunctionDecl *FD) override {
-      analyzeDefaultArguments(FD);
-      return true;
-    }
-
-    /// A lambda's call operator is not reached as a declaration: the traversal visits its
-    /// body and its parameters through the EXPRESSION and never calls TraverseDecl on the
-    /// operator itself. So a default argument on a lambda parameter stayed invisible even
-    /// once statements were walked, while the same default argument on a local class's
-    /// member function was found.
-    ///
-    /// A generic lambda needs its specializations too: its call operator is a function
-    /// template minted inside an expression, so the specializations the traversal
-    /// enumerates -- those of templates declared at file or class scope -- never include
-    /// it, and only the dependent pattern would be seen.
-    bool VisitLambdaExpr(LambdaExpr *LE) override {
-      if (CXXMethodDecl *Call = LE->getCallOperator())
-        analyzeDefaultArguments(Call);
-      const CXXRecordDecl *RD = LE->getLambdaClass();
-      if (!RD)
-        return true;
-      if (FunctionTemplateDecl *FTD = RD->getDependentLambdaCallOperator())
-        for (FunctionDecl *Spec : FTD->specializations())
-          analyzeDefaultArguments(Spec);
-      return true;
-    }
-
-    void analyzeDefaultArguments(const FunctionDecl *FD) {
-      for (const ParmVarDecl *PVD : FD->parameters()) {
-        if (!PVD->hasDefaultArg() || PVD->hasUnparsedDefaultArg() ||
-            PVD->hasUninstantiatedDefaultArg())
-          continue;
-        if (PVD->getDeclContext()->isDependentContext())
-          continue;
-        const Expr *Arg = PVD->getDefaultArg();
-        // `= nullptr`, `= 0` and the rest of the common cases store nothing and carry
-        // no borrow, so they need no CFG at all. Building one for every default
-        // argument in the translation unit would otherwise be the cost of this sweep.
-        if (!Arg || (!Arg->HasSideEffects(S.Context) &&
-                     !typeMayHoldBorrow(PVD->getType())))
-          continue;
-        analyze(PVD);
-      }
-    }
-
-    void analyze(const Decl *VD) {
-      if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
-        return;
-      if (!Seen.insert(VD->getCanonicalDecl()).second)
-        return;
-      AnalysisDeclContext AC(nullptr, VD);
-      setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
-      if (AC.getCFG())
-        runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
-      else
-        SemaHelper.reportAnalysisBailout(
-            VD, lifetimes::BailoutReason::CFGUnavailable);
-    }
-  };
-  // Only the declarations that belong to THIS translation unit. Iterating
-  // TU->decls() splices in every lazily-stored declaration from a PCH or
-  // module, which analyzes another translation unit's code: the hazard is then
-  // reported by every consumer rather than once where it is written, and the
-  // load is observable to -error-on-deserialized-decl. noload_decls avoids
-  // forcing the load; the isFromASTFile check makes the choice deterministic
-  // even when something else already loaded them.
-  {
-    Walker W(S, LSStats);
-    for (Decl *D : TU->noload_decls())
-      if (!D->isFromASTFile())
-        W.TraverseDecl(D);
-    // The traversal above cannot reach a specialization this translation unit
-    // instantiated from a template that came from a PCH or module: the
-    // specialization lives in the template's folding set, and noload_decls()
-    // deliberately leaves the template in lazy storage. So a static data member
-    // of a class template, or a variable template specialization, had its
-    // initializer analyzed NOWHERE -- not at produce, where no instantiation
-    // exists yet, and not at consume, where nothing enumerates it. The same code
-    // reached by a plain #include was analyzed normally.
-    //
-    // Sema records what it instantiated, which is both reachable and exactly the
-    // right set: membership means this translation unit generated the code, so
-    // this restores what #include does, including reporting in each translation
-    // unit that instantiates. The isFromASTFile() check drops an entry whose
-    // definition came from the PCH after all, which belongs to whoever produced
-    // it.
-    for (VarDecl *VD : S.InstantiatedVarDefinitions)
-      if (!VD->isFromASTFile())
-        W.TraverseDecl(VD);
+  // A RecursiveASTVisitor enumerates both, which is why this is part of the
+  // recursive sweep; ShouldVisitTemplateInstantiations is what reaches the
+  // specializations.
+  void analyzeFileVarInit(VarDecl *VD) {
+    if (!VD->isFileVarDecl() || !VD->hasInit() ||
+        VD->getDeclContext()->isDependentContext())
+      return;
+    // A constant initializer performs no stores at runtime, so it usually needs
+    // no CFG -- but it can still CAPTURE a borrow. Binding a reference or
+    // pointer to another object of static storage duration is a constant
+    // expression, and it is exactly the destruction-order hazard: the value is
+    // computed at compile time, yet the captured reference outlives whatever it
+    // refers to. So skip only when the variable cannot hold a borrow at all.
+    if (VD->hasConstantInitialization() && !typeMayHoldBorrow(VD->getType()))
+      return;
+    analyze(VD);
   }
+
+  /// A DEFAULT MEMBER INITIALIZER is code owned by a declaration, exactly like a
+  /// default argument (see analyzeDefaultArguments). It is normally carried by whichever constructor runs
+  /// it, and analyzed there -- but a class that is only ever AGGREGATE-initialized
+  /// has no constructor at all, so the initializer's code appears in no CFG and a
+  /// hazard written in it is invisible. `struct A { std::string t; std::string_view
+  /// v = t; };` used as `A a{...}` was silent, while the same class with `A() =
+  /// default;` reported a self-referential member.
+  ///
+  /// Analyzed only when NO constructor of the record is defined in this
+  /// translation unit: otherwise the constructor carries the initializer and
+  /// reports it, and analyzing it again here would say the same thing twice.
+  void analyzeAggregateOnlyInitializer(FieldDecl *FD) {
+    if (!FD->hasInClassInitializer() ||
+        FD->getDeclContext()->isDependentContext())
+      return;
+    const auto *RD = dyn_cast<CXXRecordDecl>(FD->getParent());
+    if (!RD || !RD->hasDefinition())
+      return;
+    // A COPY or MOVE constructor copies the member rather than running its
+    // initializer, so it carries nothing; any other defined constructor does run
+    // it, and reports there. Only when none exists is this the initializer's sole
+    // home -- which is the aggregate-only case.
+    for (const CXXConstructorDecl *C : RD->ctors())
+      if (C->isDefined() && !C->isCopyOrMoveConstructor())
+        return;
+    // Nothing that can hold a borrow, nothing to say.
+    if (!typeMayHoldBorrow(FD->getType()))
+      return;
+    analyze(FD);
+  }
+
+  /// A DEFAULT ARGUMENT is code in the same position as a namespace-scope initializer:
+  /// owned by a declaration, run whenever a call omits the argument, and reached by no
+  /// other entry point. The CFG deliberately does not descend into a
+  /// CXXDefaultArgExpr -- the expression belongs to the callee's declaration, so
+  /// adding it to each caller's CFG would make one Expr appear in several (PR13385) --
+  /// and the per-function path analyzes bodies, which this is not. So a hazard written
+  /// wholly inside one was invisible, while the identical expression at the call site
+  /// is reported.
+  ///
+  /// Driven from the function rather than from a ParmVarDecl visit, because the
+  /// traversal reaches a function's parameters only when it has written parameter
+  /// source information.
+  ///
+  /// Analyzing it once, here, is well defined: a default argument cannot name a local
+  /// or another parameter, so only globals, static members and its own temporaries are
+  /// in scope, and those mean the same thing from here as from any call site.
+  void analyzeDefaultArguments(const FunctionDecl *FD) {
+    for (const ParmVarDecl *PVD : FD->parameters()) {
+      if (!PVD->hasDefaultArg() || PVD->hasUnparsedDefaultArg() ||
+          PVD->hasUninstantiatedDefaultArg())
+        continue;
+      if (PVD->getDeclContext()->isDependentContext())
+        continue;
+      const Expr *Arg = PVD->getDefaultArg();
+      // `= nullptr`, `= 0` and the rest of the common cases store nothing and carry
+      // no borrow, so they need no CFG at all. Building one for every default
+      // argument in the translation unit would otherwise be the cost of this sweep.
+      if (!Arg || (!Arg->HasSideEffects(S.Context) &&
+                   !typeMayHoldBorrow(PVD->getType())))
+        continue;
+      analyze(PVD);
+    }
+  }
+
+  void analyze(const Decl *VD) {
+    if (!lifetimes::IsLifetimeSafetyEnabled(S, VD))
+      return;
+    if (!Analyzed.insert(VD->getCanonicalDecl()).second)
+      return;
+    AnalysisDeclContext AC(nullptr, VD);
+    setLifetimeSafetyCFGBuildOptions(AC.getCFGBuildOptions());
+    if (AC.getCFG())
+      runLifetimeSafetyAnalysis(AC, &SemaHelper, LSStats, S.CollectStats);
+    else
+      SemaHelper.reportAnalysisBailout(
+          VD, lifetimes::BailoutReason::CFGUnavailable);
+  }
+};
+} // namespace
+
+static void LifetimeSafetyTUSweeps(Sema &S, TranslationUnitDecl *TU,
+                                   clang::lifetimes::LifetimeSafetyStats &LSStats) {
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  LifetimeSafetyTUSweep W(S, LSStats);
+  W.MemberDepth = !Diags.isIgnoredInEveryState(
+      diag::warn_lifetime_safety_multilevel_indirection);
+  W.NonInvalidating = !Diags.isIgnoredInEveryState(
+      diag::warn_lifetime_safety_non_invalidating_unverifiable);
+  W.DestructionOrder = !Diags.isIgnoredInEveryState(
+      diag::warn_lifetime_safety_unsafe_static_destruction);
+  W.FileVarInit = lifetimes::IsLifetimeSafetyEnabledAnywhere(S);
+  // Gate BEFORE the traversal: walking the translation unit is itself the
+  // expensive and observable part.
+  if (!W.any())
+    return;
+  llvm::TimeTraceScope TimeProfile("LifetimeSafetyTUSweeps");
+  W.run(TU);
 }
 
 static bool shouldRunUnsafeBufferUsageAnalysis(const Sema &S,
@@ -4751,10 +4734,7 @@ void clang::sema::AnalysisBasedWarnings::IssueLifetimeSafetyTUWarnings(
     return;
   // Namespace-scope dynamic initializers, in both modes: neither the per-
   // function path nor the TU sweeps reach them.
-  LifetimeSafetyFileVarInitAnalysis(S, TU, LSStats);
-  LifetimeSafetyDestructionOrderAnalysis(S, TU);
-  LifetimeSafetyNonInvalidatingBodyAvailability(S, TU);
-  LifetimeSafetyMemberIndirectionDepth(S, TU);
+  LifetimeSafetyTUSweeps(S, TU, LSStats);
 }
 
 void clang::sema::AnalysisBasedWarnings::

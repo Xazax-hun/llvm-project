@@ -53,6 +53,19 @@ template <class T> std::string_view viewOfGlobal() { return g_mut; }
 // fatal error for directives in a file it did not parse.
 // produce-no-diagnostics
 
+// The other end-of-TU checks had the same blind spot until they shared the
+// sweep: each enumerated only the translation unit's own declarations, so a
+// specialization instantiated here from this PCH's templates was checked
+// nowhere. Sema records class instantiations too; see
+// Sema::InstantiatedClassDefinitions.
+struct Logger { ~Logger(); };
+template <class T> struct Holder { static inline T t; };     // destruction order
+template <class T> struct [[gsl::Pointer]] PV { T **pp; };   // member depth
+template <class T> struct [[gsl::Owner]] Grows {             // non_invalidating
+  std::vector<T> v;
+  [[clang::lifetime_non_invalidating]] void touch();
+};
+
 //--- main.cpp
 volatile char sink;
 
@@ -66,6 +79,13 @@ void use() {
   // consume-warning@+1 {{cannot track this value here}}
   sink = *viewOfGlobal<int>().data();
 }
+
+// consume-warning@tpl.h:35 {{static data member of static storage duration has type 'Logger'}}
+Logger &holder() { return Holder<Logger>::t; }
+// consume-warning@tpl.h:36 {{field 'pp' uses more than one level of indirection}}
+PV<int> pv;
+// consume-warning@tpl.h:39 {{'[[clang::lifetime_non_invalidating]]' on this declared method cannot be verified}}
+void touchIt(Grows<int> &g [[clang::noescape]]) { g.touch(); }
 
 //--- direct.cpp
 #include "tpl.h"
@@ -81,3 +101,10 @@ void use() {
   // consume-warning@+1 {{cannot track this value here}}
   sink = *viewOfGlobal<int>().data();
 }
+
+// consume-warning@tpl.h:35 {{static data member of static storage duration has type 'Logger'}}
+Logger &holder() { return Holder<Logger>::t; }
+// consume-warning@tpl.h:36 {{field 'pp' uses more than one level of indirection}}
+PV<int> pv;
+// consume-warning@tpl.h:39 {{'[[clang::lifetime_non_invalidating]]' on this declared method cannot be verified}}
+void touchIt(Grows<int> &g [[clang::noescape]]) { g.touch(); }

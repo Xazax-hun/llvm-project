@@ -14134,6 +14134,13 @@ public:
   /// should check isFromASTFile().
   SmallVector<VarDecl *, 0> InstantiatedVarDefinitions;
 
+  /// The class template specializations (and member classes of class
+  /// templates) this translation unit instantiated a definition for, for the
+  /// same reason as InstantiatedVarDefinitions: an end-of-translation-unit pass
+  /// cannot otherwise reach one instantiated from a template that came from a
+  /// PCH or module. Currently consumed by the lifetime safety end-of-TU sweep.
+  SmallVector<CXXRecordDecl *, 0> InstantiatedClassDefinitions;
+
   class LocalEagerInstantiationScope {
   public:
     LocalEagerInstantiationScope(Sema &S, bool AtEndOfTU)

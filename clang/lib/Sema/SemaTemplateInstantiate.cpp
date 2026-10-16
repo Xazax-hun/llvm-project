@@ -3747,6 +3747,9 @@ bool Sema::InstantiateClassImpl(
   }
 
   Consumer.HandleTagDeclDefinition(Instantiation);
+  // See InstantiatedClassDefinitions: an end-of-translation-unit pass cannot
+  // reach this specialization any other way when its template came from a PCH.
+  InstantiatedClassDefinitions.push_back(Instantiation);
 
   return Instantiation->isInvalidDecl();
 }
