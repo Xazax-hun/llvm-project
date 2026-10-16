@@ -206,6 +206,13 @@ unsigned getIndirectionDepth(QualType QT, ASTContext &Ctx);
 // assumed to invalidate borrows into the pointed-to owner.
 bool pointsToMutableOwner(QualType GslPointerType);
 
+// The element type of a (possibly multi-dimensional) array type, or T itself.
+// The analysis gives an array one origin shared by all its elements, so every
+// type-based question about an array is asked of its element. As
+// ASTContext::getBaseElementType, cv-qualifiers on the array -- e.g. through a
+// typedef -- carry to the element; unlike it, no ASTContext is needed.
+QualType getBaseElementType(QualType T);
+
 // Returns true if QT is a mutable [[gsl::Owner]] (peeling references and array
 // dimensions): a borrow of such storage can be invalidated by reallocating it.
 // A `const` owner can never be reallocated, so it is excluded.

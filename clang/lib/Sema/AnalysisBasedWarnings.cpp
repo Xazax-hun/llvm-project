@@ -3003,9 +3003,7 @@ LifetimeSafetyTUAnalysis(Sema &S, TranslationUnitDecl *TU,
 static bool typeMayHoldBorrow(QualType QT, unsigned Depth = 0) {
   if (Depth > 8)
     return true; // unknown: assume it might
-  QT = QT.getNonReferenceType();
-  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
-    QT = AT->getElementType();
+  QT = lifetimes::getBaseElementType(QT.getNonReferenceType());
   // A POINTER TO MEMBER counts. It designates a member of a class rather than an
   // object, so it holds no borrow of its own -- but this gate decides whether a
   // constant initializer is analyzed AT ALL, and such an initializer can contain a
@@ -3106,9 +3104,7 @@ static bool exprHidesUncheckedCode(const Stmt *S) {
 /// trivial destructor and a hazardous constructor passes all of them -- and creating an
 /// object inside verified shutdown code runs its constructor there.
 static bool constructionRunsUncheckedCode(QualType QT, SeenTypes &Seen) {
-  QT = QT.getNonReferenceType();
-  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
-    QT = AT->getElementType();
+  QT = lifetimes::getBaseElementType(QT.getNonReferenceType());
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false; // no constructor of ours runs
@@ -3177,9 +3173,7 @@ static bool constructionRunsUncheckedCode(QualType QT) {
 /// subobject: that would report the coarse type-level answer for a plain user member and
 /// lose the precise one.
 static bool constructionHidesUncheckedCode(QualType QT, SeenTypes &Seen) {
-  QT = QT.getNonReferenceType();
-  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
-    QT = AT->getElementType();
+  QT = lifetimes::getBaseElementType(QT.getNonReferenceType());
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
@@ -3383,9 +3377,7 @@ static bool isStdInitializerListDecl(const CXXRecordDecl *RD) {
 /// this is the one that does not.
 static bool holdsUnsafeInitializerList(
     QualType QT, llvm::SmallPtrSet<const CXXRecordDecl *, 8> &Seen) {
-  QT = QT.getNonReferenceType();
-  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
-    QT = AT->getElementType();
+  QT = lifetimes::getBaseElementType(QT.getNonReferenceType());
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   if (!RD || !RD->hasDefinition())
     return false;
@@ -3426,9 +3418,7 @@ static bool holdsUnsafeInitializerList(QualType QT) {
 
 static bool isDestructionOrderSafeType(QualType QT, SeenTypes &Seen,
                                        ShutdownOps Ops) {
-  QT = QT.getNonReferenceType();
-  while (const ArrayType *AT = QT->getAsArrayTypeUnsafe())
-    QT = AT->getElementType();
+  QT = lifetimes::getBaseElementType(QT.getNonReferenceType());
   const CXXRecordDecl *RD = QT->getAsCXXRecordDecl();
   // A class-specific deallocation function is shutdown code that is not a
   // destructor, so it has to be tested BEFORE the trivially-destructible
@@ -4297,11 +4287,9 @@ private:
             RD->getLocation()))
       return;
     for (const FieldDecl *F : RD->fields()) {
-      QualType FT = F->getType();
       // Peel C-array dimensions: an array shares a single origin across its
       // elements, so `T* arr[N]` has the indirection depth of `T*`.
-      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-        FT = AT->getElementType();
+      QualType FT = lifetimes::getBaseElementType(F->getType());
       if (lifetimes::getIndirectionDepth(FT, Ctx) <= 1)
         continue;
       std::string Subject = "field '";

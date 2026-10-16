@@ -174,9 +174,7 @@ static bool recordReachesField(const CXXRecordDecl *RD, const FieldDecl *Field,
     if (recordReachesField(B.getType()->getAsCXXRecordDecl(), Field, Visited))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
-    QualType FT = FD->getType().getNonReferenceType();
-    while (FT->isArrayType())
-      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    QualType FT = getBaseElementType(FD->getType().getNonReferenceType());
     if (recordReachesField(FT->getAsCXXRecordDecl(), Field, Visited))
       return true;
   }
@@ -328,9 +326,7 @@ static bool recordContainsOwnerSubobjectDerivedFrom(
             B.getType()->getAsCXXRecordDecl(), Target, Visited))
       return true;
   for (const FieldDecl *FD : RD->fields()) {
-    QualType FT = FD->getType().getNonReferenceType();
-    while (FT->isArrayType())
-      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    QualType FT = getBaseElementType(FD->getType().getNonReferenceType());
     if (recordContainsOwnerSubobjectDerivedFrom(FT->getAsCXXRecordDecl(), Target,
                                                 Visited))
       return true;

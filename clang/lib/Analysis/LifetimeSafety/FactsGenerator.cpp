@@ -191,13 +191,6 @@ static const MemberExpr *memberThroughArraySubscripts(const Expr *E) {
   return dyn_cast<MemberExpr>(E);
 }
 
-/// Peels array dimensions: `T[N]` / `T[N][M]` -> `T`. The element type a member
-/// access through array subscripts effectively yields.
-static QualType arrayElementType(QualType T) {
-  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
-    T = AT->getElementType();
-  return T;
-}
 
 /// True if the callee can mutate anything through a parameter of type `PT` at all:
 /// it must be a non-const pointer or reference. This is the only thing the
@@ -224,7 +217,7 @@ static bool paramMayMutateOwner(QualType PT) {
     // `arr[0]` exactly as `std::string &` does. Peel before every test below,
     // including the const one -- an array of const elements carries the
     // qualifier on the element type, not on the array.
-    QualType Pointee = arrayElementType(PT->getPointeeType());
+    QualType Pointee = getBaseElementType(PT->getPointeeType());
     if (Pointee.isConstQualified())
       return false;
     if (isGslOwnerType(Pointee))
@@ -535,9 +528,7 @@ void FactsGenerator::VisitDeclStmt(const DeclStmt *DS) {
     // peel array dimensions so `P a[N]` is flagged like the scalar `P a` (the
     // unknown-ownership / owner-/pointer-of-indirection checks otherwise bail on
     // an array type, whose getAsCXXRecordDecl() is null).
-    QualType VDType = VD->getType();
-    while (const ArrayType *AT = VDType->getAsArrayTypeUnsafe())
-      VDType = AT->getElementType();
+    QualType VDType = getBaseElementType(VD->getType());
     if (isUnknownOwnershipType(VDType, FactMgr.getUnknownOwnershipCache()))
       CurrentBlockFacts.push_back(FactMgr.createFact<UntrackedConstructFact>(
           UntrackedConstructReason::UnknownOwnership, VD));
@@ -664,9 +655,7 @@ void FactsGenerator::handleGlobalContainerOfIndirectionUse(const Expr *UseExpr,
     return;
   // Peel array dimensions so a global array of such elements is treated like
   // the scalar (mirrors VisitDeclStmt).
-  QualType T = VD->getType();
-  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
-    T = AT->getElementType();
+  QualType T = getBaseElementType(VD->getType());
   auto &Cache = FactMgr.getUnknownOwnershipCache();
   bool IsPointer = false;
   UntrackedConstructReason Reason;
@@ -841,8 +830,8 @@ void FactsGenerator::handleCXXCtorInitializer(const CXXCtorInitializer *CII) {
   // `S() : view(buf) {}`). Without this only the body-store spelling was caught.
   // The detection is loan-based (the checker intersects the stored value's loans
   // with the enclosing `this` object's), so it is independent of the init shape.
-  if (isGslPointerType(arrayElementType(FD->getType())) ||
-      arrayElementType(FD->getType())->isPointerOrReferenceType())
+  if (isGslPointerType(getBaseElementType(FD->getType())) ||
+      getBaseElementType(FD->getType())->isPointerOrReferenceType())
     if (std::optional<OriginNode *> ThisOrigins =
             FactMgr.getOriginMgr().getThisOrigins())
       if (OriginNode *InitNode = getOriginNode(*CII->getInit()))
@@ -1637,8 +1626,8 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // calls and is independent of the assignment's syntactic shape.
   if (const auto *ME_LHS = memberThroughArraySubscripts(LHSExpr))
     if (const auto *LF = dyn_cast<FieldDecl>(ME_LHS->getMemberDecl());
-        LF && (isGslPointerType(arrayElementType(LF->getType())) ||
-               arrayElementType(LF->getType())->isPointerOrReferenceType())) {
+        LF && (isGslPointerType(getBaseElementType(LF->getType())) ||
+               getBaseElementType(LF->getType())->isPointerOrReferenceType())) {
       // Use the static type of the *receiver object* as the enclosing object,
       // not the type that declares the member. When the member lives in a base
       // class, `ME_LHS->getBase()` is the receiver implicitly cast to that base
@@ -2141,9 +2130,7 @@ void FactsGenerator::maybeReportUntrackedAggregateTemporary(
       auto &Cache = FactMgr.getUnknownOwnershipCache();
       for (const Decl *D : DS->decls())
         if (const auto *VD = dyn_cast<VarDecl>(D)) {
-          QualType VDType = VD->getType();
-          while (const ArrayType *AT = VDType->getAsArrayTypeUnsafe())
-            VDType = AT->getElementType();
+          QualType VDType = getBaseElementType(VD->getType());
           // The same four questions VisitDeclStmt asks, in the same order; any
           // of them reporting means the declaration covers this aggregate.
           bool IsPointer = false;
@@ -2726,7 +2713,7 @@ static bool holdsTypeErasedCallable(QualType PT) {
     return true;
   for (const FieldDecl *F : RD->fields()) {
     const CXXRecordDecl *FRD =
-        arrayElementType(F->getType())->getAsCXXRecordDecl();
+        getBaseElementType(F->getType())->getAsCXXRecordDecl();
     if (FRD && FRD->hasDefinition() && isStdCallableWrapperType(FRD))
       return true;
   }
@@ -2781,7 +2768,7 @@ static bool destructionMayMutateAliasedOwner(QualType PT) {
   if (!RD || !RD->hasDefinition() || !RD->isLambda())
     return false;
   for (const FieldDecl *F : RD->fields())
-    if (paramMayMutateOwner(arrayElementType(F->getType())))
+    if (paramMayMutateOwner(getBaseElementType(F->getType())))
       return true;
   return false;
 }
@@ -2796,7 +2783,7 @@ void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
   // the array type has no CXXRecordDecl and the whole check bailed out, so
   // `Grower arr[1] = {Grower{&v}};` destroyed a guard with the caller's borrows
   // live and reported nothing, while the scalar `Grower g{&v};` reported.
-  Ty = arrayElementType(Ty);
+  Ty = getBaseElementType(Ty);
   const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
   // Destroying an OWNER frees what it owns, which is its job rather than an
   // aliasing hazard -- but an owner can ALSO hold a borrow into something it does

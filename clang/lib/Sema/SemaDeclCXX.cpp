@@ -7131,9 +7131,7 @@ bool destructorMayDeallocate(const CXXRecordDecl *RD, ASTContext &Ctx,
     if (destructorMayDeallocate(B.getType()->getAsCXXRecordDecl(), Ctx, Seen))
       return true;
   for (const FieldDecl *F : RD->fields()) {
-    QualType FT = F->getType();
-    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-      FT = AT->getElementType();
+    QualType FT = lifetimes::getBaseElementType(F->getType());
     if (destructorMayDeallocate(FT->getAsCXXRecordDecl(), Ctx, Seen))
       return true;
   }
@@ -7229,9 +7227,7 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
       for (const FieldDecl *F : RD->fields()) {
         if (F->getAccess() != AS_public)
           continue;
-        QualType FT = F->getType();
-        while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-          FT = AT->getElementType();
+        QualType FT = lifetimes::getBaseElementType(F->getType());
         if ((FT->isPointerType() && !FT->isFunctionPointerType()) ||
             FT->isReferenceType() || lifetimes::isGslPointerType(FT) ||
             lifetimes::isUnknownOwnershipType(FT, BorrowFieldCache))
@@ -7320,9 +7316,7 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
             << /*base*/ 0 << Base << Record << B.getSourceRange();
     }
     for (const FieldDecl *F : Record->fields()) {
-      QualType FT = F->getType();
-      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-        FT = AT->getElementType();
+      QualType FT = lifetimes::getBaseElementType(F->getType());
       const CXXRecordDecl *MemberRD = FT->getAsCXXRecordDecl();
       llvm::SmallPtrSet<const CXXRecordDecl *, 8> Seen;
       if (MemberRD && destructorMayDeallocate(MemberRD, Context, Seen))
@@ -7350,14 +7344,12 @@ void Sema::CheckCompletedCXXClass(Scope *S, CXXRecordDecl *Record) {
            Record->getLocation()))) {
     llvm::DenseMap<const Type *, bool> Cache;
     for (const auto *F : Record->fields()) {
-      QualType FT = F->getType();
       // Peel C-array dimensions so an array member `T arr[N]` is treated like
       // the scalar member `T`. A ConstantArrayType is neither an owner-/pointer-
       // of-indirection nor a class template specialization, so an
       // array-of-owner-of-indirection / array-of-views member would otherwise
       // slip through every check below.
-      while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-        FT = AT->getElementType();
+      QualType FT = lifetimes::getBaseElementType(F->getType());
       if (lifetimes::isGslOwnerOfIndirection(FT, Cache))
         Diag(F->getLocation(), diag::warn_lifetime_safety_owner_of_indirection)
             << FT << F->getSourceRange();

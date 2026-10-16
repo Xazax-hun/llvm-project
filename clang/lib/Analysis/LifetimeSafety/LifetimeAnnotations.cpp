@@ -499,8 +499,7 @@ static bool lambdaCapturesBorrow(const CXXRecordDecl *Lambda,
 static bool fieldTypeHoldsBorrow(QualType T,
                                  llvm::DenseMap<const Type *, bool> &Cache) {
   // Peel array dimensions: `P a[N]` holds a borrow iff `P` does.
-  while (const ArrayType *AT = T->getAsArrayTypeUnsafe())
-    T = AT->getElementType();
+  T = getBaseElementType(T);
   if (isPointerLikeType(T) || T->isReferenceType())
     return true;
   const CXXRecordDecl *RD = T->getAsCXXRecordDecl();
@@ -710,9 +709,7 @@ static QualType findNestedOwnerOrPointerOfIndirectionImpl(
   // the inner record's own definition is suppressed in system headers, so the
   // borrow would slip when Outer is used (local/parameter/return/member).
   for (const FieldDecl *F : RD->fields()) {
-    QualType FT = F->getType();
-    while (const ArrayType *AT = FT->getAsArrayTypeUnsafe())
-      FT = AT->getElementType();
+    QualType FT = getBaseElementType(F->getType());
     if (QualType Found = findNestedOwnerOrPointerOfIndirectionImpl(
             FT, Cache, Visited, IsPointer);
         !Found.isNull())
@@ -836,10 +833,17 @@ bool pointsToMutableOwner(QualType GslPointerType) {
   return Found;
 }
 
+QualType getBaseElementType(QualType T) {
+  unsigned CVR = 0;
+  while (const ArrayType *AT = T->getAsArrayTypeUnsafe()) {
+    CVR |= T.getCVRQualifiers();
+    T = AT->getElementType();
+  }
+  return T.withFastQualifiers(CVR);
+}
+
 bool isMutableOwnerType(QualType QT) {
-  QT = QT.getNonReferenceType();
-  while (QT->isArrayType())
-    QT = QT->getAsArrayTypeUnsafe()->getElementType();
+  QT = getBaseElementType(QT.getNonReferenceType());
   return isGslOwnerType(QT) && !QT.isConstQualified();
 }
 
@@ -902,9 +906,7 @@ static bool reachesMutableOwner(const CXXRecordDecl *RD, OwnerWalkVisited &V,
     // Recurse into a non-owner record field (e.g. an aggregate sub-object that
     // itself holds -- or aliases -- an owner). Owners are leaves: we never
     // descend into them.
-    QualType FT = DeclT.getNonReferenceType();
-    while (FT->isArrayType())
-      FT = FT->getAsArrayTypeUnsafe()->getElementType();
+    QualType FT = getBaseElementType(DeclT.getNonReferenceType());
     if (!isGslOwnerType(FT) &&
         reachesMutableOwner(FT->getAsCXXRecordDecl(), V, AliasOnly))
       return true;
