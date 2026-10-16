@@ -256,12 +256,22 @@ bool recordAliasesMutableOwner(const CXXRecordDecl *RD);
 /// an ArrayRef stays valid while further records are added.
 class FieldListCache {
 public:
-  llvm::ArrayRef<const FieldDecl *> get(const CXXRecordDecl *RD);
+  /// The fields of \p RD and of its bases, base fields first.
+  llvm::ArrayRef<const FieldDecl *> get(const CXXRecordDecl *RD) {
+    return get(RD, /*IncludeBases=*/true);
+  }
+  /// The fields \p RD itself declares.
+  llvm::ArrayRef<const FieldDecl *> getOwn(const CXXRecordDecl *RD) {
+    return get(RD, /*IncludeBases=*/false);
+  }
 
 private:
-  llvm::DenseMap<const CXXRecordDecl *,
-                 std::unique_ptr<llvm::SmallVector<const FieldDecl *, 0>>>
-      Lists;
+  llvm::ArrayRef<const FieldDecl *> get(const CXXRecordDecl *RD,
+                                        bool IncludeBases);
+  using ListMap =
+      llvm::DenseMap<const CXXRecordDecl *,
+                     std::unique_ptr<llvm::SmallVector<const FieldDecl *, 0>>>;
+  ListMap WithBases, Own;
 };
 
 class LifetimeSafetyTUCache {
@@ -277,6 +287,9 @@ public:
   /// collectFieldsIncludingBases, memoized; see FieldListCache.
   llvm::ArrayRef<const FieldDecl *> fieldsIncludingBases(const CXXRecordDecl *RD) {
     return Fields.get(RD);
+  }
+  llvm::ArrayRef<const FieldDecl *> fieldsOf(const CXXRecordDecl *RD) {
+    return Fields.getOwn(RD);
   }
 
   /// OriginManager::hasOrigins, by canonical type, for a function that

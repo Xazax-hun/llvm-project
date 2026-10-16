@@ -3598,8 +3598,9 @@ void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
   if (!ClassDecl)
     return;
 
+  // The class's own fields first, then those of its bases.
   const auto UseFields = [&](const CXXRecordDecl *RD) {
-    for (const auto *Field : RD->fields())
+    for (const auto *Field : FactMgr.getOriginMgr().fieldsOf(RD))
       if (FactMgr.getOriginMgr().isAccessedField(Field))
         if (auto *FieldNode = getOriginNode(*Field))
           CurrentBlockFacts.push_back(
@@ -4534,7 +4535,9 @@ llvm::SmallVector<Fact *> FactsGenerator::issuePlaceholderLoans() {
       for (const OriginNode::Edge &E : N->children())
         Self(Self, E.Child, Tag);
     };
-    // Every field of the record and of its bases, base fields first.
+    // Every field of the record and of its bases, base fields first. All of
+    // them, not only those the body names: a call that may mutate `this`
+    // invalidates every member's seed, and the member then escapes at exit.
     for (const FieldDecl *F :
          FactMgr.getOriginMgr().fieldsIncludingBases(MD->getParent())) {
       // Owners are opaque leaves (a borrow into an owner field is tracked via

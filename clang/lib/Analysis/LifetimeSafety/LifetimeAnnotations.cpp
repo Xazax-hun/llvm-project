@@ -983,13 +983,16 @@ void collectFieldsIncludingBases(const CXXRecordDecl *RD,
 }
 
 llvm::ArrayRef<const FieldDecl *>
-FieldListCache::get(const CXXRecordDecl *RD) {
+FieldListCache::get(const CXXRecordDecl *RD, bool IncludeBases) {
   if (!RD || !RD->hasDefinition())
     return {};
-  auto &Slot = Lists[RD];
+  auto &Slot = (IncludeBases ? WithBases : Own)[RD];
   if (!Slot) {
     Slot = std::make_unique<llvm::SmallVector<const FieldDecl *, 0>>();
-    collectFieldsIncludingBases(RD, *Slot);
+    if (IncludeBases)
+      collectFieldsIncludingBases(RD, *Slot);
+    else
+      llvm::append_range(*Slot, RD->fields());
   }
   return *Slot;
 }

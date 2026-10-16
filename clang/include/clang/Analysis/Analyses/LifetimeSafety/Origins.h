@@ -242,6 +242,10 @@ public:
   fieldsIncludingBases(const CXXRecordDecl *RD) const {
     return TUCache ? TUCache->fieldsIncludingBases(RD) : LocalFields.get(RD);
   }
+  /// The fields \p RD itself declares; memoized.
+  llvm::ArrayRef<const FieldDecl *> fieldsOf(const CXXRecordDecl *RD) const {
+    return TUCache ? TUCache->fieldsOf(RD) : LocalFields.getOwn(RD);
+  }
   bool hasOrigins(const Expr *E) const;
 
   /// The indirection depth of \p QT -- the metric used by the
