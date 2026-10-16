@@ -17,6 +17,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtCXX.h"
+#include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Facts.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LifetimeAnnotations.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/LiveOrigins.h"
@@ -79,6 +80,9 @@ struct PendingWarning {
   const Expr *MovedExpr;
   const Expr *InvalidatedByExpr;
   bool CausingFactDominatesExpiry;
+  /// The expiry or invalidation fact that made the borrow dangle. Pragma
+  /// suppression is decided over the uses that can execute after it.
+  const Fact *Boundary = nullptr;
 };
 
 /// If `AP` names an object -- the implicit `this`, a parameter, or a variable of
@@ -484,6 +488,11 @@ private:
   ASTContext &AST;
   ParentMap &PM;
   const Decl *FD;
+  AnalysisDeclContext &ADC;
+  /// Block and index within it, for the facts whose relative order the pragma
+  /// suppression decision needs (expiries, invalidations and uses).
+  llvm::DenseMap<const Fact *, std::pair<const CFGBlock *, unsigned>>
+      FactPosition;
 
   static SourceLocation
   GetFactLoc(llvm::PointerUnion<const UseFact *, const OriginEscapesFact *> F) {
@@ -507,9 +516,14 @@ public:
                   LifetimeSafetySemaHelper *SemaHelper)
       : LoanPropagation(LoanPropagation), MovedLoans(MovedLoans),
         LiveOrigins(LiveOrigins), FactMgr(FM), SemaHelper(SemaHelper),
-        AST(ADC.getASTContext()), PM(ADC.getParentMap()), FD(ADC.getDecl()) {
-    for (const CFGBlock *B : *ADC.getAnalysis<PostOrderCFGView>())
-      for (const Fact *F : FactMgr.getFacts(B))
+        AST(ADC.getASTContext()), PM(ADC.getParentMap()), FD(ADC.getDecl()),
+        ADC(ADC) {
+    for (const CFGBlock *B : *ADC.getAnalysis<PostOrderCFGView>()) {
+      unsigned Index = 0;
+      for (const Fact *F : FactMgr.getFacts(B)) {
+        if (isa<ExpireFact, InvalidateOriginFact, UseFact>(F))
+          FactPosition[F] = {B, Index};
+        ++Index;
         if (const auto *EF = F->getAs<ExpireFact>())
           checkExpiry(EF);
         else if (const auto *IOF = F->getAs<InvalidateOriginFact>()) {
@@ -559,6 +573,8 @@ public:
           checkNoescapeStoreThroughLValue(DSF);
           checkLocalEscapesIntoCallerObjectStore(DSF);
         }
+      }
+    }
     issuePendingWarnings();
     issueAssumedInvalidations();
     checkUnannotatedParams();
@@ -981,6 +997,7 @@ public:
         CurWarning.ExpiryLoc = EF->getExpiryLoc();
         CurWarning.MovedExpr = MovedExpr;
         CurWarning.InvalidatedByExpr = nullptr;
+        CurWarning.Boundary = EF;
       }
     }
   }
@@ -1246,7 +1263,8 @@ public:
               /*CausingFact=*/LiveInfo.CausingFact,
               /*MovedExpr=*/nullptr,
               /*InvalidatedByExpr=*/IOF->getInvalidationExpr(),
-              /*CausingFactDominatesExpiry=*/CurDomination};
+              /*CausingFactDominatesExpiry=*/CurDomination,
+              /*Boundary=*/IOF};
         }
       }
     }
@@ -3024,7 +3042,11 @@ public:
   /// ignored` around ONE use hide the report for every other use. Collected here
   /// because the checker is the only place that sees all the uses AND runs late
   /// enough to ask about diagnostic state safely.
-  llvm::DenseMap<LoanID, llvm::SmallVector<SourceLocation, 4>> UsesOfLoan;
+  struct UseSite {
+    SourceLocation Loc; // Invalid for an implicit use with no location.
+    const UseFact *Use;
+  };
+  llvm::DenseMap<LoanID, llvm::SmallVector<UseSite, 4>> UsesOfLoan;
 
   void recordUseOfLoans(const UseFact *UF) {
     if (!SemaHelper || UF->isWritten())
@@ -3032,30 +3054,54 @@ public:
     const OriginNode *ON = UF->getUsedOrigins();
     if (!ON)
       return;
+    // An invalid location is kept: such a use cannot be silenced, so it must
+    // still block suppression rather than vanish from the decision.
     SourceLocation Loc =
         UF->isImplicit() ? UF->getImplicitLoc() : UF->getUseExpr()->getExprLoc();
-    if (Loc.isInvalid())
-      return;
     for (LoanID L : LoanPropagation.getLoans(ON->getOriginID(), UF))
-      UsesOfLoan[L].push_back(Loc);
+      UsesOfLoan[L].push_back({Loc, UF});
   }
 
-  /// The uses of `LID` that a report about it is ABOUT: the ones that come
-  /// AFTER the operation which made the borrow dangle. Uses before it are
-  /// perfectly fine and are not what a reader silencing the report means.
-  ///
-  /// `Boundary` is the invalidating expression for an invalidation, or the
-  /// expiry location for a scope end. With none, every use counts, which only
-  /// makes suppression harder.
+  /// True if `Later` can execute after `Earlier` on some path. Decided on the
+  /// CFG, not on source order: in a loop a use written before the expiry runs
+  /// after it on the next iteration, and macro-expansion locations do not
+  /// compare meaningfully with file locations at all.
+  bool canExecuteAfter(const Fact *Earlier, const Fact *Later) {
+    auto EIt = FactPosition.find(Earlier);
+    auto LIt = FactPosition.find(Later);
+    if (EIt == FactPosition.end() || LIt == FactPosition.end())
+      return true; // Unknown position: count it, which only blocks suppression.
+    auto [EB, EIdx] = EIt->second;
+    auto [LB, LIdx] = LIt->second;
+    if (!Reachability)
+      Reachability = ADC.getCFGReachablityAnalysis();
+    if (EB != LB)
+      return Reachability->isReachable(EB, LB);
+    if (LIdx > EIdx)
+      return true;
+    // Same block, not later in it: only via a cycle back into the block.
+    // isReachable(B, B) is always false, so ask through B's successors.
+    for (const CFGBlock *Succ : EB->succs())
+      if (Succ && (Succ == EB || Reachability->isReachable(Succ, EB)))
+        return true;
+    return false;
+  }
+  CFGReverseBlockReachabilityAnalysis *Reachability = nullptr;
+
+  /// The use locations of `LID` that a report about it is ABOUT: the ones that
+  /// can execute AFTER `Boundary`, the fact which made the borrow dangle. Uses
+  /// only before it are fine and are not what a reader silencing the report
+  /// means. With no boundary every use counts, which only makes suppression
+  /// harder.
   llvm::SmallVector<SourceLocation, 4>
-  suppressionCandidates(LoanID LID, SourceLocation Boundary) const {
+  suppressionCandidates(LoanID LID, const Fact *Boundary) {
     llvm::SmallVector<SourceLocation, 4> Out;
     auto It = UsesOfLoan.find(LID);
     if (It == UsesOfLoan.end())
       return Out;
-    for (SourceLocation L : It->second)
-      if (!Boundary.isValid() || !(L < Boundary))
-        Out.push_back(L);
+    for (const UseSite &U : It->second)
+      if (!Boundary || canExecuteAfter(Boundary, U.Use))
+        Out.push_back(U.Loc);
     return Out;
   }
 
@@ -3123,10 +3169,8 @@ public:
           CausingFact = Warning.CausingFact;
       // Every use of this loan, so the reporter can require that the reader
       // silenced all of them before it suppresses anything.
-      SemaHelper->setSuppressionCandidates(suppressionCandidates(
-          LID, Warning.InvalidatedByExpr
-                   ? Warning.InvalidatedByExpr->getExprLoc()
-                   : Warning.ExpiryLoc));
+      SemaHelper->setSuppressionCandidates(
+          suppressionCandidates(LID, Warning.Boundary));
       const ParmVarDecl *InvalidatedPVD =
           L->getAccessPath().getAsPlaceholderParam();
       // A borrow taken through a pointer/view MEMBER of `this` carries the seed
@@ -3269,6 +3313,9 @@ public:
       } else
         llvm_unreachable("Unhandled CausingFact type");
     }
+    // The candidates describe the last warning only; never let them leak into
+    // a report issued later.
+    SemaHelper->setSuppressionCandidates({});
   }
 
   // Returns declarations that should be annotated with lifetime attributes

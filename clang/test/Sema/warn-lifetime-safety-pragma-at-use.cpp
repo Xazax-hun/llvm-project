@@ -138,6 +138,62 @@ void all_uses_suppressed(S *p) {
 }
 
 //===----------------------------------------------------------------------===//
+// "AFTER" MEANS ON THE CFG, NOT IN THE SOURCE.
+//
+// Deciding which uses come after the dangling point by comparing source
+// locations let both of these through silently: in a loop, a use written
+// BEFORE the expiry runs after it on the next iteration; and a location inside
+// a macro expansion compares greater than every file location, so an expiry in
+// a macro excluded every use and the decision fell back to the one named use.
+//===----------------------------------------------------------------------===//
+
+void loop_use_runs_after_expiry() {
+  int *p = nullptr;
+  for (int i = 0; i < 2; ++i) {
+    if (p)
+      sink += *p; // expected-note {{later used here}}
+    int x = i;
+    p = &x;     // expected-warning {{local variable 'x' does not live long enough}}
+  }             // expected-note {{destroyed here}}
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-use-after-scope"
+  sink += *p;
+#pragma clang diagnostic pop
+}
+
+#define BORROW_IN_MACRO(ptr) { int x = 7; ptr = &x; }
+
+void macro_expiry(bool b) {
+  int *p = nullptr;
+  BORROW_IN_MACRO(p) // expected-warning {{local variable 'x' does not live long enough}} \
+                     // expected-note {{destroyed here}}
+  if (b) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-use-after-scope"
+    sink += *p; // expected-note {{later used here}}
+#pragma clang diagnostic pop
+  }
+  sink += *p; // not silenced, so the report survives
+}
+
+// A use that can only run BEFORE the dangling point, even in a loop, stays
+// excluded: the loop below never re-enters the scope of `x` after it ends.
+void loop_use_only_before() {
+  int *p = nullptr;
+  for (int i = 0; i < 2; ++i)
+    sink += i;
+  {
+    int x = 1;
+    p = &x;
+    sink += *p;
+  }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlifetime-safety-use-after-scope"
+  sink += *p; // no-warning
+#pragma clang diagnostic pop
+}
+
+//===----------------------------------------------------------------------===//
 // NOT changed, and worth recording: a pragma around the CREATION still suppresses,
 // because that is the location clang's own state lookup uses. It therefore also
 // silences a use that sits outside the region -- the mirror image of the bug

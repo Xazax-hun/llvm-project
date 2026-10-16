@@ -145,10 +145,11 @@ public:
 
   bool silencedAt(unsigned DiagID, SourceLocation L) const {
     // Over every use of the borrow when the checker supplied them: suppressing
-    // on the named use alone would hide the report for the others.
+    // on the named use alone would hide the report for the others. A use with
+    // no location cannot have been silenced.
     if (!Candidates.empty()) {
       for (SourceLocation C : Candidates)
-        if (!S.getDiagnostics().isSilencedAtNoCreate(DiagID, C))
+        if (!silencedAtOne(DiagID, C))
           return false;
       return true;
     }
