@@ -215,17 +215,6 @@ static bool pathsCannotOverlap(const AccessPath &A, const AccessPath &B) {
   return VA && VB && VA->getCanonicalDecl() != VB->getCanonicalDecl();
 }
 
-/// True if loan `L` borrows a subobject below its root -- i.e. its path names
-/// at least one field -- and that field is a (possibly transitive / inherited)
-/// member of `RD`.
-///
-/// Under the projection model a field borrow keeps its whole prefix
-/// (`w.c.buf`), so the *root* is the enclosing variable, never the field. The
-/// field being borrowed is therefore the last named element of the path. This
-/// remains instance-insensitive by design: it can match a field of a
-/// *different* instance of the same type, a deliberate over-approximation under
-/// the safe model (`isPrefixOf` at the call sites handles the same-instance
-/// case precisely, and this covers the rest).
 /// The deepest field NAMED anywhere in `AP`, ignoring a trailing unknown
 /// subobject. For `o.*.a` and `o.a.*` alike this is `a`.
 ///
@@ -240,6 +229,17 @@ static const FieldDecl *deepestNamedField(const AccessPath &AP) {
   return nullptr;
 }
 
+/// True if loan `L` borrows a subobject below its root -- i.e. its path names
+/// at least one field -- and that field is a (possibly transitive / inherited)
+/// member of `RD`.
+///
+/// Under the projection model a field borrow keeps its whole prefix
+/// (`w.c.buf`), so the *root* is the enclosing variable, never the field. The
+/// field being borrowed is therefore the deepest named element of the path. This
+/// remains instance-insensitive by design: it can match a field of a
+/// *different* instance of the same type, a deliberate over-approximation under
+/// the safe model (`isPrefixOf` at the call sites handles the same-instance
+/// case precisely, and this covers the rest).
 static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
   const FieldDecl *FD = deepestNamedField(L->getAccessPath());
   if (!RD || !FD)
@@ -371,18 +371,18 @@ private:
   /// now aliases the argument. Keyed by parameter to de-duplicate.
   llvm::DenseMap<const ParmVarDecl *, const VarDecl *>
       AnnotatedParamEscapesToGlobalMap;
-  /// Parameters annotated [[clang::lifetime_capture_by(X)]] with X *not* naming
-  /// `this`, whose borrow nonetheless escapes into the enclosing object (a store
-  /// into a field of `this`). The body captures the borrow into `this`, which
-  /// the annotation's named capturer does not describe -- and the annotation
-  /// suppressed the unannotated-indirection backstop, so the real capture went
-  /// unchecked. Keyed by parameter to de-duplicate.
   /// Captured enclosing-function locals whose borrow escapes into the object
   /// from inside a lambda body, mapped to the borrow's issuing expression.
   llvm::DenseMap<const VarDecl *, const Expr *> LambdaCapturedEscapes;
   /// Set once the analyzed assignment operator has been reported for reading
   /// through the borrow its object already holds; one report per operator.
   bool ReportedAssignmentDeref = false;
+  /// Parameters annotated [[clang::lifetime_capture_by(X)]] with X *not* naming
+  /// `this`, whose borrow nonetheless escapes into the enclosing object (a store
+  /// into a field of `this`). The body captures the borrow into `this`, which
+  /// the annotation's named capturer does not describe -- and the annotation
+  /// suppressed the unannotated-indirection backstop, so the real capture went
+  /// unchecked. Keyed by parameter to de-duplicate.
   llvm::DenseSet<const ParmVarDecl *> CaptureByFieldViolations;
   /// '[[clang::lifetimebound]]' parameters whose borrow is also captured into an
   /// object the caller owns, which the annotation does not describe. Maps to the
@@ -929,12 +929,6 @@ public:
     }
   }
 
-  /// Checks for use-after-free & use-after-return errors when an access path
-  /// expires (e.g., a variable goes out of scope).
-  ///
-  /// When a path expires, all loans having this path expires.
-  /// This method examines all live origins and reports warnings for loans they
-  /// hold that are prefixed by the expired path.
   /// True if a warning for loan `LID` caused by `CausingFact` can actually
   /// produce a diagnostic. A loan with an issuing expression, or one rooted at a
   /// placeholder *parameter*, always can -- both are anchors every branch of
@@ -953,6 +947,13 @@ public:
     return CausingFact.dyn_cast<const UseFact *>() != nullptr;
   }
 
+  /// Checks for use-after-free & use-after-return errors when an access path
+  /// expires (e.g., a variable goes out of scope).
+  ///
+  /// When a path expires, every loan of that path, or of a path below it,
+  /// expires with it.
+  /// This method examines all live origins and records a pending warning for
+  /// each such loan they hold.
   void checkExpiry(const ExpireFact *EF) {
     const AccessPath &ExpiredPath = EF->getAccessPath();
     for (auto &[OID, LiveInfo] :
@@ -984,17 +985,6 @@ public:
     }
   }
 
-  /// Checks for use-after-invalidation errors when a container is modified.
-  ///
-  /// This method identifies origins that are live at the point of invalidation
-  /// and checks if they hold loans that are invalidated by the operation
-  /// (e.g., iterators into a vector that is being pushed to).
-  // True if origin `OID` is a borrow *into* an object of record `ObjRD` (a
-  // view, or a raw pointer/reference whose pointee is some sub-buffer), as
-  // opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
-  // which a field mutation does not dangle, and which is how the object's own
-  // `this`/variable origin presents -- so this also excludes the receiver
-  // itself from being reported as a borrow into itself).
   /// Conservative form for deciding whether a holder is SPARED by a mutation of
   /// the object its loan names. Sparing must only happen when we positively know
   /// the holder points AT the object; anything unknown has to count as pointing
@@ -1013,6 +1003,15 @@ public:
     return originBorrowsInto(OID, ObjRD);
   }
 
+  /// True if origin `OID` is a borrow *into* an object of record `ObjRD` (a
+  /// view, or a raw pointer/reference whose pointee is some sub-buffer), as
+  /// opposed to a pointer *at* the whole object (pointee is `ObjRD` itself,
+  /// which a field mutation does not dangle, and which is how the object's own
+  /// `this`/variable origin presents -- so this also excludes the receiver
+  /// itself from being reported as a borrow into itself).
+  ///
+  /// Unknown origins answer false; see originMayBorrowInto for the form that
+  /// must be used when the answer decides whether a holder is spared.
   bool originBorrowsInto(OriginID OID, const CXXRecordDecl *ObjRD) const {
     const Type *Ty = FactMgr.getOriginMgr().getOrigin(OID).Ty;
     if (!Ty)
@@ -1095,6 +1094,11 @@ public:
     }
   }
 
+  /// Checks for use-after-invalidation errors when a container is modified.
+  ///
+  /// This method identifies origins that are live at the point of invalidation
+  /// and checks if they hold loans that are invalidated by the operation
+  /// (e.g., iterators into a vector that is being pushed to).
   void checkInvalidation(const InvalidateOriginFact *IOF) {
     OriginID InvalidatedOrigin = IOF->getInvalidatedOrigin();
     /// Get loans directly pointing to the invalidated container
@@ -1247,18 +1251,6 @@ public:
     }
   }
 
-  /// Soundness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
-  /// loan flowing into the deallocated pointer is not a heap allocation -- the
-  /// analysis cannot then prove the deallocation refers to a live, unaliased
-  /// heap allocation. This is intentionally strict: every loan must be a heap
-  /// allocation. Deallocations inside a destructor are exempt (freeing owned
-  /// members there is the normal ownership pattern) -- UNLESS the enclosing type
-  /// is a [[gsl::Pointer]] view. A view owns nothing, so its destructor must not
-  /// deallocate; a freeing view-destructor is a contract lie that silently turns
-  /// every borrow handed into the view (e.g. via aggregate initialization, which
-  /// has no constructor parameter to flag) into a dangling alias the caller
-  /// cannot see. Verify the body rather than trust the annotation (cf.
-  /// immortal-violation / lifetimebound-violation).
   /// Verifies the '[[clang::lifetime_non_invalidating]]' promise against the
   /// body: the method must not invalidate any of the function's INPUTS -- the
   /// implicit object or a parameter.
@@ -1360,6 +1352,18 @@ public:
     }
   }
 
+  /// Soundness check: a `delete`/`free`/`std::destroy_at` is "naked" if any
+  /// loan flowing into the deallocated pointer is not a heap allocation -- the
+  /// analysis cannot then prove the deallocation refers to a live, unaliased
+  /// heap allocation. This is intentionally strict: every loan must be a heap
+  /// allocation. Deallocations inside a destructor are exempt (freeing owned
+  /// members there is the normal ownership pattern) -- UNLESS the enclosing type
+  /// is a [[gsl::Pointer]] view. A view owns nothing, so its destructor must not
+  /// deallocate; a freeing view-destructor is a contract lie that silently turns
+  /// every borrow handed into the view (e.g. via aggregate initialization, which
+  /// has no constructor parameter to flag) into a dangling alias the caller
+  /// cannot see. Verify the body rather than trust the annotation (cf.
+  /// immortal-violation / lifetimebound-violation).
   void checkNakedDeallocation(const InvalidateOriginFact *IOF) {
     if (!SemaHelper)
       return;
@@ -1386,14 +1390,6 @@ public:
       SemaHelper->reportNakedDeallocation(IOF->getInvalidationExpr());
   }
 
-  /// Records whether this deallocation frees the implicit object, which is what
-  /// verifies an `ownership_takes` naming `this`.
-  ///
-  /// Asked of the LOANS rather than of the syntax, so it holds however the object
-  /// is spelled at the `delete`. The canonical form launders it through two casts
-  /// -- `delete const_cast<T *>(static_cast<const T *>(this))` -- and a
-  /// delegating one frees it in a callee, which reaches here as that call's own
-  /// deallocation fact carrying the same loan.
   /// The first placeholder PARAMETER among `Loans`: storage the caller owns,
   /// reached through a pointer or reference parameter. A by-value parameter is
   /// the callee's own copy, rooted at the parameter variable, so it does not
@@ -1448,6 +1444,14 @@ public:
         LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF));
   }
 
+  /// Records whether this deallocation frees the implicit object, which is what
+  /// verifies an `ownership_takes` naming `this`.
+  ///
+  /// Asked of the LOANS rather than of the syntax, so it holds however the object
+  /// is spelled at the `delete`. The canonical form launders it through two casts
+  /// -- `delete const_cast<T *>(static_cast<const T *>(this))` -- and a
+  /// delegating one frees it in a callee, which reaches here as that call's own
+  /// deallocation fact carrying the same loan.
   void noteDeallocationOfThis(const InvalidateOriginFact *IOF) {
     if (DeallocatesThis)
       return;
@@ -1600,8 +1604,10 @@ public:
   }
 
   /// Soundness: a `const`-trusted member function that hands out a *non-const*
-  /// pointer/reference into a mutable owner reached from the object -- by
-  /// returning it, or storing it to a field/global -- subverts `const`. The
+  /// pointer/reference into a mutable owner reached from the object by
+  /// returning it subverts `const`. (Storing it into global storage is the
+  /// this-escapes-to-global check's to report, and a store into a field of a
+  /// const object needs a `mutable` member, which is refused on its own.) The
   /// caller can mutate the owner through the escaped indirection, invalidating
   /// borrows a sibling accessor returned, which the analysis assumes a const
   /// member function cannot do. (A `const Buf*`/`const Buf&` return is fine: the
@@ -1859,10 +1865,6 @@ public:
     }
   }
 
-  /// indicates a borrow was lost because some construct was not modeled during
-  /// loan propagation (or the pointer is null/uninitialized, which is equally
-  /// untracked). Reports it so that, with the warning enabled as an error, the
-  /// analysis never silently fails to account for a borrow.
   /// An assignment is modeled as kill-then-propagate, which assumes the operator
   /// only RESEATS the borrow. An assignment operator whose body instead reads or
   /// writes THROUGH the borrow the object already holds does more than that, and
@@ -1900,6 +1902,12 @@ public:
     }
   }
 
+  /// Completeness check for the "safe programming model": a read of a
+  /// pointer-like value that the analysis tracks but for which no loan is held
+  /// indicates a borrow was lost because some construct was not modeled during
+  /// loan propagation (or the pointer is null/uninitialized, which is equally
+  /// untracked). Reports it so that, with the warning enabled as an error, the
+  /// analysis never silently fails to account for a borrow.
   void checkLostLoan(const UseFact *UF) {
     if (!SemaHelper || UF->isWritten() || UF->isImplicit() ||
         UF->isPointeeAccess())
@@ -2009,7 +2017,7 @@ public:
   ///
   /// The one permitted interaction with a mutable global is a method call on it
   /// (`global.method()`); that receiver is exempted at the use site (see
-  /// `isStableGlobalMethodReceiver`), and a borrow the method *returns* is checked
+  /// `isMutableGlobalMethodReceiver`), and a borrow the method *returns* is checked
   /// at its own use/escape.
   ///
   /// `OID` is the borrowing value's origin; `Loc`/`Range` anchor the diagnostic.
@@ -2093,7 +2101,7 @@ public:
       // invalidate a view derived from it, and the borrow itself can dangle.
       // This is intentionally broad -- the one permitted interaction with a
       // mutable global is a method call on it (`g.method()`), exempted earlier at
-      // the use site (`isStableGlobalMethodReceiver`); a borrow the method
+      // the use site (`isMutableGlobalMethodReceiver`); a borrow the method
       // *returns* is checked at its own use/escape. (A reference to a stable
       // non-owner scalar member, `int& g.counter`, does not itself dangle, but it
       // is indistinguishable here from a raw pointer into an owner's buffer
@@ -2462,23 +2470,6 @@ public:
     }
   }
 
-  /// Soundness: a [[clang::noescape]] parameter's borrow stored into storage
-  /// reached through ANOTHER parameter (`static void adopt(Box &b, sv s
-  /// [[noescape]]) { b.sv = s; }`). The store leaves the borrow in an object
-  /// the caller owns, which is exactly what the annotation promises does not
-  /// happen.
-  ///
-  /// The `this` spelling of the same body is already reported: member origins
-  /// of the implicit object are seeded at entry, so the store lands on the
-  /// FIELD's origin and function exit emits a FieldEscapeFact the noescape
-  /// verifier consumes. A store through a parameter lands on a transient
-  /// member-access origin instead -- owned by no declaration -- so no escape
-  /// fact is emitted and nothing checked it, though the two bodies mean the
-  /// same thing.
-  ///
-  /// Loan-based: the container's loans say which object is stored into and the
-  /// stored value's loans say what is being parked there, so this does not
-  /// depend on the shape of either expression.
   /// Soundness: a LOCAL's borrow stored into a member of caller-owned storage
   /// dangles as soon as the function returns.
   ///
@@ -2567,6 +2558,23 @@ public:
     }
   }
 
+  /// Soundness: a [[clang::noescape]] parameter's borrow stored into storage
+  /// reached through ANOTHER parameter (`static void adopt(Box &b, sv s
+  /// [[noescape]]) { b.sv = s; }`). The store leaves the borrow in an object
+  /// the caller owns, which is exactly what the annotation promises does not
+  /// happen.
+  ///
+  /// The `this` spelling of the same body is already reported: member origins
+  /// of the implicit object are seeded at entry, so the store lands on the
+  /// FIELD's origin and function exit emits a FieldEscapeFact the noescape
+  /// verifier consumes. A store through a parameter lands on a transient
+  /// member-access origin instead -- owned by no declaration -- so no escape
+  /// fact is emitted and nothing checked it, though the two bodies mean the
+  /// same thing.
+  ///
+  /// Loan-based: the container's loans say which object is stored into and the
+  /// stored value's loans say what is being parked there, so this does not
+  /// depend on the shape of either expression.
   void checkNoescapeStoreIntoParam(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
@@ -2589,39 +2597,6 @@ public:
     }
   }
 
-  /// Soundness: a store whose destination lvalue selects among several objects
-  /// is routed by the loans that lvalue holds (see DynamicStoreFact). This
-  /// confirms the routing actually reached storage; whatever it could not
-  /// resolve is refused, exactly as every such store was refused before the
-  /// routing existed.
-  ///
-  /// Unresolvable means: the lvalue holds no loans at all (it designates
-  /// nothing the analysis tracks), or it holds a loan naming something with no
-  /// origin to store into -- an Unknown borrow from an unmodelled expression,
-  /// or heap storage. A borrow stored through any of those is dropped, and a
-  /// pre-existing concrete loan on the real object would mask the loss, so the
-  /// store must be reported rather than assumed harmless.
-  ///
-  /// This applies to EVERY dynamic store, a capture included. A capture also
-  /// emits a direct flow into the receiver, which for a while looked like
-  /// reason enough to let an unresolved capture pass quietly -- but that flow
-  /// targets the r-value the receiver expression produced, which for anything
-  /// but a plain variable is a throwaway. Treating the direct flow as a
-  /// baseline is what let a capture through a member receiver vanish.
-  /// Soundness: a [[clang::noescape]] borrow stored through an lvalue that
-  /// names CALLER-OWNED storage escapes, exactly as a store into a field of
-  /// `this` or through a parameter does.
-  ///
-  /// The field-store path only sees a store into a NAMED member, so
-  /// `*this = S{q}` -- which writes the whole object -- escaped unreported
-  /// while `v = q` one line away was caught. The escape check at function exit
-  /// does not cover it either: it inspects the FIELD origins, and a
-  /// gsl::Pointer record is a single leaf origin with no field edges, so the
-  /// borrow deposited on the object is on no field's origin.
-  ///
-  /// The destination's loans must be read from BEFORE the store: afterwards the
-  /// lvalue also holds the payload, whose own loans are parameter placeholders
-  /// -- which would make the destination look like a parameter.
   /// Soundness: a LOCAL of this call stored into an object the CALLER owns by a
   /// WHOLE-OBJECT store. The destination outlives the call and the local does not,
   /// so this always dangles -- and no liveness question is needed, exactly as for
@@ -2633,7 +2608,8 @@ public:
   /// caller, so nothing here keeps it live and expiry never fires either.
   ///
   /// The destination's loans are read from BEFORE the store, for the same reason as
-  /// the noescape check below: afterwards the lvalue also holds the payload.
+  /// the noescape check (checkNoescapeStoreThroughLValue): afterwards the lvalue
+  /// also holds the payload.
   void checkLocalEscapesIntoCallerObjectStore(const DynamicStoreFact *DSF) {
     if (!SemaHelper)
       return;
@@ -2656,6 +2632,20 @@ public:
     }
   }
 
+  /// Soundness: a [[clang::noescape]] borrow stored through an lvalue that
+  /// names CALLER-OWNED storage escapes, exactly as a store into a field of
+  /// `this` or through a parameter does.
+  ///
+  /// The field-store path only sees a store into a NAMED member, so
+  /// `*this = S{q}` -- which writes the whole object -- escaped unreported
+  /// while `v = q` one line away was caught. The escape check at function exit
+  /// does not cover it either: it inspects the FIELD origins, and a
+  /// gsl::Pointer record is a single leaf origin with no field edges, so the
+  /// borrow deposited on the object is on no field's origin.
+  ///
+  /// The destination's loans must be read from BEFORE the store: afterwards the
+  /// lvalue also holds the payload, whose own loans are parameter placeholders
+  /// -- which would make the destination look like a parameter.
   void checkNoescapeStoreThroughLValue(const DynamicStoreFact *DSF) {
     if (!SemaHelper)
       return;
@@ -2681,6 +2671,25 @@ public:
     }
   }
 
+  /// Soundness: a store whose destination lvalue selects among several objects
+  /// is routed by the loans that lvalue holds (see DynamicStoreFact). This
+  /// confirms the routing actually reached storage; whatever it could not
+  /// resolve is refused, exactly as every such store was refused before the
+  /// routing existed.
+  ///
+  /// Unresolvable means: the lvalue holds no loans at all (it designates
+  /// nothing the analysis tracks), or it holds a loan naming something with no
+  /// origin to store into -- an Unknown borrow from an unmodelled expression,
+  /// or heap storage. A borrow stored through any of those is dropped, and a
+  /// pre-existing concrete loan on the real object would mask the loss, so the
+  /// store must be reported rather than assumed harmless.
+  ///
+  /// This applies to EVERY dynamic store, a capture included. A capture also
+  /// emits a direct flow into the receiver, which for a while looked like
+  /// reason enough to let an unresolved capture pass quietly -- but that flow
+  /// targets the r-value the receiver expression produced, which for anything
+  /// but a plain variable is a throwaway. Treating the direct flow as a
+  /// baseline is what let a capture through a member receiver vanish.
   void checkDynamicStore(const DynamicStoreFact *DSF) {
     // The verdict is LoanPropagation's: it is the only place with the pre-store
     // state, and it is where the routing decides what it could reach, so the
@@ -3083,26 +3092,19 @@ public:
         InteriorProjectionOf[*Base] = LID;
     }
     for (const auto &[LID, Warning] : FinalWarningsMap) {
+      const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
       // FinalWarningsMap is keyed by loan, and an Interior (`.*`) projection
       // describes the same borrow as its base -- `$m` and `$m.*` both stand for
       // the borrow taken through member `m`, since `.*` adds no storage of its
       // own. Both can be invalidated by one operation, which would emit two
-      // diagnostics for one bug.
-      //
-      // Keep whichever is anchored at a USE. The base of such a projection is
-      // typically a seeded loan with no anchor of its own, which falls back to
-      // blaming the member declaration; the projection carries the use that
-      // actually reads the dangling borrow, which is the better report.
-      const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
-      // An Interior (`.*`) projection and its base describe the same borrow --
-      // `.*` adds no storage of its own -- so reporting both emits two
-      // diagnostics for one bug. Keep exactly one.
+      // diagnostics for one bug, so keep exactly one.
       //
       // Prefer the one caused by a USE: it points at the read that actually
       // touches the dangling borrow, whereas an escape has no such site and
-      // falls back to blaming a member declaration. When neither is use-caused
-      // the two reports are equivalent, so keep the base and drop the
-      // projection, which is the pre-existing attribution.
+      // falls back to blaming a member declaration (the base of such a
+      // projection is typically a seeded loan with no anchor of its own). When
+      // neither is use-caused the two reports are equivalent, so keep the base
+      // and drop the projection, which is the pre-existing attribution.
       auto CausedByUse = [&](LoanID Other) {
         return FinalWarningsMap.lookup(Other)
                    .CausingFact.template dyn_cast<const UseFact *>() != nullptr;

@@ -320,15 +320,6 @@ static bool isSetjmpLongjmp(const FunctionDecl *FD) {
   return false;
 }
 
-/// Returns true if `MD` is known not to invalidate borrows into the object it is
-/// called on: either it carries `[[clang::lifetime_non_invalidating]]`, or it is
-/// a recognized non-invalidating accessor of a standard library type -- one that
-/// returns a borrow into the container (or smart pointer pointee) without
-/// reallocating it. Non-const member calls on an owner are otherwise
-/// conservatively assumed to invalidate; this keeps the common read accessors
-/// (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...) from being treated as
-/// mutating. The std allow-list is by name and so cannot cover user types; those
-/// use the attribute.
 /// Whether \p Closure, a lambda's closure type, captured `this`.
 static bool capturesThis(const CXXRecordDecl *Closure) {
   llvm::DenseMap<const ValueDecl *, FieldDecl *> Captures;
@@ -352,6 +343,15 @@ static bool containsMaterializedTemporary(const Expr *E) {
   return false;
 }
 
+/// Returns true if `MD` is known not to invalidate borrows into the object it is
+/// called on: either it carries `[[clang::lifetime_non_invalidating]]`, or it is
+/// a recognized non-invalidating accessor of a standard library type -- one that
+/// returns a borrow into the container (or smart pointer pointee) without
+/// reallocating it. Non-const member calls on an owner are otherwise
+/// conservatively assumed to invalidate; this keeps the common read accessors
+/// (`v[i]`, `v.at(i)`, `v.data()`, `m.find(k)`, `*p`, ...) from being treated as
+/// mutating. The std allow-list is by name and so cannot cover user types; those
+/// use the attribute.
 static bool isNonInvalidatingMethod(const CXXMethodDecl &MD) {
   // An explicit promise from the author covers user-defined owners, whose
   // accessors the name-based allow-list below cannot recognize.
@@ -1353,12 +1353,6 @@ void FactsGenerator::VisitUnaryOperator(const UnaryOperator *UO) {
   case UO_PostInc:
   case UO_PreDec:
   case UO_PostDec: {
-    // Incrementing a NON-pointer lvalue reached through a pointer reads and
-    // writes the pointee, so it is an access: `p->id++` touches `*p` exactly as
-    // `p->id = 1` does. It is not an assignment, so handleAssignment never sees
-    // it. (For a pointer operand this is the pointer's own arithmetic, handled
-    // below, and not an access of anything.)
-
     // Incrementing/decrementing a pointer keeps it aimed into the same
     // allocation, and unary plus on a pointer is the identity -- so the result
     // carries the operand's loans. Without this a borrow used via the result
@@ -1423,19 +1417,6 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // (see WritesPartOfDestination).
   const QualType SpelledDestTy = LHSExpr->getType().getNonReferenceType();
   LHSExpr = LHSExpr->IgnoreParenImpCasts();
-  // A STORE through a pointer touches the pointee just as a load does, and it is
-  // not spelled with an lvalue-to-rvalue conversion -- so `p->~S(); p->id = 1;`
-  // and the cursor idiom `w++->id = 1;` had no use of the pointee at all.
-  //
-  // Only when the destination is reached BY FOLLOWING a pointer. Writing a
-  // variable, or a member of a local object, overwrites that storage rather than
-  // something a pointer designates, and is already modelled as a write that kills
-  // the destination's loans.
-  // Marked on the BASE, i.e. on the thing written THROUGH -- not on the
-  // destination lvalue. In `q->f = v` the object touched is `*q`, so `q` is what
-  // must be live; the destination's own origin holds the value being REPLACED,
-  // and overwriting a dangling value is not a use of it. Marking the destination
-  // reported `this->p = kGlobal.data();` as a use of whatever `p` held before.
   // Look through a value-preserving explicit reference cast on the destination
   // (e.g. `static_cast<int*&>(p) = ...` or the C-style `(int*&)p = ...`), which
   // preserves the underlying lvalue but is not stripped by IgnoreParenImpCasts.
@@ -1531,18 +1512,7 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // Whether this assignment writes only PART of the destination object. Assigning
   // to a base subobject (`static_cast<B &>(d) = B{...}`, or the same call spelled
   // `d.B::operator=(B{...})`) reaches the base and nothing else, but a
-  // [[gsl::Pointer]] object is a single origin, so the base subobject and the whole
-  // object ARE that one origin. Killing it discards borrows the store never touched
-  // -- including one held by a member the derived class adds -- so a genuine dangle
-  // in it went silent while the same code without the base assignment reported.
-  //
-  // Asked as "is the type being assigned the type the destination origin records?":
-  // a whole-object store answers yes, a slice of it answers no. An origin with no
-  // recorded type keeps the precise behaviour, so this cannot turn into a blanket
-  // merge on shapes that have nothing to do with base subobjects.
-  // Whether this assignment writes only PART of the destination object. Assigning
-  // to a base subobject reaches the base and nothing else, but a [[gsl::Pointer]]
-  // object is a single origin, so the base subobject and the whole object ARE that
+  // [[gsl::Pointer]] object is a single origin, so the base subobject and the whole object ARE that
   // one origin -- and the casts that name the base are stripped above (the
   // derived-to-base reference cast by the value-preserving-cast loop, the implicit
   // one by IgnoreParenImpCasts), leaving a store that looks like it covers
@@ -1557,7 +1527,7 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
   // LHSType is left null for a destination that is neither a DeclRefExpr nor a
   // MemberExpr (an array subscript, say), so it must be checked before use.
   const bool WritesPartOfDestination =
-      !SpelledDestTy.isNull() && !LHSType.isNull() &&
+      !LHSType.isNull() &&
       SpelledDestTy->getAsCXXRecordDecl() &&
       LHSType.getNonReferenceType()->getAsCXXRecordDecl() &&
       SpelledDestTy.getCanonicalType() !=
@@ -1814,10 +1784,6 @@ void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
     return;
   }
   if (BO->isCompoundAssignmentOp()) {
-    // A compound assignment READS AND WRITES its destination, so it touches the
-    // pointee; it returns before reaching handleAssignment, so it needs its own
-    // marking. `p->id += 1` is as much an access as `p->id = 1`.
-
     // A compound assignment reads AND writes its left operand, and both happen
     // AFTER the right operand is evaluated -- so if the RHS invalidates what
     // the LHS borrows, the write goes through a dangling borrow. The LHS's own
@@ -1852,7 +1818,6 @@ void FactsGenerator::VisitBinaryOperator(const BinaryOperator *BO) {
   handleUse(BO->getRHS());
   if (BO->isAssignmentOp())
     handleAssignment(BO, BO->getLHS(), BO->getRHS());
-  // TODO: Handle assignments involving dereference like `*p = q`.
 }
 
 /// Finds the CFG predecessor of \p MergeBlock that evaluates \p ArmExpr -- i.e.
@@ -2332,10 +2297,9 @@ void FactsGenerator::VisitLambdaExpr(const LambdaExpr *LE) {
     }
     if (!InitNode)
       continue;
-    // FIXME: Consider flowing all origin levels once lambdas support more than
-    // one origin. Currently only the outermost origin is flowed, so by-ref
-    // captures like `[&p]` (where p is string_view) miss inner-level
-    // invalidation.
+    // Only the outermost origin is flowed: a lambda has one origin. A by-ref
+    // capture of an indirection (`[&p]` with p a string_view), whose inner
+    // level this would lose, is refused above as LambdaRefCaptureIndirection.
     CurrentBlockFacts.push_back(FactMgr.createFact<OriginFlowFact>(
         LambdaNode->getOriginID(), InitNode->getOriginID(), Kill));
     Kill = false;
@@ -2650,9 +2614,8 @@ bool FactsGenerator::escapesViaReturn(OriginID OID) const {
 /// in the member live up to that point, so a local that died at the end of the
 /// body is reported as not living long enough.
 ///
-/// Owners are excluded (their destruction frees their own storage, already modeled
-/// by expiry, rather than dereferencing a borrow into something else), and a
-/// trivial destructor cannot read anything.
+/// Which destructions count is handleDestructionOfBorrowHolder's question, shared
+/// with every other way an object is destroyed.
 void FactsGenerator::handleMemberDtor(const CFGMemberDtor &MemberDtor) {
   const FieldDecl *FD = MemberDtor.getFieldDecl();
   if (!FD)
@@ -2720,35 +2683,10 @@ static bool holdsTypeErasedCallable(QualType PT) {
   return false;
 }
 
-/// Models the destruction of an object that may hold a borrow.
+/// Returns true if destroying an object of type `PT` runs a destructor that may
+/// reallocate an owner the object only ALIASES, so borrows into that owner die
+/// with it.
 ///
-/// Shared by every way an object can be destroyed, because the hazard does not
-/// depend on how: a scope ending, a temporary's full-expression cleanup, or an
-/// enclosing object's destructor running for a member. Modelling it only for a
-/// named local meant an unnamed guard -- `(void)Grower{&v}.vec;` -- and a guard
-/// held as a MEMBER of another object were both silent, while the
-/// byte-identical named local was reported.
-///
-/// A non-trivial destructor may READ a borrow the object holds (a
-/// [[gsl::Pointer]] whose
-/// `~T()` dereferences its captured view), and the analysis is intra-procedural
-/// and cannot see that body -- so model the destruction as a use, keeping the
-/// borrow live to this point. Owners are excluded: destroying one frees its own
-/// storage, which the expiry already models, rather than dereferencing a borrow
-/// into another object.
-///
-/// It may also MUTATE the owner it captured -- `~Trigger() { o->grow(); }`
-/// reallocates -- which the analysis equally cannot see. Treat that as an
-/// assumed invalidation of the borrows the object carries on its captured
-/// owner, so a view into that owner living past the guard is reported while one
-/// used only during the guard's lifetime is not. Gated on paramMayMutateOwner,
-/// the same test used for call arguments, so a guard aliasing only a const
-/// owner is not flagged. A gsl::Pointer is a leaf in the origin tree, so the
-/// captured borrow sits on the object's own origin; invalidate that and its
-/// whole pointee chain (the latter for a nested wrapper reaching the owner
-/// through a by-value gsl::Pointer member). Returns true if destroying an
-/// object of type `PT` runs a destructor that may reallocate an owner the
-/// object only ALIASES, so borrows into that owner die with it.
 /// `paramMayMutateOwner` answers this for a pointer/reference and for a
 /// gsl::Pointer wrapper; a LAMBDA closure is neither, yet destroying one runs
 /// every capture's destructor -- so an init-capture of a guard
@@ -2773,6 +2711,32 @@ static bool destructionMayMutateAliasedOwner(QualType PT) {
   return false;
 }
 
+/// Models the destruction of an object that may hold a borrow.
+///
+/// Shared by every way an object can be destroyed, because the hazard does not
+/// depend on how: a scope ending, a temporary's full-expression cleanup, or an
+/// enclosing object's destructor running for a member. Modelling it only for a
+/// named local meant an unnamed guard -- `(void)Grower{&v}.vec;` -- and a guard
+/// held as a MEMBER of another object were both silent, while the
+/// byte-identical named local was reported.
+///
+/// A non-trivial destructor may READ a borrow the object holds (a
+/// [[gsl::Pointer]] whose `~T()` dereferences its captured view), and the
+/// analysis is intra-procedural and cannot see that body -- so model the
+/// destruction as a use, keeping the borrow live to this point. That includes
+/// an owner holding a borrow into something it does not own; see the body for
+/// why owners are no longer excluded.
+///
+/// It may also MUTATE the owner it captured -- `~Trigger() { o->grow(); }`
+/// reallocates -- which the analysis equally cannot see. Treat that as an
+/// assumed invalidation of the borrows the object carries on its captured
+/// owner, so a view into that owner living past the guard is reported while one
+/// used only during the guard's lifetime is not. Gated on paramMayMutateOwner,
+/// the same test used for call arguments, so a guard aliasing only a const
+/// owner is not flagged. A gsl::Pointer is a leaf in the origin tree, so the
+/// captured borrow sits on the object's own origin; invalidate that and its
+/// whole pointee chain (the latter for a nested wrapper reaching the owner
+/// through a by-value gsl::Pointer member).
 void FactsGenerator::handleDestructionOfBorrowHolder(QualType Ty,
                                                      OriginNode *Node,
                                                      const Stmt *Trigger,
@@ -2873,9 +2837,7 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   // body, so model the destruction as a *use* of the object: this keeps the
   // borrow live up to the destruction point, so that a borrowed-from object
   // destroyed earlier (reverse-declaration-order) is reported at its expiry.
-  // Owners are excluded -- their destruction frees their own storage (already
-  // modeled by the ExpireFact) rather than dereferencing a borrow into another
-  // object. A trivial destructor cannot read the borrow.
+  // Which destructions count is handleDestructionOfBorrowHolder's question.
   QualType VDTy = LifetimeEndsVD->getType();
   if (OriginNode *Node = getOriginNode(*LifetimeEndsVD))
     handleDestructionOfBorrowHolder(VDTy, Node, LifetimeEnds.getTriggerStmt(),
@@ -3792,10 +3754,6 @@ static bool isComparisonOperator(const FunctionDecl *FD) {
   }
 }
 
-// Soundness: flag arguments bound to origin-carrying parameters (raw
-// pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
-// are not modeled via GSL recognition. The analysis cannot tell whether such a
-// borrow escapes the call. Runs independently of the call's return type.
 /// Soundness: a DEFAULT ARGUMENT that materializes a temporary. The expression
 /// belongs to the callee's declaration rather than to the caller, so the CFG does
 /// not contain it -- adding it would make one Expr appear at every call site
@@ -3830,6 +3788,10 @@ void FactsGenerator::handleDefaultArgTemporaries(
   }
 }
 
+// Soundness: flag arguments bound to origin-carrying parameters (raw
+// pointer/reference, gsl::Pointer, etc.) that carry no lifetime annotation and
+// are not modeled via GSL recognition. The analysis cannot tell whether such a
+// borrow escapes the call. Runs independently of the call's return type.
 void FactsGenerator::handleUnannotatedIndirectionArgs(
     const FunctionDecl *FD, ArrayRef<const Expr *> Args) {
   const auto *Method = dyn_cast<CXXMethodDecl>(FD);
@@ -3995,7 +3957,6 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
                                         ArrayRef<const Expr *> Args,
                                         bool IsGslConstruction) {
   OriginNode *CallNode = getOriginNode(*Call);
-  // Ignore functions returning values with no origin.
   FD = getDeclWithMergedLifetimeBoundAttrs(FD);
   if (!FD) {
     // The callee could not be resolved to a function (e.g. a call through a
@@ -4007,11 +3968,6 @@ void FactsGenerator::handleFunctionCall(const Expr *Call,
   }
   // All arguments to a function are a use of the corresponding expressions.
   //
-  // An argument bound to a reference or pointer parameter leaves the callee
-  // aliasing the object, so the borrow of the object ITSELF is what is used --
-  // not the value read out of it. A copy or move constructor (or assignment) is
-  // excluded: it also binds a reference, but produces an independent object, and
-  // `return g;` reaches this path through exactly that binding.
   // An argument bound to a reference or pointer parameter leaves the callee
   // aliasing the object, so the borrow of the object ITSELF is what is used --
   // not the value read out of it.
@@ -4349,7 +4305,10 @@ bool FactsGenerator::handleTestPoint(const CXXFunctionalCastExpr *FCE) {
   return false;
 }
 
-/// Registers an ACCESS of the lvalue \p E -- a load or a store -- as a use.
+/// Registers a LOAD from the lvalue \p E as an access of the pointee. A store
+/// needs no hook: forming its destination by following a pointer (`->`, `*`,
+/// `[]`) already reads that pointer as an access (see classifyUse), uniformly
+/// for reads and writes.
 ///
 /// Exempt from the lost-loan sentinel: that sentinel reads "a use of an origin
 /// holding no loan" as "a borrow was lost", which is the right inference for a

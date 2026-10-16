@@ -24,9 +24,6 @@
 
 namespace clang::lifetimes::internal {
 
-// Prepass to find persistent origins. An origin is persistent if it is
-// referenced in more than one basic block.
-
 namespace {
 
 /// Represents the dataflow lattice for loan propagation.

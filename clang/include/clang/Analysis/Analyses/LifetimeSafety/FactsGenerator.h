@@ -42,8 +42,6 @@ public:
   void VisitDeclRefExpr(const DeclRefExpr *DRE);
   void VisitCXXConstructExpr(const CXXConstructExpr *CCE);
   void VisitCXXDefaultInitExpr(const CXXDefaultInitExpr *DIE);
-  /// Replays the "this construct is not modeled" refusals for an expression the CFG
-  /// does not descend into, so they are not lost where no Visit method ever runs.
   void VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE);
   void VisitMemberExpr(const MemberExpr *ME);
   void VisitCallExpr(const CallExpr *CE);
@@ -204,11 +202,13 @@ private:
   void handleLifetimeCaptureBy(const FunctionDecl *FD,
                                ArrayRef<const Expr *> Args);
 
+  // Soundness: refuses a default argument that materializes a temporary the
+  // CFG never contains, when the parameter lets the borrow outlive the call.
+  void handleDefaultArgTemporaries(const FunctionDecl *FD,
+                                   llvm::ArrayRef<const Expr *> Args);
   // Soundness ("safe programming model"): flags call arguments bound to
   // origin-carrying parameters that carry no lifetime annotation and are not
   // modeled via GSL recognition.
-  void handleDefaultArgTemporaries(const FunctionDecl *FD,
-                                   llvm::ArrayRef<const Expr *> Args);
   void handleUnannotatedIndirectionArgs(const FunctionDecl *FD,
                                         ArrayRef<const Expr *> Args);
 
@@ -273,7 +273,7 @@ private:
   /// If so, creates a `TestPointFact` and returns true.
   bool handleTestPoint(const CXXFunctionalCastExpr *FCE);
 
-  /// Registers an access (load or store) of the lvalue `E` as a use.
+  /// Registers a load from the lvalue `E` as an access of the pointee.
   void markPointeeAccess(const Expr *E);
 
   /// Classifies how the value read from `E` touches the pointer: see UseShape.

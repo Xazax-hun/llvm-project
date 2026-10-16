@@ -287,19 +287,11 @@ public:
             const OriginManager &OM) const override;
 };
 
-/// Represents an origin captured into the implicit object (`this`) via a
-/// [[clang::lifetime_capture_by(this)]] parameter at a call site -- e.g.
-/// `obj.capture(arg)` where `capture`'s parameter is annotated
-/// capture_by(this). The captured borrow becomes reachable from the (caller's)
-/// object, so if it is a [[clang::noescape]] parameter of the analyzed
-/// function, that noescape promise is violated. Unlike a Field escape this
-/// carries no specific member (the capture target is the whole object), so it
-/// records the capturing call expression for the diagnostic.
 /// A borrow resting in the implicit object when the function returns.
 ///
 /// The object outlives the call, so whatever it holds outlives it too. Unlike
 /// FieldEscapeFact this names no member: the borrow may have arrived by a
-/// whole- object assignment, a placement new, or a helper that captured it, and
+/// whole-object assignment, a placement new, or a helper that captured it, and
 /// the analysis models those as landing on the object rather than on one field.
 ///
 /// Exists for ANNOTATION VERIFICATION -- a parameter whose declaration does not
@@ -320,6 +312,14 @@ public:
             const OriginManager &) const override;
 };
 
+/// Represents an origin captured into the implicit object (`this`) via a
+/// [[clang::lifetime_capture_by(this)]] parameter at a call site -- e.g.
+/// `obj.capture(arg)` where `capture`'s parameter is annotated
+/// capture_by(this). The captured borrow becomes reachable from the (caller's)
+/// object, so if it is a [[clang::noescape]] parameter of the analyzed
+/// function, that noescape promise is violated. Unlike a Field escape this
+/// carries no specific member (the capture target is the whole object), so it
+/// records the capturing call expression for the diagnostic.
 class CapturedByThisEscapeFact : public OriginEscapesFact {
   const Expr *CaptureExpr;
 
@@ -798,11 +798,6 @@ public:
             const OriginManager &) const override;
 };
 
-/// A borrow stored into a view/pointer data member `obj.field = ...`. Records
-/// the stored value's origin and the origin of the destination's enclosing
-/// object, so the checker can flag a self-referential object: one where the
-/// stored value borrows the same object that holds the member (they share an
-/// object-identity loan). Carries no dataflow state.
 /// A store routed by the loans its destination lvalue holds.
 ///
 /// `handleAssignment` normally finds one destination origin from the shape of
@@ -847,6 +842,11 @@ public:
             const OriginManager &OM) const override;
 };
 
+/// A borrow stored into a view/pointer data member `obj.field = ...`. Records
+/// the stored value's origin and the origin of the destination's enclosing
+/// object, so the checker can flag a self-referential object: one where the
+/// stored value borrows the same object that holds the member (they share an
+/// object-identity loan). Carries no dataflow state.
 class FieldStoreFact : public Fact {
   /// The destination member expression (`obj.field`), for diagnostics.
   const Expr *StoreExpr;

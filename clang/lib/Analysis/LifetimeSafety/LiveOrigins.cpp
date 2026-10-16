@@ -202,16 +202,12 @@ public:
       // Read makes origin live with definite confidence (dominates this
       // point).
       //
-      // The "can the pointer still be followed?" bits must ACCUMULATE over the
-      // uses forward of here rather than be replaced, or a harmless use sitting
-      // between a lifetime-ending event and a real dereference would answer for
-      // both -- backwards, this use is reached after the dereference, and simply
-      // storing its own shape would forget the dereference. See LivenessInfo.
-      // Both bits only ever accumulate -- nothing CLEARS them. Pointer
-      // Accumulates over every forward use and is never cleared: see
-      // LivenessInfo. Storing only this use's own shape would let a harmless use
-      // between a lifetime-ending event and a real dereference answer for both,
-      // since backwards this use is reached AFTER that dereference. A use already
+      // The "can the pointer still be followed?" bit must ACCUMULATE over the
+      // uses forward of here rather than be replaced, and nothing clears it, or
+      // a harmless use sitting between a lifetime-ending event and a real
+      // dereference would answer for both -- backwards, this use is reached
+      // after the dereference, and storing only its own shape would forget the
+      // dereference. See LivenessInfo.
       bool SameTarget = UF.getShape() == UseShape::AccessesPointee;
       // Prefer an ACCESS of the pointee as the causing fact. It is what makes a
       // use-after-lifetime-end an error, so it is the right thing for the

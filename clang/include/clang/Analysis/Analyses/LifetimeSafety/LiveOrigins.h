@@ -68,11 +68,11 @@ struct LivenessInfo {
   /// only the *nearest* use: a harmless one between a lifetime-ending event and a
   /// real dereference would otherwise answer for both.
   ///
-  /// KNOWN: because the anchor is still `CausingFact`, the "later used here" note
-  /// points at that nearest use -- the increment in
-  /// `for (S *c = b; c != e; ++c) c->~S();` -- rather than at the dereference
-  /// that makes it an error. Carrying the following use here to anchor with
-  /// instead lost 10 corpus reports and was reverted; it needs its own look.
+  /// The "later used here" note points at `CausingFact`, which the use
+  /// transfer and the join both prefer to be an ACCESS of the pointee over a
+  /// nearer use that merely computes with the pointer, so the note for
+  /// `for (S *c = b; c != e; ++c) c->~S();` lands on the destructor call rather
+  /// than on the increment.
   ///
   /// Consulted ONLY where an object's lifetime ended while its STORAGE SURVIVES
   /// (an explicit destructor call) -- the one case where merely holding the

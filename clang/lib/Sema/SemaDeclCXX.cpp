@@ -19124,9 +19124,10 @@ bool Sema::CheckOverridingFunctionAttributes(CXXMethodDecl *New,
   // referent undetected. (The opposite direction, dropping 'noescape', is
   // covered by -Wmissing-noescape above.) These diagnostics are off by default
   // and only fire under the lifetime-safety validation/soundness groups, so
-  // gate the work on the groups being enabled. Each contract below lives in its
-  // own group, so test each -- gating everything on one of them silently
-  // disables the others when only that one is off.
+  // gate the work on the groups being enabled. The contracts below live in
+  // different groups (the two non_invalidating diagnostics share one), so test
+  // each -- gating everything on one of them silently disables the others when
+  // only that one is off.
   if (!Diags.isIgnored(
           diag::warn_lifetime_safety_override_param_adds_lifetimebound,
           New->getLocation()) ||

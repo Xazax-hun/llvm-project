@@ -696,9 +696,9 @@ OriginManager::getOriginForAccessPath(const AccessPath &AP) const {
 
 namespace clang::lifetimes {
 unsigned getIndirectionDepth(QualType QT, ASTContext &Ctx) {
-  // Reuse the analysis's origin-tree builder so this stays in sync with how
-  // declarations are modeled; a standalone manager has no body context, so its
-  // pointee-chain length is the purely structural indirection depth.
+  // A standalone manager has no body context; the question is purely about the
+  // type. Reusing it keeps hasOrigins -- which decides depth 0 -- the same
+  // predicate the analysis uses.
   return internal::OriginManager(Ctx).getIndirectionDepth(QT);
 }
 } // namespace clang::lifetimes

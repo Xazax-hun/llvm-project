@@ -158,8 +158,8 @@ public:
   OriginNode *getParent() const { return Parent; }
   void setParent(OriginNode *P) { Parent = P; }
 
-  // Used for assertion checks only (to ensure pointee chains have matching
-  // lengths).
+  /// The number of levels in this node's pointee chain. Two origin trees can
+  /// be flowed level by level only when their lengths match.
   size_t getLength() const {
     size_t Length = 1;
     const OriginNode *T = this;
@@ -236,13 +236,13 @@ public:
   bool hasOrigins(QualType QT) const;
   bool hasOrigins(const Expr *E) const;
 
-  /// The pointee-chain length of \p QT's origin tree -- the depth metric used
-  /// by the single-indirection rule. Returns 0 if the type bears no origins, 1
-  /// for a single indirection (e.g. int*, std::string_view), and >1 for a
-  /// multi-level indirection (e.g. int**, std::string_view& / std::string_view*
-  /// -- a reference/pointer to a view). Builds a throwaway origin tree so a
-  /// type with no declaration (such as a function return type) is measured
-  /// exactly like a parameter or local of the same type.
+  /// The indirection depth of \p QT -- the metric used by the
+  /// single-indirection rule. Returns 0 if the type bears no origins, 1 for a
+  /// single indirection (e.g. int*, std::string_view), and >1 for a multi-level
+  /// indirection (e.g. int**, std::string_view& / std::string_view* -- a
+  /// reference/pointer to a view). Counts pointer/reference hops; a record that
+  /// is itself a borrow (a view, a callable wrapper, ...) counts one more level,
+  /// and any other record ends the count.
   unsigned getIndirectionDepth(QualType QT);
 
   bool isAccessedField(const FieldDecl *FD) const {
