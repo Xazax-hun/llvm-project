@@ -260,15 +260,15 @@ static bool isFieldBorrowOf(const Loan *L, const CXXRecordDecl *RD) {
 /// widening a precise question to "some member" turns disjoint members into
 /// apparent aliases and costs real precision.
 static bool borrowsUnnamedMember(const Loan *L) {
-  return llvm::any_of(L->getAccessPath().getElements(),
-                      [](const PathElement &E) { return E.isInterior(); });
+  return pathIsInterior(L->getAccessPath());
 }
 
-/// True if the last field named by `AP` is `Field`, i.e. the path denotes that
-/// field itself rather than something containing it. `w.c` names `c` last;
-/// `w.c.buf` does not.
-static bool namesFieldLast(const AccessPath &AP, const FieldDecl *Field) {
-  return lastNamedField(AP) == Field;
+/// True if the loan has an anchor of its own that every report can point at:
+/// an issuing expression, or a placeholder parameter. The `$this` placeholder
+/// and the seed of a member of `this` have neither and can only be anchored at
+/// a use.
+static bool hasOwnAnchor(const Loan *L) {
+  return L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam();
 }
 
 /// True if a borrow rooted at the `$this` placeholder of `MD` is aliased by a
@@ -952,7 +952,7 @@ public:
       llvm::PointerUnion<const UseFact *, const OriginEscapesFact *> CausingFact)
       const {
     const Loan *L = FactMgr.getLoanMgr().getLoan(LID);
-    if (L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam())
+    if (hasOwnAnchor(L))
       return true;
     return CausingFact.dyn_cast<const UseFact *>() != nullptr;
   }
@@ -1116,7 +1116,7 @@ public:
     // so this is containment, not equality.
     //
     // The field test must FALL THROUGH to the generic one rather than decide the
-    // answer. `namesFieldLast` asks whether the borrow denotes the mutated field
+    // answer. the last-named-field test asks whether the borrow denotes the mutated field
     // itself, which is false for a borrow *below* it: `o.v[0].a` names `a` last
     // while `o.v.clear()` names `v`. The generic comparison does match there --
     // `o.v` is a prefix of `o.v.a` -- so returning early made the field-precise
@@ -1124,7 +1124,9 @@ public:
     // bug the local spelling catches went unreported.
     auto IsExactInvalidated = [&](OriginID OID, LoanID L,
                                  bool UseFollowsPointer) {
-      if (MutatedField && namesFieldLast(LoanAP(L), MutatedField))
+      // Whether the path denotes the mutated field itself (`w.c` names `c`
+      // last; `w.c.buf` does not).
+      if (MutatedField && lastNamedField(LoanAP(L)) == MutatedField)
         return true;
       for (LoanID InvalidID : DirectlyInvalidatedLoans) {
         const AccessPath &IAP = LoanAP(InvalidID);
@@ -1396,6 +1398,45 @@ public:
   /// -- `delete const_cast<T *>(static_cast<const T *>(this))` -- and a
   /// delegating one frees it in a callee, which reaches here as that call's own
   /// deallocation fact carrying the same loan.
+  /// The first placeholder PARAMETER among `Loans`: storage the caller owns,
+  /// reached through a pointer or reference parameter. A by-value parameter is
+  /// the callee's own copy, rooted at the parameter variable, so it does not
+  /// count.
+  template <typename LoanRange>
+  const ParmVarDecl *firstPlaceholderParam(const LoanRange &Loans) const {
+    for (LoanID L : Loans)
+      if (const ParmVarDecl *PVD = FactMgr.getLoanMgr()
+                                       .getLoan(L)
+                                       ->getAccessPath()
+                                       .getAsPlaceholderParam())
+        return PVD;
+    return nullptr;
+  }
+
+  /// True if one of `Loans` is the `$this` placeholder: the whole object.
+  template <typename LoanRange>
+  bool anyPlaceholderThis(const LoanRange &Loans) const {
+    return llvm::any_of(Loans, [&](LoanID L) {
+      return FactMgr.getLoanMgr().getLoan(L)->getAccessPath().isPlaceholderThis();
+    });
+  }
+
+  /// The local whose storage dies with the call, if `L` borrows one: a variable
+  /// with automatic storage, or a by-value parameter -- the parameter object
+  /// itself dies with the call, so a borrow of ITS storage dangles in the
+  /// caller exactly as a local's does. A static or global outlives the call,
+  /// and a reference or pointer parameter denotes storage the caller owns,
+  /// whose escape is the noescape question instead.
+  static const VarDecl *localDyingWithCall(const Loan *L) {
+    const auto *VD =
+        dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
+    if (!VD || !VD->hasLocalStorage())
+      return nullptr;
+    if (isa<ParmVarDecl>(VD) && VD->getType()->isPointerOrReferenceType())
+      return nullptr;
+    return VD;
+  }
+
   /// Records that the object was handed to something this analysis cannot see
   /// through -- a call that may do anything to it, including destroy it. An ASSUMED
   /// invalidation naming the object is exactly that situation.
@@ -1407,21 +1448,15 @@ public:
   void noteOpaqueObjectHandoff(const InvalidateOriginFact *IOF) {
     if (ObjectHandedOff)
       return;
-    for (LoanID LID : LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF))
-      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().isPlaceholderThis()) {
-        ObjectHandedOff = true;
-        return;
-      }
+    ObjectHandedOff = anyPlaceholderThis(
+        LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF));
   }
 
   void noteDeallocationOfThis(const InvalidateOriginFact *IOF) {
     if (DeallocatesThis)
       return;
-    for (LoanID LID : LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF))
-      if (FactMgr.getLoanMgr().getLoan(LID)->getAccessPath().isPlaceholderThis()) {
-        DeallocatesThis = true;
-        return;
-      }
+    DeallocatesThis = anyPlaceholderThis(
+        LoanPropagation.getLoans(IOF->getInvalidatedOrigin(), IOF));
   }
 
   /// Soundness check: a member function whose object the analysis trusts as
@@ -1766,7 +1801,7 @@ public:
         const Loan *L = FactMgr.getLoanMgr().getLoan(LiveLoanID);
         if (!IsInvalidated(OID, L))
           continue;
-        if (L->getIssuingExpr() || L->getAccessPath().getAsPlaceholderParam()) {
+        if (hasOwnAnchor(L)) {
           // Precise anchor: prefer it and stop looking.
           ReportLoan = LiveLoanID;
           HaveReport = true;
@@ -2030,7 +2065,7 @@ public:
       if (!DirectOwner && !WrapsOwner)
         continue;
       if (GlobalTy.isConstQualified() &&
-          !constStillExposesMutableOwner(GlobalTy)) {
+          !pointsToMutableOwner(GlobalTy)) {
         // A const global owner cannot be mutated, so it has no aliasing hazard.
         // But its buffer is still freed by its (non-trivial) destructor at
         // static destruction, and the destruction order across translation units
@@ -2185,29 +2220,23 @@ public:
     return nullptr;
   }
 
-  /// True if `const` on an object of type `GlobalTy` does NOT protect the owner
-  /// reachable through it, so the object is still a mutable-owner global.
-  ///
-  /// `const` applies to the object, not to what it owns through an indirection.
-  /// `const std::unique_ptr<std::vector<int>>` still hands out a non-const
-  /// `std::vector<int>*` from its const `operator->`, so `g->push_back(7)`
-  /// compiles and reallocates the vector a caller may hold a borrow into --
-  /// while `const std::vector<int>` genuinely cannot be mutated. Treating the
-  /// two alike let one `const` silence the rule for every owning smart pointer.
-  bool constStillExposesMutableOwner(QualType GlobalTy) {
-    return pointsToMutableOwner(GlobalTy);
-  }
-
   /// True if `VD` is a global/static variable that is, or transitively
   /// contains, a mutable owner -- the subject of the borrow-from-mutable-global
-  /// rule (array dimensions peeled). A `const` object is excluded only when
-  /// `const` really does protect what it owns (see
-  /// constStillExposesMutableOwner).
+  /// rule (array dimensions peeled).
+  ///
+  /// A `const` object is excluded only when `const` really does protect what it
+  /// owns. `const` applies to the object, not to what it owns through an
+  /// indirection: `const std::unique_ptr<std::vector<int>>` still hands out a
+  /// non-const `std::vector<int>*` from its const `operator->`, so
+  /// `g->push_back(7)` compiles and reallocates the vector a caller may hold a
+  /// borrow into -- while `const std::vector<int>` genuinely cannot be mutated.
+  /// Treating the two alike let one `const` silence the rule for every owning
+  /// smart pointer; pointsToMutableOwner tells them apart.
   bool isMutableOwnerGlobal(const VarDecl *VD) {
     if (!VD || !VD->hasGlobalStorage())
       return false;
     QualType GlobalTy = AST.getBaseElementType(VD->getType());
-    if (GlobalTy.isConstQualified() && !constStillExposesMutableOwner(GlobalTy))
+    if (GlobalTy.isConstQualified() && !pointsToMutableOwner(GlobalTy))
       return false;
     if (isGslOwnerType(GlobalTy))
       return true;
@@ -2480,16 +2509,8 @@ public:
     // The destination must be reached through a PARAMETER. A store into `this`
     // is covered by the field-escape path, and a store into a local is no
     // escape -- the local's own expiry checks it.
-    bool CallerOwned = false;
-    for (LoanID CL : LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF))
-      if (FactMgr.getLoanMgr()
-              .getLoan(CL)
-              ->getAccessPath()
-              .getAsPlaceholderParam()) {
-        CallerOwned = true;
-        break;
-      }
-    if (!CallerOwned)
+    if (!firstPlaceholderParam(
+            LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF)))
       return;
     const auto *ME = dyn_cast_or_null<MemberExpr>(FSF->getStoreExpr());
     const auto *FD = ME ? dyn_cast<FieldDecl>(ME->getMemberDecl()) : nullptr;
@@ -2497,19 +2518,7 @@ public:
       return;
     for (LoanID SL : LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF)) {
       const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
-      const auto *VD =
-          dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
-      // A local with automatic storage. A static or global outlives the call and
-      // is no hazard.
-      if (!VD || !VD->hasLocalStorage())
-        continue;
-      // A REFERENCE or POINTER parameter denotes storage the CALLER owns, so its
-      // escape is the noescape question, answered below. A BY-VALUE parameter is
-      // not that: the parameter object itself dies with the call, so a borrow of
-      // ITS storage dangles in the caller exactly as a local's does -- copying
-      // the parameter into a local first was reported all along, and only the
-      // root of the borrow differs between the two.
-      if (isa<ParmVarDecl>(VD) && VD->getType()->isPointerOrReferenceType())
+      if (!localDyingWithCall(L))
         continue;
       SemaHelper->reportDanglingField(L->getIssuingExpr(), FD,
                                       /*MovedExpr=*/nullptr,
@@ -2538,15 +2547,8 @@ public:
     // copy, and its loans are rooted at the parameter variable rather than at a
     // placeholder, so it does not look caller-owned here -- correctly, since
     // depositing a borrow in a copy that dies with the call captures nothing.
-    const ParmVarDecl *Dest = nullptr;
-    for (LoanID CL : LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF))
-      if (const auto *PVD = FactMgr.getLoanMgr()
-                                .getLoan(CL)
-                                ->getAccessPath()
-                                .getAsPlaceholderParam()) {
-        Dest = PVD;
-        break;
-      }
+    const ParmVarDecl *Dest = firstPlaceholderParam(
+        LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF));
     if (!Dest)
       return;
     for (LoanID SL : LoanPropagation.getLoans(FSF->getStoredOrigin(), FSF)) {
@@ -2572,19 +2574,12 @@ public:
   void checkNoescapeStoreIntoParam(const FieldStoreFact *FSF) {
     if (!SemaHelper)
       return;
-    LoanSet Container =
-        LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF);
+
     // The destination must be reached through a PARAMETER. A store into `this`
     // is already covered by the field-escape path, and a store into a local is
     // no escape at all -- the local's expiry checks it.
-    const ParmVarDecl *Dest = nullptr;
-    for (LoanID CL : Container) {
-      const AccessPath &CAP = FactMgr.getLoanMgr().getLoan(CL)->getAccessPath();
-      if (const auto *PVD = CAP.getAsPlaceholderParam()) {
-        Dest = PVD;
-        break;
-      }
-    }
+    const ParmVarDecl *Dest = firstPlaceholderParam(
+        LoanPropagation.getLoans(FSF->getContainerOrigin(), FSF));
     if (!Dest)
       return;
     // The stored value must carry a noescape parameter's own borrow.
@@ -2649,16 +2644,7 @@ public:
     // Only a PARAMETER destination. A store into `this` is covered by the field-
     // and object-escape paths, and a store into a local is no escape -- the local's
     // own expiry checks it.
-    bool CallerOwned = false;
-    for (LoanID LID : LoanPropagation.getPreStoreDestinationLoans(DSF))
-      if (FactMgr.getLoanMgr()
-              .getLoan(LID)
-              ->getAccessPath()
-              .getAsPlaceholderParam()) {
-        CallerOwned = true;
-        break;
-      }
-    if (!CallerOwned)
+    if (!firstPlaceholderParam(LoanPropagation.getPreStoreDestinationLoans(DSF)))
       return;
     // A store into a NAMED member emits both facts, and the FieldStore path owns
     // that case -- it can name the field, which makes for a better diagnostic. This
@@ -2666,15 +2652,8 @@ public:
     if (isa_and_present<MemberExpr>(DSF->getStoreExpr()))
       return;
     for (LoanID SL : LoanPropagation.getLoans(DSF->getSrcOrigin(), DSF)) {
-      const Loan *L = FactMgr.getLoanMgr().getLoan(SL);
-      const auto *VD =
-          dyn_cast_or_null<VarDecl>(L->getAccessPath().getAsValueDecl());
-      // A static or global outlives the call and is no hazard.
-      if (!VD || !VD->hasLocalStorage())
-        continue;
-      // A reference or pointer PARAMETER denotes storage the caller owns, so its
-      // escape is the noescape question answered below -- not a dangling local.
-      if (isa<ParmVarDecl>(VD) && VD->getType()->isPointerOrReferenceType())
+      const VarDecl *VD = localDyingWithCall(FactMgr.getLoanMgr().getLoan(SL));
+      if (!VD)
         continue;
       LocalEscapesIntoCallerObject.emplace_back(SL, VD, DSF->getStoreExpr());
       return;
@@ -2753,8 +2732,7 @@ public:
       for (LoanID BL : BLoans) {
         const Loan *BLoan = FactMgr.getLoanMgr().getLoan(BL);
         const AccessPath &BAP = BLoan->getAccessPath();
-        bool HasPreciseAnchor =
-            BLoan->getIssuingExpr() || BAP.getAsPlaceholderParam();
+        bool HasPreciseAnchor = hasOwnAnchor(BLoan);
         const CXXMethodDecl *BorrowsThis = BAP.getAsPlaceholderThis();
         // Skip loans with no reportable anchor at all; they would emit nothing.
         if (!HasPreciseAnchor && !BorrowsThis)
@@ -2826,9 +2804,7 @@ public:
       if (!Storage)
         Storage = RAP.getAsPlaceholderThis();
       auto IsPrecise = [&](LoanID L) {
-        const Loan *Ln = FactMgr.getLoanMgr().getLoan(L);
-        return Ln->getIssuingExpr() ||
-               Ln->getAccessPath().getAsPlaceholderParam();
+        return hasOwnAnchor(FactMgr.getLoanMgr().getLoan(L));
       };
       if (Storage) {
         auto It = ReportedArgOverlap.find({Storage, Op});
