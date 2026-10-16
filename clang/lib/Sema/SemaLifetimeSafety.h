@@ -24,67 +24,36 @@
 
 namespace clang::lifetimes {
 
-/// Every diagnostic the analysis can produce. Asking about all of them is how
-/// "is lifetime safety wanted here?" is answered, since any one of them being
-/// enabled requires the analysis to run.
-inline constexpr unsigned LifetimeSafetyDiagIDs[] = {
-      diag::warn_lifetime_safety_use_after_scope,
-      diag::warn_lifetime_safety_use_after_scope_moved,
-      diag::warn_lifetime_safety_use_after_free,
-      diag::warn_lifetime_safety_return_stack_addr,
-      diag::warn_lifetime_safety_return_stack_addr_moved,
-      diag::warn_lifetime_safety_invalidation,
-      diag::warn_lifetime_safety_dangling_field,
-      diag::warn_lifetime_safety_dangling_caller_object,
-      diag::warn_lifetime_safety_dangling_field_moved,
-      diag::warn_lifetime_safety_dangling_global,
-      diag::warn_lifetime_safety_dangling_global_moved,
-      diag::warn_lifetime_safety_noescape_escapes,
-      diag::warn_lifetime_safety_lifetimebound_violation,
-      diag::warn_lifetime_safety_capture_by_violation,
-      diag::warn_lifetime_safety_immortal_violation,
-      diag::warn_lifetime_safety_non_invalidating_violation,
-      diag::warn_lifetime_safety_non_invalidating_param_violation,
-      diag::warn_lifetime_safety_cross_tu_misplaced_lifetimebound,
-      diag::warn_lifetime_safety_intra_tu_misplaced_lifetimebound,
-      diag::warn_lifetime_safety_invalidated_field,
-      diag::warn_lifetime_safety_invalidated_global,
-      diag::warn_lifetime_safety_invalidated_return,
-      diag::warn_lifetime_safety_cross_tu_param_suggestion,
-      diag::warn_lifetime_safety_intra_tu_param_suggestion,
-      diag::warn_lifetime_safety_cross_tu_this_suggestion,
-      diag::warn_lifetime_safety_intra_tu_this_suggestion,
-      diag::warn_lifetime_safety_lost_loan,
-      diag::warn_lifetime_safety_bailout,
-      diag::warn_lifetime_safety_indirect_call,
-      diag::warn_lifetime_safety_unannotated_indirection,
-      diag::warn_lifetime_safety_default_arg_temporary,
-      diag::warn_lifetime_safety_unannotated_param,
-      diag::warn_lifetime_safety_unannotated_this_return,
-      diag::warn_lifetime_safety_this_escapes_to_global,
-      diag::warn_lifetime_safety_annotated_param_escapes_to_global,
-      diag::warn_lifetime_safety_global_capture,
-      diag::warn_lifetime_safety_multilevel_indirection,
-      diag::warn_lifetime_safety_move_silencing,
-      diag::warn_lifetime_safety_assumed_invalidation,
-      diag::warn_lifetime_safety_naked_delete,
-      diag::warn_lifetime_safety_unknown_ownership,
-      diag::warn_lifetime_safety_exception,
-      diag::warn_lifetime_safety_inline_asm,
-      diag::warn_lifetime_safety_setjmp,
-      diag::warn_lifetime_safety_coroutine,
-      diag::warn_lifetime_safety_union,
-      diag::warn_lifetime_safety_reinterpret_cast,
-      diag::warn_lifetime_safety_void_pointer_cast,
-      diag::warn_lifetime_safety_downcast,
-      diag::warn_lifetime_safety_owner_of_indirection,
-      diag::warn_lifetime_safety_pointer_of_indirection,
-      diag::warn_lifetime_safety_view_on_mutable_global,
-      diag::warn_lifetime_safety_const_indirect_mutation,
-      diag::warn_lifetime_safety_const_indirect_escape,
-      diag::warn_lifetime_safety_self_referential,
-      diag::warn_lifetime_safety_unsupported_store,
-      diag::warn_lifetime_safety_unmodeled_expr};
+/// Every lifetime-safety diagnostic: the members of `-Wlifetime-safety-all`.
+/// Asking about all of them is how "is lifetime safety wanted here?" is
+/// answered, since any one of them being enabled requires the analysis to run.
+///
+/// Derived from the group rather than listed by hand: a hand-written list
+/// drifted, and a group whose diagnostics were all missing from it --
+/// `-Wlifetime-safety-owner-capture` or `-Wlifetime-safety-openmp` enabled on
+/// its own -- never ran the analysis and so reported nothing. The group also
+/// holds diagnostics Sema emits at declarations; including them only means the
+/// analysis runs when one of those alone is enabled.
+///
+/// Members enabled by default are left out. Every diagnostic the analysis emits
+/// is off by default; a default-on member -- `-Wmissing-noescape`, an upstream
+/// Sema warning the soundness group pulls in -- would make the gate true for
+/// every function of every compile.
+inline ArrayRef<diag::kind> LifetimeSafetyDiagIDs(Sema &S) {
+  static const llvm::SmallVector<diag::kind, 0> IDs = [&] {
+    const DiagnosticIDs &DiagIDs = *S.getDiagnostics().getDiagnosticIDs();
+    llvm::SmallVector<diag::kind, 0> Out;
+    [[maybe_unused]] bool Unknown = DiagIDs.getDiagnosticsInGroup(
+        diag::Flavor::WarningOrError, "lifetime-safety-all", Out);
+    assert(!Unknown && "lifetime-safety-all is not a diagnostic group");
+    llvm::erase_if(Out, [&](diag::kind ID) {
+      return DiagIDs.getDefaultMapping(ID).getSeverity() !=
+             diag::Severity::Ignored;
+    });
+    return Out;
+  }();
+  return IDs;
+}
 
 /// Whether any lifetime-safety diagnostic is enabled anywhere in \p D.
 ///
@@ -98,7 +67,7 @@ inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
     return true;
   DiagnosticsEngine &Diags = S.getDiagnostics();
   auto EnabledAt = [&](SourceLocation Loc) {
-    for (unsigned DiagID : LifetimeSafetyDiagIDs)
+    for (diag::kind DiagID : LifetimeSafetyDiagIDs(S))
       if (!Diags.isIgnored(DiagID, Loc))
         return true;
     return false;
@@ -121,7 +90,7 @@ inline bool IsLifetimeSafetyEnabledAnywhere(Sema &S) {
   if (S.getLangOpts().DebugRunLifetimeSafety)
     return true;
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  for (unsigned DiagID : LifetimeSafetyDiagIDs)
+  for (diag::kind DiagID : LifetimeSafetyDiagIDs(S))
     if (!Diags.isIgnoredInEveryState(DiagID))
       return true;
   return false;

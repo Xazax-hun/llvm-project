@@ -1,4 +1,9 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-soundness -Wno-unused -verify %s
+// The group enabled ON ITS OWN must run the analysis too: the gate deciding
+// whether to analyze a function used a hand-written list of diagnostic IDs that
+// lacked this one, so the group alone reported nothing.
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wlifetime-safety-owner-capture -fno-caret-diagnostics %s 2>&1 | FileCheck --check-prefix=ALONE %s
+// ALONE-COUNT-2: warning: this argument is declared 'lifetime_capture_by'
 
 #include "Inputs/lifetime-analysis.h"
 using std::string;

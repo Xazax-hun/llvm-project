@@ -1,5 +1,10 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++20 -fopenmp-simd -Wlifetime-safety-soundness -Wno-unused -verify %s
 // RUN: %clang_cc1 -fsyntax-only -std=c++20 -Wno-source-uses-openmp -Wlifetime-safety-soundness -Wno-unused -verify=noomp %s
+// RUN: %clang_cc1 -fsyntax-only -std=c++20 -fopenmp-simd -Wlifetime-safety-openmp -fno-caret-diagnostics %s 2>&1 | FileCheck --check-prefix=ALONE %s
+//
+// The group enabled ON ITS OWN must run the analysis too (the directive refusal is
+// emitted by it); the gate's hand-written diagnostic list lacked it.
+// ALONE-COUNT-3: warning: OpenMP directive is not modeled
 //
 // The second run has OpenMP disabled: the pragmas are ignored, so every refusal
 // disappears. What does NOT disappear is the real hazard in the loop body -- the
