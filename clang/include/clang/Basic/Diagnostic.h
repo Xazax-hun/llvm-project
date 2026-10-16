@@ -480,6 +480,13 @@ private:
     bool forEachStateRegionLoc(SourceManager &SrcMgr,
                                llvm::function_ref<bool(SourceLocation)> F) const;
 
+    /// As forEachStateRegionLoc, but only for the state transitions that lie
+    /// inside \p R, including those of files included from inside it. When the
+    /// ends of \p R are in different files, every region is visited.
+    bool
+    forEachStateRegionLocIn(SourceManager &SrcMgr, SourceRange R,
+                            llvm::function_ref<bool(SourceLocation)> F) const;
+
   private:
     friend class ASTReader;
     friend class ASTWriter;
@@ -1035,6 +1042,22 @@ public:
   /// Costs a single lookup when the translation unit contains no diagnostic
   /// pragmas, which is the common case.
   bool isIgnoredInEveryState(unsigned DiagID) const;
+
+  /// Calls \p F with a location inside every diagnostic-state region that a
+  /// `#pragma clang diagnostic` starts within \p R, stopping early if \p F
+  /// returns false. Returns false if it stopped early. The state in effect at
+  /// the start of \p R is not visited; query it directly.
+  ///
+  /// Together with a query at the start of \p R this answers "is this
+  /// diagnostic enabled ANYWHERE in this declaration?". Typically no pragma
+  /// lies inside a declaration, and then \p F is never called.
+  bool
+  forEachStateRegionLocIn(SourceRange R,
+                          llvm::function_ref<bool(SourceLocation)> F) const {
+    if (DiagStatesByLoc.hasOnlyInitialState() || !hasSourceManager())
+      return true;
+    return DiagStatesByLoc.forEachStateRegionLocIn(getSourceManager(), R, F);
+  }
 
   /// Based on the way the client configured the DiagnosticsEngine
   /// object, classify the specified diagnostic ID into a Level, consumable by

@@ -234,6 +234,48 @@ bool DiagnosticsEngine::DiagStateMap::forEachStateRegionLoc(
   return true;
 }
 
+bool DiagnosticsEngine::DiagStateMap::forEachStateRegionLocIn(
+    SourceManager &SrcMgr, SourceRange R,
+    llvm::function_ref<bool(SourceLocation)> F) const {
+  if (R.isInvalid())
+    return forEachStateRegionLoc(SrcMgr, F);
+  auto [BeginFID, BeginOff] =
+      SrcMgr.getDecomposedLoc(SrcMgr.getExpansionLoc(R.getBegin()));
+  auto [EndFID, EndOff] =
+      SrcMgr.getDecomposedLoc(SrcMgr.getExpansionLoc(R.getEnd()));
+  if (BeginFID != EndFID || BeginFID.isInvalid())
+    return forEachStateRegionLoc(SrcMgr, F);
+  // getFile creates an entry for every includer of a file it creates one for,
+  // so with no entry here there are no transitions in the range at all.
+  auto BeginIt = Files.find(BeginFID);
+  if (BeginIt == Files.end())
+    return true;
+  const File *RangeFile = &BeginIt->second;
+  for (const auto &[ID, Entry] : Files) {
+    SourceLocation Start = SrcMgr.getLocForStartOfFile(ID);
+    if (Start.isInvalid())
+      continue;
+    bool WholeFile = false;
+    if (&Entry != RangeFile) {
+      // A file included, possibly indirectly, from inside the range.
+      for (const File *C = &Entry; C->Parent; C = C->Parent)
+        if (C->Parent == RangeFile) {
+          WholeFile = C->ParentOffset >= BeginOff && C->ParentOffset <= EndOff;
+          break;
+        }
+      if (!WholeFile)
+        continue;
+    }
+    for (const DiagStatePoint &P : Entry.StateTransitions) {
+      if (!WholeFile && (P.Offset <= BeginOff || P.Offset > EndOff))
+        continue;
+      if (!F(Start.getLocWithOffset(P.Offset)))
+        return false;
+    }
+  }
+  return true;
+}
+
 bool DiagnosticsEngine::isIgnoredInEveryState(unsigned DiagID) const {
   // The state the command line established. When there are no diagnostic
   // pragmas this is the only state there is, so one lookup answers it.

@@ -86,14 +86,27 @@ inline constexpr unsigned LifetimeSafetyDiagIDs[] = {
       diag::warn_lifetime_safety_unsupported_store,
       diag::warn_lifetime_safety_unmodeled_expr};
 
+/// Whether any lifetime-safety diagnostic is enabled anywhere in \p D.
+///
+/// Asking only at the start of \p D is not enough: a `#pragma clang diagnostic`
+/// ending inside the declaration re-enables the warnings for the rest of its
+/// body, and skipping the analysis would then drop every finding there
+/// silently. Diagnostics outside the enabled region are still filtered when
+/// they are emitted.
 inline bool IsLifetimeSafetyEnabled(Sema &S, const Decl *D) {
   if (S.getLangOpts().DebugRunLifetimeSafety)
     return true;
   DiagnosticsEngine &Diags = S.getDiagnostics();
-  for (unsigned DiagID : LifetimeSafetyDiagIDs)
-    if (!Diags.isIgnored(DiagID, D->getBeginLoc()))
-      return true;
-  return false;
+  auto EnabledAt = [&](SourceLocation Loc) {
+    for (unsigned DiagID : LifetimeSafetyDiagIDs)
+      if (!Diags.isIgnored(DiagID, Loc))
+        return true;
+    return false;
+  };
+  if (EnabledAt(D->getBeginLoc()))
+    return true;
+  return !Diags.forEachStateRegionLocIn(
+      D->getSourceRange(), [&](SourceLocation Loc) { return !EnabledAt(Loc); });
 }
 
 /// Whether any lifetime-safety diagnostic is enabled ANYWHERE in the
