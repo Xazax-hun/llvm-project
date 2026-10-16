@@ -251,27 +251,44 @@ bool DiagnosticsEngine::DiagStateMap::forEachStateRegionLocIn(
   if (BeginIt == Files.end())
     return true;
   const File *RangeFile = &BeginIt->second;
+  // append() records every transition in all ancestors of the file it happens
+  // in, at the include offset, so a pragma in a file included from inside the
+  // range also leaves a transition in RangeFile within the range. With none
+  // there -- the overwhelmingly common case, asked for every function -- there
+  // is nothing to visit, and a binary search is all it costs.
+  auto InRange = [&](const DiagStatePoint &P) {
+    return P.Offset >= BeginOff && P.Offset <= EndOff;
+  };
+  const auto &Transitions = RangeFile->StateTransitions;
+  auto First = llvm::partition_point(
+      Transitions, [&](const DiagStatePoint &P) { return P.Offset < BeginOff; });
+  if (First == Transitions.end() || !InRange(*First))
+    return true;
+  SourceLocation RangeStart = SrcMgr.getLocForStartOfFile(BeginFID);
+  for (auto It = First; It != Transitions.end() && InRange(*It); ++It)
+    if (It->Offset != BeginOff &&
+        !F(RangeStart.getLocWithOffset(It->Offset)))
+      return false;
+  // Something changed inside the range. The ancestor entry only holds the state
+  // in effect once an included file is done, so visit the transitions of every
+  // file included, possibly indirectly, from inside the range as well.
   for (const auto &[ID, Entry] : Files) {
+    if (&Entry == RangeFile)
+      continue;
+    bool Inside = false;
+    for (const File *C = &Entry; C->Parent; C = C->Parent)
+      if (C->Parent == RangeFile) {
+        Inside = C->ParentOffset >= BeginOff && C->ParentOffset <= EndOff;
+        break;
+      }
+    if (!Inside)
+      continue;
     SourceLocation Start = SrcMgr.getLocForStartOfFile(ID);
     if (Start.isInvalid())
       continue;
-    bool WholeFile = false;
-    if (&Entry != RangeFile) {
-      // A file included, possibly indirectly, from inside the range.
-      for (const File *C = &Entry; C->Parent; C = C->Parent)
-        if (C->Parent == RangeFile) {
-          WholeFile = C->ParentOffset >= BeginOff && C->ParentOffset <= EndOff;
-          break;
-        }
-      if (!WholeFile)
-        continue;
-    }
-    for (const DiagStatePoint &P : Entry.StateTransitions) {
-      if (!WholeFile && (P.Offset <= BeginOff || P.Offset > EndOff))
-        continue;
+    for (const DiagStatePoint &P : Entry.StateTransitions)
       if (!F(Start.getLocWithOffset(P.Offset)))
         return false;
-    }
   }
   return true;
 }

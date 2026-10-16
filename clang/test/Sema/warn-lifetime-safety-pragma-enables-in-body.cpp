@@ -11,6 +11,13 @@
 //--- enable.h
 #pragma clang diagnostic warning "-Wlifetime-safety-use-after-scope"
 
+//--- body.h
+#pragma clang diagnostic push
+#pragma clang diagnostic warning "-Wlifetime-safety-use-after-scope"
+  { int x = 1; p = &x; }
+  sink = *p;
+#pragma clang diagnostic pop
+
 //--- main.cpp
 volatile int sink;
 
@@ -49,6 +56,21 @@ void enabled_in_body() {
   sink = *p;             // on-note {{later used here}} off-note {{later used here}}
 #pragma clang diagnostic pop
 }
+
+// Off on the command line, enabled and popped again inside a file included
+// from inside the body. The including file records only the state in effect
+// once the header is done -- unchanged -- so this needs the header's own
+// transitions.
+void enabled_and_popped_in_include() {
+  int *p;
+#include "body.h"
+}
+// on-warning@body.h:3 {{local variable 'x' does not live long enough}}
+// on-note@body.h:3 {{destroyed here}}
+// on-note@body.h:4 {{later used here}}
+// off-warning@body.h:3 {{local variable 'x' does not live long enough}}
+// off-note@body.h:3 {{destroyed here}}
+// off-note@body.h:4 {{later used here}}
 
 // Off on the command line, enabled by a pragma in a file included from inside
 // the body.
