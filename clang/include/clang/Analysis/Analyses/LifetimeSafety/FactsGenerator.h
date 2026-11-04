@@ -327,6 +327,12 @@ private:
   /// destroyed in the reverse of it, and handleFullExprCleanup needs that order.
   llvm::DenseMap<const MaterializeTemporaryExpr *, unsigned> MTEConstructionSeq;
   unsigned NextMTESeq = 0;
+  /// Lifetime-extended temporaries, keyed by the variable they expire with.
+  /// Filled on the variable's first lifetime end: it has one per scope exit,
+  /// and re-walking the initializer at each one was quadratic.
+  llvm::DenseMap<const VarDecl *,
+                 llvm::SmallVector<const MaterializeTemporaryExpr *, 1>>
+      ExtendedTemporaries;
   const CFGBlock *CurrentBlock;
   /// Global "container of indirection" variables already flagged at a use in the
   /// current function (handleGlobalContainerOfIndirectionUse), so a global used

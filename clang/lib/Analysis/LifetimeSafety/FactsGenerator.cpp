@@ -2862,9 +2862,10 @@ void FactsGenerator::handleLifetimeEnds(const CFGLifetimeEnds &LifetimeEnds) {
   // A temporary lifetime-extended by binding to this variable dies here too, and its
   // storage is a borrow root in its own right -- the variable's own AccessPath above
   // describes the reference, not the object it was bound to.
-  llvm::SmallVector<const MaterializeTemporaryExpr *, 2> Extended;
-  collectExtendedTemporaries(LifetimeEndsVD, Extended);
-  for (const MaterializeTemporaryExpr *MTE : Extended)
+  auto [It, Inserted] = ExtendedTemporaries.try_emplace(LifetimeEndsVD);
+  if (Inserted)
+    collectExtendedTemporaries(LifetimeEndsVD, It->second);
+  for (const MaterializeTemporaryExpr *MTE : It->second)
     CurrentBlockFacts.push_back(FactMgr.createFact<ExpireFact>(
         AccessPath(MTE), LifetimeEnds.getTriggerStmt()->getEndLoc()));
 }
