@@ -461,6 +461,12 @@ void FactsGenerator::handleAssignment(const Expr *TargetExpr,
                                       const Expr *LHSExpr,
                                       const Expr *RHSExpr) {
   LHSExpr = ignoreParensAndImpCasts(LHSExpr);
+  // Look through no-op explicit casts, e.g. `static_cast<int *&>(p) = ...`.
+  while (const auto *ECE = dyn_cast<ExplicitCastExpr>(LHSExpr)) {
+    if (ECE->getCastKind() != CK_NoOp)
+      break;
+    LHSExpr = ignoreParensAndImpCasts(ECE->getSubExpr());
+  }
   handleAccess(LHSExpr);
   OriginList *RHSList = readValue(RHSExpr);
   OriginList *LHSList = nullptr;

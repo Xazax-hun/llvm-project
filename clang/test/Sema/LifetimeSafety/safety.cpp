@@ -67,6 +67,65 @@ void simple_case_gsl() {
   v.use();      // expected-note {{later used here}}
 }
 
+void store_through_static_cast_reference() {
+  MyObj* p;
+  {
+    MyObj s;
+    static_cast<MyObj *&>(p) = &s; // expected-warning {{local variable 's' does not live long enough}}
+  }                                // expected-note {{local variable 's' is destroyed here}}
+  use(*p);                         // expected-note {{later used here}}
+}
+
+void store_through_c_style_cast_reference() {
+  MyObj* p;
+  {
+    MyObj s;
+    ((MyObj *&)p) = &s; // expected-warning {{local variable 's' does not live long enough}}
+  }                     // expected-note {{local variable 's' is destroyed here}}
+  use(*p);              // expected-note {{later used here}}
+}
+
+void store_through_const_cast_reference() {
+  const MyObj* p;
+  {
+    MyObj s;
+    const_cast<const MyObj *&>(p) = &s; // expected-warning {{local variable 's' does not live long enough}}
+  }                                     // expected-note {{local variable 's' is destroyed here}}
+  use(*p);                              // expected-note {{later used here}}
+}
+
+void store_through_cast_reference_gsl() {
+  View v;
+  {
+    MyObj s;
+    static_cast<View &>(v) = s; // expected-warning {{local variable 's' does not live long enough}}
+  }                             // expected-note {{local variable 's' is destroyed here}}
+  v.use();                      // expected-note {{later used here}}
+}
+
+void store_through_nested_cast_reference() {
+  MyObj* p;
+  {
+    MyObj s;
+    static_cast<MyObj *&>((MyObj *&)p) = &s; // expected-warning {{local variable 's' does not live long enough}}
+  }                                          // expected-note {{local variable 's' is destroyed here}}
+  use(*p);                                   // expected-note {{later used here}}
+}
+
+struct CastStoreBase { int *p; };
+struct CastStoreDerived : CastStoreBase {};
+void store_through_base_cast_is_not_peeled(CastStoreDerived &d, CastStoreBase &b) {
+  static_cast<CastStoreBase &>(d) = b;
+}
+
+struct CastStoreField {
+  int *p; // expected-note {{this field dangles}}
+  CastStoreField() {
+    int local = 0;
+    static_cast<int *&>(this->p) = &local; // expected-warning {{stack memory associated with local variable 'local' escapes to the field 'p' which will dangle}}
+  }
+};
+
 void no_use_no_error() {
   MyObj* p;
   {
