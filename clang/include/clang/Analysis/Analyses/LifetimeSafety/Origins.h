@@ -51,7 +51,9 @@ struct Origin {
   ///   Pointee origin: QT = `int*` (what *pp points to)
   ///
   /// Null for synthetic lvalue origins (e.g., outer origin of DeclRefExpr).
-  const Type *Ty;
+  /// For the storage of a glvalue of non-reference type T, this is T and
+  /// IsGLValueOfTy is set: the origin stands for T&.
+  QualType Ty;
 
   /// True if this origin only holds a loan to a declaration named in scope, so
   /// it can never hold an expired loan. For example, in
@@ -61,12 +63,17 @@ struct Origin {
   /// wherever `s` can be named.
   bool NamesDeclStorage;
 
-  Origin(OriginID ID, const clang::ValueDecl *D, const Type *QT,
+  /// Whether the type of this origin is a reference to Ty.
+  bool IsGLValueOfTy;
+
+  Origin(OriginID ID, const clang::ValueDecl *D, QualType QT,
          bool NamesDeclStorage)
-      : ID(ID), Ptr(D), Ty(QT), NamesDeclStorage(NamesDeclStorage) {}
-  Origin(OriginID ID, const clang::Expr *E, const Type *QT,
-         bool NamesDeclStorage)
-      : ID(ID), Ptr(E), Ty(QT), NamesDeclStorage(NamesDeclStorage) {}
+      : ID(ID), Ptr(D), Ty(QT), NamesDeclStorage(NamesDeclStorage),
+        IsGLValueOfTy(false) {}
+  Origin(OriginID ID, const clang::Expr *E, QualType QT, bool NamesDeclStorage,
+         bool IsGLValueOfTy)
+      : ID(ID), Ptr(E), Ty(QT), NamesDeclStorage(NamesDeclStorage),
+        IsGLValueOfTy(IsGLValueOfTy) {}
 
   const clang::ValueDecl *getDecl() const {
     return dyn_cast<const clang::ValueDecl *>(Ptr);
@@ -204,7 +211,8 @@ private:
   OriginList *createNode(const ValueDecl *D, QualType QT,
                          bool NamesDeclStorage = false);
   OriginList *createNode(const Expr *E, QualType QT,
-                         bool NamesDeclStorage = false);
+                         bool NamesDeclStorage = false,
+                         bool IsGLValueOfTy = false);
 
   template <typename T>
   OriginList *buildListForType(QualType QT, const T *Node,

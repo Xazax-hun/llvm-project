@@ -218,14 +218,19 @@ void OriginManager::initializeThisOrigins(const Decl *D) {
 OriginList *OriginManager::createNode(const ValueDecl *D, QualType QT,
                                       bool NamesDeclStorage) {
   OriginID NewID = getNextOriginID();
-  AllOrigins.emplace_back(NewID, D, QT.getTypePtrOrNull(), NamesDeclStorage);
+  AllOrigins.emplace_back(NewID, D, QualType(QT.getTypePtrOrNull(), 0),
+                          NamesDeclStorage);
   return new (ListAllocator.Allocate<OriginList>()) OriginList(NewID);
 }
 
 OriginList *OriginManager::createNode(const Expr *E, QualType QT,
-                                      bool NamesDeclStorage) {
+                                      bool NamesDeclStorage,
+                                      bool IsGLValueOfTy) {
   OriginID NewID = getNextOriginID();
-  AllOrigins.emplace_back(NewID, E, QT.getTypePtrOrNull(), NamesDeclStorage);
+  // The qualifiers of a referenced type are part of the reference type.
+  AllOrigins.emplace_back(
+      NewID, E, IsGLValueOfTy ? QT : QualType(QT.getTypePtrOrNull(), 0),
+      NamesDeclStorage, IsGLValueOfTy);
   return new (ListAllocator.Allocate<OriginList>()) OriginList(NewID);
 }
 
@@ -350,11 +355,6 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
     return ExprToList[E] = Head;
   }
 
-  // If E is an lvalue , it refers to storage. We model this storage as the
-  // first level of origin list, as if it were a reference, because l-values are
-  // addressable.
-  if (E->isGLValue() && !Type->isReferenceType())
-    Type = AST.getLValueReferenceType(Type);
   // A qualification conversion of a glvalue names what its operand names. It is
   // not transparent: for class types it is the node alias notes report.
   bool NamesDeclStorage = false;
@@ -362,6 +362,17 @@ OriginList *OriginManager::getOrCreateList(const Expr *E) {
       CE && CE->getCastKind() == CK_NoOp && E->isGLValue())
     if (const OriginList *Sub = getOrCreateList(CE->getSubExpr()))
       NamesDeclStorage = getOrigin(Sub->getOuterOriginID()).NamesDeclStorage;
+
+  // If E is an lvalue , it refers to storage. We model this storage as the
+  // first level of origin list, as if it were a reference, because l-values are
+  // addressable. This is the list buildListForType would build for `Type &`.
+  if (E->isGLValue() && !Type->isReferenceType()) {
+    OriginList *Head =
+        createNode(E, Type, NamesDeclStorage, /*IsGLValueOfTy=*/true);
+    if (hasOrigins(Type))
+      Head->setInnerOriginList(buildListForType(Type, E));
+    return ExprToList[E] = Head;
+  }
   return ExprToList[E] = buildListForType(Type, E, NamesDeclStorage);
 }
 
@@ -379,8 +390,10 @@ void OriginManager::dump(OriginID OID, llvm::raw_ostream &OS) const {
   } else {
     OS << "Unknown";
   }
-  if (O.Ty)
-    OS << ", Type : " << QualType(O.Ty, 0).getAsString();
+  if (!O.Ty.isNull()) {
+    QualType Ty = O.IsGLValueOfTy ? AST.getLValueReferenceType(O.Ty) : O.Ty;
+    OS << ", Type : " << Ty.getAsString();
+  }
   OS << ")";
 }
 
