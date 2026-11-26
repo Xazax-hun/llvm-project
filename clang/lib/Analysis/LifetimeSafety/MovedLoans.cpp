@@ -51,6 +51,11 @@ public:
 
   StringRef getAnalysisName() const { return "MovedLoans"; }
 
+  /// Moved loans are queried where origins escape or expire.
+  bool isStateQueried(const Fact &F) const {
+    return isa<OriginEscapesFact, ExpireFact>(F);
+  }
+
   Lattice getInitialState() { return Lattice{}; }
 
   /// Merges moved loan state from different control flow paths. When a loan

@@ -90,6 +90,20 @@ public:
 
   StringRef getAnalysisName() const { return "LiveOrigins"; }
 
+  /// Liveness is queried where loans can be invalidated or moved, and at test
+  /// points.
+  bool isStateQueried(const Fact &F) const {
+    switch (F.getKind()) {
+    case Fact::Kind::Expire:
+    case Fact::Kind::InvalidateOrigin:
+    case Fact::Kind::MovedOrigin:
+    case Fact::Kind::TestPoint:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   Lattice getInitialState() {
     return Lattice(Factory.getEmptyMap(), Factory.getEmptyMap());
   }

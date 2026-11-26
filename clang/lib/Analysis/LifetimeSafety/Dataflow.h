@@ -48,7 +48,9 @@ using ProgramPoint = const Fact *;
 ///   for facts relevant to the analysis need to be implemented.
 ///
 /// It may additionally override `Lattice transferAtBlockExit(Lattice);` to
-/// drop state that is not visible outside the block it was computed in.
+/// drop state that is not visible outside the block it was computed in, and
+/// `bool isStateQueried(const Fact &) const;` to record the state only at the
+/// program points it is queried at.
 ///
 /// \tparam Derived The CRTP derived class that implements the specific
 /// analysis.
@@ -138,6 +140,8 @@ private:
 
 protected:
   Lattice getState(ProgramPoint P) const {
+    assert(static_cast<const Derived *>(this)->isStateQueried(*P) &&
+           "The state is not recorded at this point");
     return PointToState[P->getID().Value];
   }
 
@@ -163,16 +167,19 @@ private:
   /// Computes the state at one end of a block by applying all its facts
   /// sequentially to a given state from the other end.
   Lattice transferBlock(const CFGBlock *Block, Lattice State) {
+    const Derived *D = static_cast<const Derived *>(this);
     auto Facts = FactMgr.getFacts(Block);
     if constexpr (isForward()) {
       for (const Fact *F : Facts) {
         State = transferFact(State, F);
-        PointToState[F->getID().Value] = State;
+        if (D->isStateQueried(*F))
+          PointToState[F->getID().Value] = State;
       }
     } else {
       for (const Fact *F : llvm::reverse(Facts)) {
         // In backward analysis, capture the state before applying the fact.
-        PointToState[F->getID().Value] = State;
+        if (D->isStateQueried(*F))
+          PointToState[F->getID().Value] = State;
         State = transferFact(State, F);
       }
     }
@@ -207,6 +214,8 @@ private:
 
 public:
   Lattice transferAtBlockExit(Lattice In) { return In; }
+
+  bool isStateQueried(const Fact &) const { return true; }
 
   Lattice transfer(Lattice In, const IssueFact &) { return In; }
   Lattice transfer(Lattice In, const ExpireFact &) { return In; }
