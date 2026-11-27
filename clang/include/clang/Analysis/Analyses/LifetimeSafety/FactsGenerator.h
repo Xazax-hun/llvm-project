@@ -333,6 +333,10 @@ private:
   llvm::DenseMap<const VarDecl *,
                  llvm::SmallVector<const MaterializeTemporaryExpr *, 1>>
       ExtendedTemporaries;
+  /// The origin nodes of the accessed fields of a class and its bases, for
+  /// handleImplicitObjectFieldUses.
+  llvm::DenseMap<const CXXRecordDecl *, llvm::SmallVector<OriginNode *>>
+      ImplicitObjectFieldNodes;
   const CFGBlock *CurrentBlock;
   /// Global "container of indirection" variables already flagged at a use in the
   /// current function (handleGlobalContainerOfIndirectionUse), so a global used

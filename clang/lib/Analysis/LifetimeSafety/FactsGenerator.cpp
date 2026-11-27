@@ -3600,21 +3600,27 @@ void FactsGenerator::handleImplicitObjectFieldUses(const Expr *Call,
   if (!ClassDecl)
     return;
 
-  // The class's own fields first, then those of its bases.
-  const auto UseFields = [&](const CXXRecordDecl *RD) {
-    for (const auto *Field : FactMgr.getOriginMgr().fieldsOf(RD))
-      if (FactMgr.getOriginMgr().isAccessedField(Field))
-        if (auto *FieldNode = getOriginNode(*Field))
-          CurrentBlockFacts.push_back(
-              FactMgr.createFact<UseFact>(Call, FieldNode));
-  };
+  // The class's own fields first, then those of its bases. Walking the fields
+  // visits every member declaration of the class and its bases, so do it once
+  // per class.
+  auto [It, Inserted] = ImplicitObjectFieldNodes.try_emplace(ClassDecl);
+  llvm::SmallVectorImpl<OriginNode *> &FieldNodes = It->second;
+  if (Inserted) {
+    const auto CollectFields = [&](const CXXRecordDecl *RD) {
+      for (const auto *Field : FactMgr.getOriginMgr().fieldsOf(RD))
+        if (FactMgr.getOriginMgr().isAccessedField(Field))
+          if (auto *FieldNode = getOriginNode(*Field))
+            FieldNodes.push_back(FieldNode);
+    };
+    CollectFields(ClassDecl);
+    ClassDecl->forallBases([&](const CXXRecordDecl *Base) {
+      CollectFields(Base);
+      return true;
+    });
+  }
 
-  UseFields(ClassDecl);
-
-  ClassDecl->forallBases([&](const CXXRecordDecl *Base) {
-    UseFields(Base);
-    return true;
-  });
+  for (OriginNode *FieldNode : FieldNodes)
+    CurrentBlockFacts.push_back(FactMgr.createFact<UseFact>(Call, FieldNode));
 }
 
 void FactsGenerator::handleLifetimeCaptureBy(const FunctionDecl *FD,
