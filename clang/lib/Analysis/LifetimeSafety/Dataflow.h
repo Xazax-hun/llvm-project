@@ -66,10 +66,12 @@ private:
   const CFG &Cfg;
   AnalysisDeclContext &AC;
 
-  /// The dataflow state before a basic block is processed.
-  llvm::DenseMap<const CFGBlock *, Lattice> InStates;
-  /// The dataflow state after a basic block is processed.
-  llvm::DenseMap<const CFGBlock *, Lattice> OutStates;
+  /// The dataflow state before each basic block is processed, indexed by block
+  /// ID. Unset for blocks that have not been reached yet.
+  llvm::SmallVector<std::optional<Lattice>> InStates;
+  /// The dataflow state after each basic block is processed, indexed by block
+  /// ID.
+  llvm::SmallVector<Lattice> OutStates;
   /// Dataflow state at each program point, indexed by Fact ID.
   /// In a forward analysis, this is the state after the Fact at that point has
   /// been applied, while in a backward analysis, it is the state before.
@@ -90,6 +92,8 @@ public:
     llvm::TimeTraceScope Time(D.getAnalysisName());
 
     PointToState.resize(FactMgr.getNumFacts());
+    InStates.resize(Cfg.getNumBlockIDs());
+    OutStates.resize(Cfg.getNumBlockIDs());
 
     using Worklist =
         std::conditional_t<Dir == Direction::Forward, ForwardDataflowWorklist,
@@ -97,7 +101,7 @@ public:
     Worklist W(Cfg, AC);
 
     const CFGBlock *Start = isForward() ? &Cfg.getEntry() : &Cfg.getExit();
-    InStates[Start] = D.getInitialState();
+    InStates[Start->getBlockID()] = D.getInitialState();
     W.enqueueBlock(Start);
     drainWorklist(D, W);
 
@@ -118,7 +122,7 @@ public:
       for (const CFGBlock *B : Cfg) {
         if (!B || getInState(B))
           continue;
-        InStates[B] = D.getInitialState();
+        InStates[B->getBlockID()] = D.getInitialState();
         W.enqueueBlock(B);
         AnySeeded = true;
       }
@@ -132,7 +136,7 @@ private:
     while (const CFGBlock *B = W.dequeue()) {
       Lattice StateIn = *getInState(B);
       Lattice StateOut = transferBlock(B, StateIn);
-      OutStates[B] = StateOut;
+      OutStates[B->getBlockID()] = StateOut;
       for (const CFGBlock *AdjacentB : isForward() ? B->succs() : B->preds()) {
         if (!AdjacentB)
           continue;
@@ -142,7 +146,7 @@ private:
         // Enqueue the adjacent block if its in-state has changed or if we have
         // never seen it.
         if (!OldInState || NewInState != *OldInState) {
-          InStates[AdjacentB] = NewInState;
+          InStates[AdjacentB->getBlockID()] = NewInState;
           W.enqueueBlock(AdjacentB);
         }
       }
@@ -155,13 +159,12 @@ protected:
   }
 
   std::optional<Lattice> getInState(const CFGBlock *B) const {
-    auto It = InStates.find(B);
-    if (It == InStates.end())
-      return std::nullopt;
-    return It->second;
+    return InStates[B->getBlockID()];
   }
 
-  Lattice getOutState(const CFGBlock *B) const { return OutStates.lookup(B); }
+  Lattice getOutState(const CFGBlock *B) const {
+    return OutStates[B->getBlockID()];
+  }
 
   void dump() const {
     const Derived *D = static_cast<const Derived *>(this);
