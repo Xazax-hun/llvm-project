@@ -26,6 +26,7 @@
 #include "llvm/Support/Debug.h"
 #include <cstdint>
 #include <optional>
+#include <type_traits>
 
 namespace clang::lifetimes::internal {
 
@@ -958,8 +959,13 @@ public:
     void *Mem = FactAllocator.Allocate<FactType>();
     FactType *Res = new (Mem) FactType(std::forward<Args>(args)...);
     Res->setID(NextFactID++);
+    if constexpr (std::is_same_v<FactType, MovedOriginFact>)
+      HasMovedOriginFacts = true;
     return Res;
   }
+
+  /// Whether any MovedOriginFact was created.
+  bool hasMovedOriginFacts() const { return HasMovedOriginFacts; }
 
   /// Copies `Elts` into the fact allocator so a fact can hold a stable
   /// reference to a variable-length list.
@@ -1017,6 +1023,7 @@ private:
   void computePersistentOrigins(const CFG &Cfg);
 
   FactID NextFactID{0};
+  bool HasMovedOriginFacts = false;
   llvm::BitVector PersistentOrigins;
   bool PersistentOriginsComputed = false;
   LoanManager LoanMgr;
