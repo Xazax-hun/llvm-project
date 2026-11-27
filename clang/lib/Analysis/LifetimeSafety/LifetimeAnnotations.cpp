@@ -1065,8 +1065,6 @@ bool isUniquePtrRelease(const CXXMethodDecl &MD) {
 
 bool isInvalidationMethod(const CXXMethodDecl &MD) {
   const CXXRecordDecl *RD = MD.getParent();
-  if (!isInStlNamespace(RD))
-    return false;
 
   // `pop_back` is excluded: it only invalidates references to the removed
   // element, not to other elements.
@@ -1148,7 +1146,8 @@ bool isInvalidationMethod(const CXXMethodDecl &MD) {
           .Case("unique_ptr", &UniquePtr)
           .Default(nullptr);
 
-  if (!InvalidatingMethods)
+  // Check the record name before the namespace, which walks the DeclContexts.
+  if (!InvalidatingMethods || !isInStlNamespace(RD))
     return false;
 
   // Handle Operators via OverloadedOperatorKind
@@ -1271,7 +1270,7 @@ bool destructsFirstArg(const FunctionDecl &FD) {
   if (takesOwnershipOfThis(FD))
     return true;
   // `std::destroy_at(p)` runs p's destructor.
-  if (isInStlNamespace(&FD) && getName(FD) == "destroy_at")
+  if (getName(FD) == "destroy_at" && isInStlNamespace(&FD))
     return true;
   // A direct call to an `operator delete` / `operator delete[]` deallocation
   // function frees its first argument (a `delete`/`delete[]` *expression* is a
@@ -1297,10 +1296,11 @@ bool destructsFirstArg(const FunctionDecl &FD) {
 }
 
 bool isStdCallableWrapperType(const CXXRecordDecl *RD) {
-  if (!RD || !isInStlNamespace(RD))
+  if (!RD)
     return false;
   StringRef Name = getName(*RD);
-  return Name == "function" || Name == "move_only_function";
+  return (Name == "function" || Name == "move_only_function") &&
+         isInStlNamespace(RD);
 }
 
 bool isStdReferenceCast(const FunctionDecl *FD) {
