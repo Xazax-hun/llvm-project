@@ -74,7 +74,7 @@ void LifetimeSafetyAnalysis::run() {
     return;
   }
 
-  FactMgr = std::make_unique<FactManager>(AC, Cfg, LSOpts.TUCache);
+  FactMgr = std::make_unique<FactManager>(AC, Cfg, Allocator, LSOpts.TUCache);
 
   FactsGenerator FactGen(*FactMgr, AC);
   FactGen.run();

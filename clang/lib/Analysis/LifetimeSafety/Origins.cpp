@@ -240,8 +240,9 @@ bool doesDeclHaveStorage(const ValueDecl *D) {
 }
 
 OriginManager::OriginManager(const AnalysisDeclContext &AC,
+                             llvm::BumpPtrAllocator &Alloc,
                              LifetimeSafetyTUCache *TUCache)
-    : AST(AC.getASTContext()), TUCache(TUCache) {
+    : AST(AC.getASTContext()), Allocator(Alloc), TUCache(TUCache) {
   runPreScan(AC);
   initializeThisOrigins(AC.getDecl());
 }
@@ -733,6 +734,7 @@ unsigned getIndirectionDepth(QualType QT, ASTContext &Ctx) {
   // A standalone manager has no body context; the question is purely about the
   // type. Reusing it keeps hasOrigins -- which decides depth 0 -- the same
   // predicate the analysis uses.
-  return internal::OriginManager(Ctx).getIndirectionDepth(QT);
+  llvm::BumpPtrAllocator Alloc;
+  return internal::OriginManager(Ctx, Alloc).getIndirectionDepth(QT);
 }
 } // namespace clang::lifetimes

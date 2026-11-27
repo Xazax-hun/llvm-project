@@ -18,6 +18,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/Analysis/Analyses/LifetimeSafety/Utils.h"
+#include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang::lifetimes::internal {
@@ -361,7 +362,7 @@ class LoanManager {
   using ProjectionCacheKey = std::pair<LoanID, PathElement>;
 
 public:
-  LoanManager() = default;
+  explicit LoanManager(llvm::BumpPtrAllocator &Alloc) : LoanAllocator(Alloc) {}
 
   Loan *createLoan(AccessPath Path, const Expr *IssueExpr) {
     void *Mem = LoanAllocator.Allocate<Loan>();
@@ -406,7 +407,7 @@ private:
   /// TODO(opt): Profile and evaluate the usefullness of small buffer
   /// optimisation.
   llvm::SmallVector<const Loan *> AllLoans;
-  llvm::BumpPtrAllocator LoanAllocator;
+  llvm::BumpPtrAllocator &LoanAllocator;
 };
 } // namespace clang::lifetimes::internal
 

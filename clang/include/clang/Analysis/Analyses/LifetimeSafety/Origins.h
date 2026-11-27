@@ -24,6 +24,7 @@
 #include "clang/Analysis/AnalysisDeclContext.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang::lifetimes::internal {
@@ -184,14 +185,15 @@ bool doesDeclHaveStorage(const ValueDecl *D);
 /// variables and expressions.
 class OriginManager {
 public:
-  explicit OriginManager(const AnalysisDeclContext &AC,
-                         LifetimeSafetyTUCache *TUCache = nullptr);
+  OriginManager(const AnalysisDeclContext &AC, llvm::BumpPtrAllocator &Alloc,
+                LifetimeSafetyTUCache *TUCache = nullptr);
 
   /// Lightweight constructor for standalone, type-structural queries (namely
   /// getIndirectionDepth) outside a function analysis: it sets up only what the
   /// origin-tree builder needs and skips the body pre-scan and `this`-origin
   /// setup. Do not use it to analyze a function.
-  explicit OriginManager(ASTContext &Ctx) : AST(Ctx) {}
+  OriginManager(ASTContext &Ctx, llvm::BumpPtrAllocator &Alloc)
+      : AST(Ctx), Allocator(Alloc) {}
 
   /// Gets or creates the OriginNode for a given ValueDecl.
   ///
@@ -339,7 +341,7 @@ private:
   /// TODO(opt): Profile and evaluate the usefulness of small buffer
   /// optimisation.
   llvm::SmallVector<Origin> AllOrigins;
-  llvm::BumpPtrAllocator Allocator;
+  llvm::BumpPtrAllocator &Allocator;
   llvm::DenseMap<const clang::ValueDecl *, OriginNode *> DeclToNode;
   /// The values of DeclToNode, for isStableStorageOrigin's membership test.
   llvm::DenseSet<const OriginNode *> DeclAnchoredNodes;

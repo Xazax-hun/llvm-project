@@ -932,8 +932,10 @@ public:
 class FactManager {
 public:
   FactManager(const AnalysisDeclContext &AC, const CFG &Cfg,
+              llvm::BumpPtrAllocator &Alloc,
               LifetimeSafetyTUCache *TUCache = nullptr)
-      : OriginMgr(AC, TUCache), TUCache(TUCache) {
+      : LoanMgr(Alloc), OriginMgr(AC, Alloc, TUCache), FactAllocator(Alloc),
+        TUCache(TUCache) {
     BlockToFacts.resize(Cfg.getNumBlockIDs());
   }
 
@@ -1030,7 +1032,7 @@ private:
   OriginManager OriginMgr;
   /// Facts for each CFG block, indexed by block ID.
   llvm::SmallVector<llvm::SmallVector<const Fact *>> BlockToFacts;
-  llvm::BumpPtrAllocator FactAllocator;
+  llvm::BumpPtrAllocator &FactAllocator;
   UnknownOwnershipCache LocalUnknownOwnership;
   LifetimeSafetyTUCache *TUCache;
 };
